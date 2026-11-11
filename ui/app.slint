@@ -67,10 +67,11 @@ component NavButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
 
-    min-width: 84px;
-    preferred-width: 140px;
+    min-width: 120px;
+    preferred-width: 190px;
     horizontal-stretch: 0;
-    height: 56px;
+    // No fixed height: stretches to the row, so it lines up with the
+    // global knob columns next to it.
     border-radius: 10px;
     border-width: 1px;
     border-color: Theme.border;

@@ -5,7 +5,9 @@ edition = "2021"
 description = "Minimalist TONEX preset switcher over USB-MIDI"
 
 [dependencies]
-slint = "1"
+# unstable-winit-030: BackendSelector window-attributes hook, used to set the
+# Wayland app_id / X11 WM_CLASS (pinned to ~1.18 because that API is unstable).
+slint = { version = "~1.18", features = ["unstable-winit-030"] }
 midir = "0.10"
 serial2 = "0.2.39"
 

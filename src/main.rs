@@ -573,7 +573,29 @@ fn show_disconnected(ui: &AppWindow) {
     ui.set_status_text(STATUS_DOWN.into());
 }
 
+/// Desktop-entry id (`tx-open-studio.desktop`). GNOME on Wayland matches the
+/// window's app_id against .desktop basenames to pick the dock/taskbar icon;
+/// X11 shells use WM_CLASS the same way.
+const APP_ID: &str = "tx-open-studio";
+
+/// Selects the winit backend with a hook that names the window `APP_ID`
+/// (Wayland app_id and X11 WM_CLASS). Must run before the first window.
+fn select_backend() -> Result<(), slint::PlatformError> {
+    slint::BackendSelector::new()
+        .with_winit_window_attributes_hook(|attrs| {
+            #[cfg(target_os = "linux")]
+            let attrs = {
+                use slint::winit_030::winit::platform::{wayland, x11};
+                let attrs = wayland::WindowAttributesExtWayland::with_name(attrs, APP_ID, APP_ID);
+                x11::WindowAttributesExtX11::with_name(attrs, APP_ID, APP_ID)
+            };
+            attrs
+        })
+        .select()
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    select_backend()?;
     let ui = AppWindow::new()?;
     let engine = MidiEngine::default();
     let ctx = SyncCtx::default();

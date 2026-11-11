@@ -234,63 +234,6 @@ component Knob inherits VerticalLayout {
     }
 }
 
-// Effect tile (stub): title, state line and a status dot.
-component EffectTile inherits Rectangle {
-    in property <string> title;
-    in property <string> state;
-    in property <bool> on: true;
-    in property <color> fill: Theme.surface;
-    in property <color> outline: Theme.border;
-    in property <length> outline-width: 1px;
-    in property <bool> show-dot: true;
-
-    border-radius: 12px;
-    background: ta.has-hover ? root.fill.brighter(0.12) : root.fill;
-    border-color: root.outline;
-    border-width: root.outline-width;
-    min-height: 80px;
-    // Same preferred width for every tile so equal stretch gives equal columns.
-    min-width: 60px;
-    preferred-width: 100px;
-
-    animate background { duration: 90ms; }
-
-    VerticalLayout {
-        alignment: center;
-        spacing: 4px;
-
-        Text {
-            text: root.title;
-            color: Theme.ink;
-            font-size: 16px;
-            font-weight: 700;
-            horizontal-alignment: center;
-            overflow: elide;
-            wrap: no-wrap;
-        }
-        Text {
-            text: root.state;
-            color: root.on ? Theme.ink : Theme.muted;
-            font-size: 13px;
-            horizontal-alignment: center;
-        }
-    }
-
-    Rectangle {
-        x: parent.width - 22px;
-        y: 12px;
-        width: 10px;
-        height: 10px;
-        visible: root.show-dot;
-        border-radius: 5px;
-        background: root.on ? Theme.ok : Theme.muted.with-alpha(0.5);
-    }
-
-    ta := TouchArea {
-        mouse-cursor: pointer;
-    }
-}
-
 export component AppWindow inherits Window {
     title: "TX Open Studio";
     preferred-width: 960px;
@@ -536,74 +479,6 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Placeholder grid until effect state reading is implemented.
-                VerticalLayout {
-                    vertical-stretch: 1;
-                    spacing: 12px;
-
-                    HorizontalLayout {
-                        spacing: 12px;
-                        vertical-stretch: 1;
-                        EffectTile {
-                            horizontal-stretch: 1;
-                            title: "Gate";
-                            state: "On";
-                            fill: #7843a0;
-                            outline: #7843a0;
-                        }
-                        EffectTile {
-                            horizontal-stretch: 1;
-                            title: "Amp";
-                            state: "On";
-                        }
-                        EffectTile {
-                            horizontal-stretch: 1;
-                            title: "Cab";
-                            state: "On";
-                        }
-                        EffectTile {
-                            horizontal-stretch: 1;
-                            title: "Tempo";
-                            state: "120 BPM";
-                            show-dot: false;
-                        }
-                    }
-                    HorizontalLayout {
-                        spacing: 12px;
-                        vertical-stretch: 1;
-                        EffectTile {
-                            horizontal-stretch: 1;
-                            title: "Comp";
-                            state: "Off";
-                            on: false;
-                            outline: #b52f70;
-                            outline-width: 2px;
-                        }
-                        EffectTile {
-                            horizontal-stretch: 1;
-                            title: "Chorus";
-                            state: "Off";
-                            on: false;
-                            outline: #947000;
-                            outline-width: 2px;
-                        }
-                        EffectTile {
-                            horizontal-stretch: 1;
-                            title: "Digital";
-                            state: "On";
-                            fill: #287342;
-                            outline: #287342;
-                        }
-                        EffectTile {
-                            horizontal-stretch: 1;
-                            title: "Spring 1";
-                            state: "On";
-                            fill: #2869ad;
-                            outline: #2869ad;
-                        }
-                    }
-                }
-
                 // Amplifier card (stub values until amp state reading is implemented).
                 Rectangle {
                     vertical-stretch: 0;
@@ -657,6 +532,11 @@ export component AppWindow inherits Window {
                             Knob { label: "Treble"; value: 6.2; }
                         }
                     }
+                }
+
+                // Packs the right column's cards to the top.
+                Rectangle {
+                    vertical-stretch: 1;
                 }
             }
         }

@@ -222,6 +222,9 @@ const GLOBAL_WRITE_HEADER: [u8; 11] = [
 ];
 
 // Message types (header value after `B9 03`), big pedal.
+/// State (reply to request-state, also pushed): body starts with the
+/// current preset index.
+const TYPE_STATE: u16 = 0x0201;
 const TYPE_PRESET_DETAILS: u16 = 0x0204;
 const TYPE_GLOBAL_CONFIG: u16 = 0x0206;
 const TYPE_PARAM_CHANGED: u16 = 0x0207;
@@ -375,6 +378,41 @@ fn check_range(name: &str, v: f32, min: f32, max: f32) -> Result<(), String> {
 fn knob_value(params: &[u8], index: usize, name: &str) -> Result<f32, String> {
     let v = param_at(params, index)?;
     knob_from_pedal(v).ok_or_else(|| format!("unexpected layout: {name} = {v} outside 0..=10"))
+}
+
+/// Current preset index from a state message (type 0x0201).
+///
+/// Builty `usb_tonex_parse_state` (big pedal) reads it as `unframed[9]`,
+/// i.e. the first body byte after a header `B9 03 81 01 02 <size> 80 10 03`
+/// with a 1-byte size. Here the header is walked value by value instead of
+/// assuming fixed offsets, and the first body value is decoded with the
+/// normal encoding (so `80 <idx> 00` for presets >= 128 works too).
+fn extract_state_preset(payload: &[u8]) -> Option<u8> {
+    if frame_type(payload)? != TYPE_STATE {
+        return None;
+    }
+    let mut pos = 2;
+    for _ in 0..3 {
+        read_u16_value(payload, &mut pos)?;
+    }
+    let idx = read_u16_value(payload, &mut pos)?;
+    u8::try_from(idx).ok().filter(|&i| usize::from(i) < PRESET_COUNT)
+}
+
+/// Emits `CurrentPreset` for a state payload, or logs why it couldn't.
+fn report_state(state: Option<&[u8]>, on_event: &impl Fn(Event), debug: bool) {
+    match state {
+        Some(p) => match extract_state_preset(p) {
+            Some(idx) => on_event(Event::CurrentPreset(idx)),
+            None => eprintln!("TONEX: state message without a readable preset index: {}", hex(&p[..p.len().min(48)])),
+        },
+        None => eprintln!("TONEX: no state reply in handshake; current preset unknown"),
+    }
+    if debug {
+        if let Some(p) = state {
+            eprintln!("TONEX serial: state ({} B): {}", p.len(), hex(&p[..p.len().min(48)]));
+        }
+    }
 }
 
 /// Global levels, in dB.
@@ -671,6 +709,9 @@ pub enum Event {
     /// A parameter changed on the pedal (e.g. a physical knob was turned).
     /// `index` is the preset-parameter index (see `AmpKnob::param_index`).
     ParamChanged { index: usize, value: f32 },
+    /// The pedal's current preset (0-based), from a state message: the
+    /// handshake's request-state reply, or a pushed state update.
+    CurrentPreset(u8),
     /// Global config (reply to `request_globals`, or pushed by the pedal).
     Globals(Result<Globals, String>),
     /// The pedal switched preset by itself (footswitch); carries the new
@@ -752,8 +793,9 @@ impl Pedal {
         std::thread::spawn(move || {
             let _guard = port_lock();
             let link = match open_any() {
-                Ok((link, path)) => {
+                Ok((link, path, state)) => {
                     on_event(Event::Connected(path.display().to_string()));
+                    report_state(state.as_deref(), &on_event, debug_enabled());
                     link
                 }
                 Err(e) => {
@@ -810,7 +852,9 @@ impl Pedal {
 }
 
 /// Opens the first candidate port that answers the handshake.
-fn open_any() -> Result<(Link, PathBuf), String> {
+/// Opens the first candidate port that answers the handshake. Also returns
+/// the state reply (if one arrived) for the current preset.
+fn open_any() -> Result<(Link, PathBuf, Option<Vec<u8>>), String> {
     let ports = candidate_ports();
     if ports.is_empty() {
         return Err("no /dev/ttyACM* port found".into());
@@ -818,14 +862,14 @@ fn open_any() -> Result<(Link, PathBuf), String> {
     let mut errors = Vec::new();
     for path in ports {
         match open_pedal(&path, Instant::now() + HANDSHAKE_TIMEOUT * 2) {
-            Ok(link) => return Ok((link, path)),
+            Ok((link, state)) => return Ok((link, path, state)),
             Err(e) => errors.push(format!("{}: {e}", path.display())),
         }
     }
     Err(errors.join("; "))
 }
 
-fn open_pedal(path: &Path, deadline: Instant) -> Result<Link, String> {
+fn open_pedal(path: &Path, deadline: Instant) -> Result<(Link, Option<Vec<u8>>), String> {
     let mut link = Link::open(path)?;
 
     // Handshake. Replies are not strictly required, but the pedal expects
@@ -836,8 +880,16 @@ fn open_pedal(path: &Path, deadline: Instant) -> Result<Link, String> {
         return Err("no reply to hello (not a TONEX Pedal?)".into());
     }
     link.send(&REQUEST_STATE_CMD)?;
-    let _ = link.read_frame(HANDSHAKE_TIMEOUT, deadline)?;
-    Ok(link)
+    // Keep the state reply (type 0x0201): it carries the current preset.
+    let until = (Instant::now() + HANDSHAKE_TIMEOUT).min(deadline);
+    let mut state = None;
+    while let Some(payload) = link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
+        if frame_type(&payload) == Some(TYPE_STATE) {
+            state = Some(payload);
+            break;
+        }
+    }
+    Ok((link, state))
 }
 
 struct Session<'a, F: Fn(Event)> {
@@ -1003,6 +1055,11 @@ impl<F: Fn(Event)> Session<'_, F> {
             }
             self.globals_seen = self.globals_seen.wrapping_add(1);
             (self.on_event)(Event::Globals(result));
+            return false;
+        }
+        if ty == Some(TYPE_STATE) {
+            // Pushed state update (e.g. preset changed on the pedal).
+            report_state(Some(payload), self.on_event, self.debug);
             return false;
         }
         if ty == Some(TYPE_PARAM_CHANGED) {
@@ -1201,6 +1258,21 @@ mod tests {
         p.extend_from_slice(&[0x80, 0x10, 0x03]);
         p.extend_from_slice(&body);
         p
+    }
+
+    #[test]
+    fn extracts_state_preset() {
+        // Builty's layout: preset index is unframed[9].
+        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x01, 0x80, 0x10, 0x03, 63];
+        assert_eq!(extract_state_preset(&p), Some(63));
+        // Preset >= 128 encoded as u16 `80 lo hi`; 2-byte size field.
+        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x82, 0x03, 0x00, 0x80, 0x10, 0x03, 0x80, 140, 0x00];
+        assert_eq!(extract_state_preset(&p), Some(140));
+        // Out of range / wrong type.
+        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x03, 0x80, 0x10, 0x03, 0x80, 200, 0x00];
+        assert_eq!(extract_state_preset(&p), None);
+        let p = [0xB9, 0x03, 0x81, 0x04, 0x02, 0x01, 0x80, 0x10, 0x03, 5];
+        assert_eq!(extract_state_preset(&p), None);
     }
 
     #[test]

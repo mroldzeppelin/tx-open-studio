@@ -12,6 +12,7 @@ slint::include_modules!();
 
 const MIN_PRESET: i32 = 1;
 const MAX_PRESET: i32 = 150;
+/// Shown only until the pedal's state reply tells us its current preset.
 const DEFAULT_PRESET: i32 = 43;
 const CLIENT_NAME: &str = "tx-open-studio";
 const STATUS_DOWN: &str = "Pedal not connected";
@@ -228,6 +229,20 @@ impl PresetNames {
 fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
     ui.set_preset(preset);
     ui.set_preset_name(names.name_for(preset).into());
+    // A (re)loaded preset starts clean.
+    ui.set_preset_dirty(false);
+}
+
+/// Marks the current preset as edited ("Changed" badge).
+///
+/// Set when the user changes a preset parameter in the app (at send time,
+/// not via the pedal's echo) and when the pedal reports a parameter change
+/// that isn't an echo of ours. Not set by globals, preset switching or
+/// parameter reads; cleared by `show_preset` and on Reconnect.
+/// Limits: edits made on the pedal while the app wasn't running, and pedal
+/// edits to a control we changed within the last `ECHO_GUARD`, go unseen.
+fn mark_dirty(ui: &AppWindow) {
+    ui.set_preset_dirty(true);
 }
 
 /// State shared between the UI callbacks and the serial event handler
@@ -339,6 +354,15 @@ impl SyncCtx {
                 }
             }
             Event::Globals(Err(e)) => eprintln!("TONEX global config read failed: {e}"),
+            Event::CurrentPreset(preset_idx) => {
+                // Show what the pedal is on, without sending MIDI back.
+                let preset = i32::from(preset_idx) + 1;
+                if preset != ui.get_preset() {
+                    show_preset(ui, &self.names, preset);
+                    self.amp().clear();
+                    self.request_amp_params(preset);
+                }
+            }
             Event::PresetChanged { preset_idx, params, raw } => {
                 let preset = i32::from(preset_idx) + 1;
                 if preset != ui.get_preset() {
@@ -371,6 +395,7 @@ impl SyncCtx {
         match self.with_serial(|p| p.set_param(index, value)) {
             Ok(()) => {
                 amp.fx.wrote(index, value);
+                mark_dirty(ui);
                 // A new model shows that model's own stored values.
                 if control.is_model() {
                     fx::refresh(ui, &amp.fx, control.card());
@@ -388,8 +413,10 @@ impl SyncCtx {
         {
             let mut amp = self.amp();
             if fx::card_of(index).is_some() {
+                // None = echo of our own recent write (already counted).
                 if let Some(card) = amp.fx.pedal_changed(index, value) {
                     fx::refresh(ui, &amp.fx, card);
+                    mark_dirty(ui);
                 }
                 return;
             }
@@ -397,20 +424,29 @@ impl SyncCtx {
         if index == tonex_serial::AMP_ENABLE_PARAM {
             if !self.amp().enable_recent() {
                 ui.set_amp_enabled(value != 0.0);
+                mark_dirty(ui);
             }
             return;
         }
-        let Some(knob) = AmpKnob::from_param_index(index) else { return };
+        let Some(knob) = AmpKnob::from_param_index(index) else {
+            // A preset parameter the app doesn't show (gate, comp, cab, ...)
+            // changed on the pedal: still an edit of the preset.
+            if index < tonex_serial::PARAM_COUNT {
+                mark_dirty(ui);
+            }
+            return;
+        };
         let Some(v) = tonex_serial::knob_from_pedal(value) else {
             eprintln!("TONEX: param {index} value {value} out of range, ignored");
             return;
         };
         let mut amp = self.amp();
         if ui.get_knob_active() || amp.knob_recent(knob) {
-            return;
+            return; // our own edit in progress / its echo: already counted
         }
         set_knob(ui, knob, v);
         amp.last_cc[knob as usize] = Some(knob_to_cc(v));
+        mark_dirty(ui);
     }
 }
 
@@ -478,7 +514,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             }
             match engine.send_cc(knob_cc(knob), cc_value) {
-                Ok(()) => amp.last_cc[knob as usize] = Some(cc_value),
+                Ok(()) => {
+                    amp.last_cc[knob as usize] = Some(cc_value);
+                    mark_dirty(&ui);
+                }
                 Err(e) => {
                     eprintln!("MIDI send failed: {e}");
                     show_disconnected(&ui);
@@ -494,10 +533,13 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(ui) = ui_weak.upgrade() else { return };
             ctx.amp().enable_touched = Some(Instant::now());
             let value = if on { 1.0 } else { 0.0 };
-            if let Err(e) = ctx.with_serial(|p| p.set_param(tonex_serial::AMP_ENABLE_PARAM, value)) {
-                // No CC exists for amp on/off, so serial is the only way.
-                eprintln!("TONEX amp enable write failed: {e}");
-                ui.set_amp_enabled(!on);
+            match ctx.with_serial(|p| p.set_param(tonex_serial::AMP_ENABLE_PARAM, value)) {
+                Ok(()) => mark_dirty(&ui),
+                Err(e) => {
+                    // No CC exists for amp on/off, so serial is the only way.
+                    eprintln!("TONEX amp enable write failed: {e}");
+                    ui.set_amp_enabled(!on);
+                }
             }
         });
     }
@@ -540,16 +582,12 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_reconnect(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
             ctx.amp().clear();
+            ui.set_preset_dirty(false);
             ctx.start_serial(ui_weak.clone(), ui.get_preset());
             match engine.try_connect() {
-                Ok(name) => {
-                    show_connected(&ui, &name);
-                    // Re-sync the pedal with what the UI shows.
-                    if let Err(e) = engine.send_preset(ui.get_preset()) {
-                        eprintln!("MIDI send failed: {e}");
-                        show_disconnected(&ui);
-                    }
-                }
+                // No program change here: the pedal's current preset wins
+                // and arrives from the serial state reply (CurrentPreset).
+                Ok(name) => show_connected(&ui, &name),
                 Err(e) => {
                     eprintln!("MIDI connect failed: {e}");
                     show_disconnected(&ui);

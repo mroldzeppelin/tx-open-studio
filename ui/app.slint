@@ -19,6 +19,8 @@ export global Theme {
     out property <color> accent-hover: #4b8b5e;
     out property <color> ok: #86b778;
     out property <color> error: #c05b4d;
+    // Muted warm yellow for "modified" markers.
+    out property <color> changed: #d4a72c;
 }
 
 // Hand-made button: std-widgets don't follow the custom palette well.
@@ -356,6 +358,8 @@ export component AppWindow inherits Window {
     in property <[string]> preset-names;
     in property <bool> connected: false;
     in property <string> status-text: "Pedal not connected";
+    // Current preset modified since it was loaded (set/cleared from Rust).
+    in property <bool> preset-dirty: false;
 
     // Amp knobs, 0..10. Set from Rust when read from the pedal.
     in-out property <float> amp-gain: 5;
@@ -570,6 +574,25 @@ export component AppWindow inherits Window {
                                     Text {
                                         text: "Active";
                                         color: Theme.secondary-ink;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            // Current preset edited since it was loaded.
+                            if root.preset-dirty: Rectangle {
+                                background: Theme.changed.with-alpha(0.12);
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: Theme.changed.with-alpha(0.7);
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-top: 3px;
+                                    padding-bottom: 3px;
+                                    Text {
+                                        text: "Changed";
+                                        color: Theme.changed;
                                         font-size: 11px;
                                         vertical-alignment: center;
                                     }

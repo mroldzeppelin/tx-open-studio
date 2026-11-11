@@ -165,12 +165,14 @@ component NavButton inherits Rectangle {
 // value in `step` increments (a full sweep is ~150 px). `edited` fires only
 // for user drags, not when the value is set programmatically (e.g. read back
 // from the pedal). Shown with `decimals` (0 or 1) and a `unit` suffix.
+// Double-click resets to `default-value` (sent like a normal edit).
 component Knob inherits VerticalLayout {
     in property <string> label;
     in-out property <float> value: 5;
     in property <float> min-value: 0;
     in property <float> max-value: 10;
     in property <float> step: 0.1;
+    in property <float> default-value: 5;
     in property <int> decimals: 1;
     in property <string> unit;
     in property <length> size: 48px;
@@ -228,6 +230,10 @@ component Knob inherits VerticalLayout {
                     if (event.kind == PointerEventKind.down) {
                         root.drag-start = root.value;
                     }
+                }
+                double-clicked => {
+                    root.value = root.default-value;
+                    root.edited(root.default-value);
                 }
                 moved => {
                     if (self.pressed) {
@@ -886,6 +892,7 @@ export component AppWindow inherits Window {
                                     step: 1;
                                     decimals: 0;
                                     unit: " ms";
+                                    default-value: 500;
                                     value <=> root.dly-time;
                                     edited(v) => { root.fx-changed(5, v); }
                                 }
@@ -897,6 +904,7 @@ export component AppWindow inherits Window {
                                     step: 1;
                                     decimals: 0;
                                     unit: "%";
+                                    default-value: 0;
                                     value <=> root.dly-feedback;
                                     edited(v) => { root.fx-changed(6, v); }
                                 }
@@ -908,6 +916,7 @@ export component AppWindow inherits Window {
                                     step: 1;
                                     decimals: 0;
                                     unit: "%";
+                                    default-value: 0;
                                     value <=> root.dly-mix;
                                     edited(v) => { root.fx-changed(8, v); }
                                 }
@@ -963,6 +972,7 @@ export component AppWindow inherits Window {
                                     min-value: 0;
                                     max-value: 10;
                                     step: 0.1;
+                                    default-value: 5;
                                     value <=> root.rvb-time;
                                     edited(v) => { root.fx-changed(13, v); }
                                 }
@@ -974,6 +984,7 @@ export component AppWindow inherits Window {
                                     step: 1;
                                     decimals: 0;
                                     unit: " ms";
+                                    default-value: 0;
                                     value <=> root.rvb-predelay;
                                     edited(v) => { root.fx-changed(14, v); }
                                 }
@@ -985,6 +996,7 @@ export component AppWindow inherits Window {
                                     step: 1;
                                     decimals: 0;
                                     unit: "%";
+                                    default-value: 0;
                                     value <=> root.rvb-mix;
                                     edited(v) => { root.fx-changed(16, v); }
                                 }
@@ -994,6 +1006,7 @@ export component AppWindow inherits Window {
                                     min-value: -10;
                                     max-value: 10;
                                     step: 0.1;
+                                    default-value: 0;
                                     value <=> root.rvb-color;
                                     edited(v) => { root.fx-changed(15, v); }
                                 }

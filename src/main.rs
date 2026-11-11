@@ -1,3 +1,6 @@
+mod tonex_serial;
+
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use midir::{MidiOutput, MidiOutputConnection};
@@ -90,6 +93,47 @@ fn bank_info(preset_num: i32) -> String {
     format!("BANK {} · PC {}", bank, pc)
 }
 
+/// Preset names read from the pedal over USB serial (index 0 = preset 1).
+#[derive(Clone, Default)]
+struct PresetNames {
+    names: Arc<Mutex<Vec<String>>>,
+    loading: Arc<AtomicBool>,
+}
+
+impl PresetNames {
+    fn name_for(&self, preset_num: i32) -> String {
+        let names = self.names.lock().unwrap_or_else(|e| e.into_inner());
+        usize::try_from(preset_num - 1)
+            .ok()
+            .and_then(|i| names.get(i).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Reads names in a background thread and pushes the current preset's
+    /// name into the UI. A no-op while a previous read is still running.
+    fn refresh(&self, ui: slint::Weak<AppWindow>) {
+        if self.loading.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let this = self.clone();
+        std::thread::spawn(move || {
+            let result = tonex_serial::read_preset_names();
+            this.loading.store(false, Ordering::SeqCst);
+            let names = match result {
+                Ok(names) => names,
+                Err(e) => {
+                    eprintln!("TONEX preset names read failed: {e}");
+                    Vec::new()
+                }
+            };
+            *this.names.lock().unwrap_or_else(|e| e.into_inner()) = names;
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_preset_name(this.name_for(ui.get_preset()).into());
+            });
+        });
+    }
+}
+
 fn show_connected(ui: &AppWindow, port_name: &str) {
     ui.set_connected(true);
     ui.set_status_text(format!("Подключено: {}", port_name).into());
@@ -103,6 +147,7 @@ fn show_disconnected(ui: &AppWindow) {
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     let engine = MidiEngine::default();
+    let names = PresetNames::default();
 
     ui.set_preset(DEFAULT_PRESET);
     ui.set_bank_info(bank_info(DEFAULT_PRESET).into());
@@ -114,16 +159,19 @@ fn main() -> Result<(), slint::PlatformError> {
             show_disconnected(&ui);
         }
     }
+    names.refresh(ui.as_weak());
 
     {
         let ui_weak = ui.as_weak();
         let engine = engine.clone();
+        let names = names.clone();
         ui.on_preset_changed(move |requested| {
             let Some(ui) = ui_weak.upgrade() else { return };
             let preset = clamp_preset(requested);
 
             ui.set_preset(preset);
             ui.set_bank_info(bank_info(preset).into());
+            ui.set_preset_name(names.name_for(preset).into());
 
             if let Err(e) = engine.send_preset(preset) {
                 eprintln!("MIDI send failed: {e}");
@@ -135,8 +183,10 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let engine = engine.clone();
+        let names = names.clone();
         ui.on_reconnect(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
+            names.refresh(ui_weak.clone());
             match engine.try_connect() {
                 Ok(name) => {
                     show_connected(&ui, &name);

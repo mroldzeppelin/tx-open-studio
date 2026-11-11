@@ -68,6 +68,7 @@ export component AppWindow inherits Window {
 
     in-out property <int> preset: 43;
     in property <string> bank-info: "BANK 0 · PC 42";
+    in property <string> preset-name;
     in property <bool> connected: false;
     in property <string> status-text: "Педаль не подключена";
 
@@ -135,6 +136,16 @@ export component AppWindow inherits Window {
                         font-weight: 700;
                         font-family: "monospace";
                         horizontal-alignment: center;
+                    }
+                    // Preset name read over USB serial; empty when unknown.
+                    Text {
+                        text: root.preset-name;
+                        color: Theme.ink;
+                        font-size: 20px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                        wrap: no-wrap;
                     }
                     Text {
                         text: root.bank-info;

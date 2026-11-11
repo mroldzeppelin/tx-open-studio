@@ -378,3 +378,124 @@ mod tests {
         assert_eq!(m.pedal_changed(20, 5.0), None); // amp param: not ours
     }
 }
+
+/// Compares the current preset's parameter values with the values it was
+/// loaded with, for the "Changed" badge (strict: turning a control back to
+/// its loaded value clears it).
+///
+/// The baseline is taken from the first full read after a preset load
+/// (startup, preset change, footswitch push, Reconnect); later reads of the
+/// same preset only refresh `current`.
+#[derive(Default)]
+pub struct PresetDiff {
+    baseline: Vec<f32>,
+    current: Vec<f32>,
+}
+
+/// Largest difference treated as "unchanged" for parameter `index`: half the
+/// UI step for displayed controls (amp knobs also absorb the 1/127 CC
+/// quantization: a value sent as CC comes back as e.g. 6.929 for 6.9), and a
+/// tiny relative tolerance for everything else (switches, selectors and
+/// parameters the app doesn't show).
+fn tolerance(index: usize, baseline: f32) -> f32 {
+    use crate::tonex_serial::AmpKnob;
+    use FxControl::*;
+    if AmpKnob::from_param_index(index).is_some() {
+        return 0.05;
+    }
+    let per_model = |c: FxControl| {
+        (0..DELAY_MODELS).any(|d| (0..REVERB_MODELS).any(|r| c.param_index(d, r) == index))
+    };
+    if [ReverbTime, ReverbColor].into_iter().any(per_model) {
+        0.05
+    } else if [DelayTime, DelayFeedback, DelayMix, ReverbPredelay, ReverbMix].into_iter().any(per_model) {
+        0.5
+    } else {
+        1e-3 * baseline.abs().max(1.0)
+    }
+}
+
+impl PresetDiff {
+    /// A full parameter array read from the pedal. Becomes the baseline if
+    /// none is set yet (preset just loaded), else only updates `current`.
+    pub fn load(&mut self, raw: &[f32]) {
+        if raw.is_empty() {
+            return;
+        }
+        if self.baseline.is_empty() {
+            self.baseline = raw.to_vec();
+        }
+        self.current = raw.to_vec();
+    }
+
+    /// One parameter changed (our write or a pedal report).
+    pub fn set(&mut self, index: usize, value: f32) {
+        if let Some(v) = self.current.get_mut(index) {
+            *v = value;
+        }
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.baseline
+            .iter()
+            .zip(&self.current)
+            .enumerate()
+            .any(|(i, (&b, &c))| (c - b).abs() > tolerance(i, b))
+    }
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+    use crate::tonex_serial::AmpKnob;
+
+    fn base() -> Vec<f32> {
+        let mut raw = vec![0.0f32; PARAM_COUNT];
+        raw[AmpKnob::Gain.param_index()] = 6.9;
+        raw[FxControl::DelayTime.param_index(0, 0)] = 320.0;
+        raw[12] = 300.0; // EQ bass freq, not shown in the app
+        raw
+    }
+
+    #[test]
+    fn clean_after_load_and_after_return_to_baseline() {
+        let mut d = PresetDiff::default();
+        assert!(!d.dirty());
+        d.load(&base());
+        assert!(!d.dirty());
+        let gain = AmpKnob::Gain.param_index();
+        d.set(gain, 7.5);
+        assert!(d.dirty());
+        // Back to 6.9 via CC: the pedal reports 88/127*10 = 6.929.
+        d.set(gain, 88.0 / 127.0 * 10.0);
+        assert!(!d.dirty());
+    }
+
+    #[test]
+    fn epsilon_per_param() {
+        let mut d = PresetDiff::default();
+        d.load(&base());
+        let time = FxControl::DelayTime.param_index(0, 0);
+        d.set(time, 320.3); // within half a ms step
+        assert!(!d.dirty());
+        d.set(time, 321.0);
+        assert!(d.dirty());
+        d.set(time, 320.0);
+        d.set(12, 300.0001); // float noise on a hidden param
+        assert!(!d.dirty());
+        d.set(12, 310.0);
+        assert!(d.dirty());
+    }
+
+    #[test]
+    fn reread_keeps_baseline() {
+        let mut d = PresetDiff::default();
+        d.load(&base());
+        let mut edited = base();
+        edited[FxControl::DelayMix.param_index(0, 0)] = 40.0;
+        d.load(&edited);
+        assert!(d.dirty());
+        d.load(&base());
+        assert!(!d.dirty());
+    }
+}

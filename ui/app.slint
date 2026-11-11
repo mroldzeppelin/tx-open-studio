@@ -1,0 +1,252 @@
+// TX Open Studio — preset switcher UI
+
+export global Theme {
+    out property <color> bg: #141b18;
+    out property <color> surface: #1d2721;
+    out property <color> surface-alt: #18211c;
+    out property <color> soft: #28352c;
+    out property <color> field: #202e25;
+    out property <color> hover: #2b3a2f;
+    out property <color> selected: #304934;
+    out property <color> border: #3a4b3e;
+    out property <color> selected-border: #86b778;
+    out property <color> muted: #a6b6a3;
+    out property <color> ink: #edf3e9;
+    out property <color> secondary-ink: #bed4b2;
+    out property <color> accent: #3e7750;
+    out property <color> accent-hover: #4b8b5e;
+    out property <color> ok: #86b778;
+    out property <color> error: #c05b4d;
+}
+
+// Hand-made button: std-widgets don't follow the custom palette well.
+component StyledButton inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: 16px;
+    in property <int> font-weight: 600;
+    in property <bool> active: false;
+    in property <color> base-color: Theme.soft;
+    callback clicked();
+
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: root.active ? Theme.selected-border : Theme.border;
+    background: ta.pressed ? Theme.selected : (ta.has-hover ? Theme.hover : root.base-color);
+    min-height: 32px;
+    min-width: 40px;
+
+    animate background { duration: 90ms; }
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        color: root.active ? Theme.ink : Theme.secondary-ink;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "TX Open Studio";
+    preferred-width: 420px;
+    preferred-height: 560px;
+    min-width: 380px;
+    min-height: 520px;
+    background: Theme.bg;
+
+    in-out property <int> preset: 43;
+    in property <string> bank-info: "BANK 0 · PC 42";
+    in property <bool> connected: false;
+    in property <string> status-text: "Педаль не подключена";
+
+    callback preset-changed(int);
+    callback reconnect();
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        // Main content
+        VerticalLayout {
+            padding: 20px;
+            spacing: 16px;
+            vertical-stretch: 1;
+
+            // Header
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "TX Open Studio";
+                    color: Theme.ink;
+                    font-size: 20px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: "PRESETS";
+                    color: Theme.muted;
+                    font-size: 11px;
+                    font-weight: 600;
+                    letter-spacing: 1.5px;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Preset card
+            Rectangle {
+                vertical-stretch: 1;
+                background: Theme.surface;
+                border-color: Theme.border;
+                border-width: 1px;
+                border-radius: 12px;
+
+                VerticalLayout {
+                    alignment: center;
+                    padding: 16px;
+                    spacing: 4px;
+
+                    Text {
+                        text: "PRESET";
+                        color: Theme.muted;
+                        font-size: 12px;
+                        font-weight: 600;
+                        letter-spacing: 2px;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.preset;
+                        color: Theme.ink;
+                        font-size: 96px;
+                        font-weight: 700;
+                        font-family: "monospace";
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.bank-info;
+                        color: Theme.secondary-ink;
+                        font-size: 13px;
+                        letter-spacing: 1px;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // Prev / Next
+            HorizontalLayout {
+                spacing: 12px;
+                StyledButton {
+                    horizontal-stretch: 1;
+                    height: 56px;
+                    text: "← PREV";
+                    font-size: 18px;
+                    clicked => {
+                        root.preset-changed(root.preset - 1);
+                    }
+                }
+                StyledButton {
+                    horizontal-stretch: 1;
+                    height: 56px;
+                    text: "NEXT →";
+                    font-size: 18px;
+                    clicked => {
+                        root.preset-changed(root.preset + 1);
+                    }
+                }
+            }
+
+            // Quick jump
+            VerticalLayout {
+                spacing: 8px;
+                Text {
+                    text: "QUICK JUMP";
+                    color: Theme.muted;
+                    font-size: 11px;
+                    font-weight: 600;
+                    letter-spacing: 1.5px;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    for n in [1, 25, 50, 75, 100, 125, 150]: StyledButton {
+                        horizontal-stretch: 1;
+                        height: 36px;
+                        text: "\{n}";
+                        font-size: 13px;
+                        base-color: Theme.field;
+                        active: root.preset == n;
+                        clicked => {
+                            root.preset-changed(n);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Status bar
+        Rectangle {
+            background: Theme.surface-alt;
+
+            VerticalLayout {
+                padding: 0px;
+                spacing: 0px;
+
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 12px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    spacing: 10px;
+
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            border-radius: 5px;
+                            background: root.connected ? Theme.ok : Theme.error;
+                        }
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.status-text;
+                        color: root.connected ? Theme.secondary-ink : Theme.muted;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    StyledButton {
+                        width: 140px;
+                        height: 30px;
+                        text: "Переподключить";
+                        font-size: 12px;
+                        font-weight: 500;
+                        clicked => {
+                            root.reconnect();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

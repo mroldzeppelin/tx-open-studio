@@ -231,7 +231,7 @@ export component AppWindow inherits Window {
     // 150 display labels ("41 FULDRV"); a bare number or "" until names load.
     in property <[string]> preset-names;
     in property <bool> connected: false;
-    in property <string> status-text: "Педаль не подключена";
+    in property <string> status-text: "Pedal not connected";
 
     callback preset-changed(int);
     callback reconnect();
@@ -262,23 +262,11 @@ export component AppWindow inherits Window {
             padding-left: 20px;
             padding-right: 20px;
             padding-top: 16px;
-            spacing: 8px;
             Text {
                 text: "TX Open Studio";
                 color: Theme.ink;
                 font-size: 20px;
                 font-weight: 700;
-                vertical-alignment: center;
-            }
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-            Text {
-                text: "PRESETS";
-                color: Theme.muted;
-                font-size: 11px;
-                font-weight: 600;
-                letter-spacing: 1.5px;
                 vertical-alignment: center;
             }
         }
@@ -587,7 +575,7 @@ export component AppWindow inherits Window {
                     StyledButton {
                         width: 140px;
                         height: 30px;
-                        text: "Переподключить";
+                        text: "Reconnect";
                         font-size: 12px;
                         font-weight: 500;
                         clicked => {

@@ -12,7 +12,7 @@ const MIN_PRESET: i32 = 1;
 const MAX_PRESET: i32 = 150;
 const DEFAULT_PRESET: i32 = 43;
 const CLIENT_NAME: &str = "tx-open-studio";
-const STATUS_DOWN: &str = "Педаль не подключена";
+const STATUS_DOWN: &str = "Pedal not connected";
 
 /// Thread-safe holder for the MIDI output connection to the pedal.
 #[derive(Clone, Default)]
@@ -164,7 +164,7 @@ impl PresetNames {
 
 fn show_connected(ui: &AppWindow, port_name: &str) {
     ui.set_connected(true);
-    ui.set_status_text(format!("Подключено: {}", port_name).into());
+    ui.set_status_text(format!("Connected: {}", port_name).into());
 }
 
 fn show_disconnected(ui: &AppWindow) {

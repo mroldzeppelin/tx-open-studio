@@ -380,13 +380,17 @@ fn knob_value(params: &[u8], index: usize, name: &str) -> Result<f32, String> {
     knob_from_pedal(v).ok_or_else(|| format!("unexpected layout: {name} = {v} outside 0..=10"))
 }
 
-/// Current preset index from a state message (type 0x0201).
+/// Current preset index (0-based) from a state message (type 0x0201).
 ///
-/// Builty `usb_tonex_parse_state` (big pedal) reads it as `unframed[9]`,
-/// i.e. the first body byte after a header `B9 03 81 01 02 <size> 80 10 03`
-/// with a 1-byte size. Here the header is walked value by value instead of
-/// assuming fixed offsets, and the first body value is decoded with the
-/// normal encoding (so `80 <idx> 00` for presets >= 128 works too).
+/// Layout seen on the user's big pedal (hardware capture):
+///   `B9 03 | 81 01 02 | 04 | 10 | B9 02 <preset> <?>`
+/// i.e. type, a 1-byte size, a 1-byte `10`, then a 2-item collection whose
+/// first value is the preset index (second, `00` so far, unknown).
+/// Builty's layout (`usb_tonex_parse_state`, `unframed[9]`) has the index
+/// as the first body value after a header ending `80 10 03`, with no
+/// collection. Both are handled: the header is walked value by value, an
+/// optional `B9 n`/`BA n` collection header is skipped, and the first value
+/// is decoded (literal, or `80 lo hi` etc. for presets >= 128).
 fn extract_state_preset(payload: &[u8]) -> Option<u8> {
     if frame_type(payload)? != TYPE_STATE {
         return None;
@@ -395,8 +399,59 @@ fn extract_state_preset(payload: &[u8]) -> Option<u8> {
     for _ in 0..3 {
         read_u16_value(payload, &mut pos)?;
     }
+    if matches!(payload.get(pos), Some(0xB9 | 0xBA)) {
+        pos += 2;
+    }
     let idx = read_u16_value(payload, &mut pos)?;
     u8::try_from(idx).ok().filter(|&i| usize::from(i) < PRESET_COUNT)
+}
+
+/// Number of string fields in the preset metadata block (`B9 0D`).
+const META_FIELDS: usize = 13;
+/// Field holding the preset's character ("CLEAN", "DRIVE", ...).
+const META_CHARACTER: usize = 2;
+
+/// Parses one metadata string field at `*pos`:
+/// `B9 02 BC <bufsize> <buf> <strlen>` (strlen is a normal value). The text
+/// is `buf[..strlen]`, cut at the first NUL; bytes after that are garbage.
+fn read_meta_field(p: &[u8], pos: &mut usize) -> Option<String> {
+    if p.get(*pos..*pos + 3)? != [0xB9, 0x02, 0xBC] {
+        return None;
+    }
+    let size = usize::from(*p.get(*pos + 3)?);
+    let buf = p.get(*pos + 4..*pos + 4 + size)?;
+    let mut end = *pos + 4 + size;
+    let len = usize::from(read_u16_value(p, &mut end)?);
+    *pos = end;
+    let text = &buf[..len.min(buf.len())];
+    let text = &text[..text.iter().position(|&b| b == 0).unwrap_or(text.len())];
+    Some(String::from_utf8_lossy(text).trim().to_string())
+}
+
+/// The preset's character from the metadata block in a preset-details
+/// payload: `B9 0D` followed by 13 string fields ([0] author, [1] date,
+/// [2] character, [3] instrument, ..., [12] description), as captured on
+/// the user's pedal. Every `B9 0D` candidate is walked field by field (field
+/// sizes vary); the first one where all 13 fields parse wins.
+fn extract_character(payload: &[u8]) -> Option<String> {
+    let mut from = 0;
+    while let Some(off) = find(&payload[from..], &[0xB9, 0x0D, 0xB9, 0x02, 0xBC]) {
+        let start = from + off;
+        let mut pos = start + 2;
+        let fields: Option<Vec<String>> = (0..META_FIELDS).map(|_| read_meta_field(payload, &mut pos)).collect();
+        if let Some(mut fields) = fields {
+            return Some(fields.swap_remove(META_CHARACTER));
+        }
+        from = start + 1;
+    }
+    None
+}
+
+/// Name and character of one preset ("" when unknown).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PresetMeta {
+    pub name: String,
+    pub character: String,
 }
 
 /// Emits `CurrentPreset` for a state payload, or logs why it couldn't.
@@ -701,7 +756,9 @@ pub enum Event {
     /// The session ended (open failed, unplugged, I/O error).
     Disconnected(String),
     /// Result of `Pedal::request_names`.
-    Names(Result<Vec<String>, String>),
+    Names(Result<Vec<PresetMeta>, String>),
+    /// Character of one preset (0-based), from a details read or push.
+    Character { preset_idx: u8, character: String },
     /// Result of `Pedal::request_amp_params` (0-based preset index).
     /// `raw` is the whole parameter array as far as it parsed (see
     /// `extract_param_array`), empty if the details didn't arrive.
@@ -963,8 +1020,11 @@ impl<F: Fn(Event)> Session<'_, F> {
             served = true;
         }
         if let Some(idx) = latest_read {
-            let (result, raw) = self.read_amp_params(idx)?;
+            let (result, raw, character) = self.read_amp_params(idx)?;
             (self.on_event)(Event::AmpParams { preset_idx: idx, result, raw });
+            if let Some(character) = character {
+                (self.on_event)(Event::Character { preset_idx: idx, character });
+            }
             served = true;
         }
         Ok(served)
@@ -1080,6 +1140,9 @@ impl<F: Fn(Event)> Session<'_, F> {
                     .ok();
                 let raw = extract_param_array(payload);
                 (self.on_event)(Event::PresetChanged { preset_idx: idx, params, raw });
+                if let Some(character) = extract_character(payload) {
+                    (self.on_event)(Event::Character { preset_idx: idx, character });
+                }
                 return false;
             }
         }
@@ -1104,22 +1167,23 @@ impl<F: Fn(Event)> Session<'_, F> {
     }
 
     /// Ok(result) for the event; Err only for link failures (session ends).
-    /// Returns the amp params and the raw parameter array.
-    fn read_amp_params(&mut self, idx: u8) -> Result<(Result<AmpParams, String>, Vec<f32>), String> {
+    /// Returns the amp params, the raw parameter array and the character.
+    #[allow(clippy::type_complexity)]
+    fn read_amp_params(&mut self, idx: u8) -> Result<(Result<AmpParams, String>, Vec<f32>, Option<String>), String> {
         if usize::from(idx) >= PRESET_COUNT {
-            return Ok((Err(format!("preset index {idx} out of range")), Vec::new()));
+            return Ok((Err(format!("preset index {idx} out of range")), Vec::new(), None));
         }
         Ok(match self.fetch_details(idx, PRESET_TIMEOUT)? {
-            Some(payload) => (extract_amp_params(&payload), extract_param_array(&payload)),
-            None => (Err("no preset details received".into()), Vec::new()),
+            Some(payload) => (extract_amp_params(&payload), extract_param_array(&payload), extract_character(&payload)),
+            None => (Err("no preset details received".into()), Vec::new(), None),
         })
     }
 
     /// Reads all 150 names. Unreadable slots are empty strings; the inner
     /// result fails only if no name at all could be read.
-    fn read_names(&mut self) -> Result<Result<Vec<String>, String>, String> {
+    fn read_names(&mut self) -> Result<Result<Vec<PresetMeta>, String>, String> {
         let deadline = Instant::now() + OVERALL_DEADLINE;
-        let mut names = vec![String::new(); PRESET_COUNT];
+        let mut names = vec![PresetMeta::default(); PRESET_COUNT];
         let mut read = 0usize;
         for i in 0..PRESET_COUNT {
             if Instant::now() >= deadline {
@@ -1132,9 +1196,11 @@ impl<F: Fn(Event)> Session<'_, F> {
             }
             self.serve_quick()?;
             let timeout = PRESET_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
-            if let Some(name) = self.fetch_details(i as u8, timeout)?.as_deref().and_then(extract_name) {
-                names[i] = name;
-                read += 1;
+            if let Some(payload) = self.fetch_details(i as u8, timeout)? {
+                if let Some(name) = extract_name(&payload) {
+                    names[i] = PresetMeta { name, character: extract_character(&payload).unwrap_or_default() };
+                    read += 1;
+                }
             }
         }
 
@@ -1258,6 +1324,60 @@ mod tests {
         p.extend_from_slice(&[0x80, 0x10, 0x03]);
         p.extend_from_slice(&body);
         p
+    }
+
+    #[test]
+    fn extracts_state_preset_captured_layout() {
+        // Exact frame from the user's pedal (on preset 10 = index 9).
+        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x04, 0x10, 0xB9, 0x02, 0x09, 0x00];
+        assert_eq!(extract_state_preset(&p), Some(9));
+        // Same layout, preset >= 128 as `80 lo hi`.
+        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x06, 0x10, 0xB9, 0x02, 0x80, 140, 0x00, 0x00];
+        assert_eq!(extract_state_preset(&p), Some(140));
+    }
+
+    fn meta_field(buf_size: u8, text: &[u8], garbage: &[u8]) -> Vec<u8> {
+        let mut f = vec![0xB9, 0x02, 0xBC, buf_size];
+        let mut buf = text.to_vec();
+        buf.push(0);
+        buf.extend_from_slice(garbage);
+        buf.resize(usize::from(buf_size), 0xAA);
+        f.extend_from_slice(&buf);
+        f.push(text.len() as u8);
+        f
+    }
+
+    #[test]
+    fn extracts_character_from_metadata_block() {
+        let mut p = vec![0xB9, 0x03, 0x81, 0x04, 0x02];
+        p.extend_from_slice(&NAME_MARKER);
+        p.extend_from_slice(&[b'N'; 33]);
+        // A decoy `B9 0D` that doesn't parse as 13 fields.
+        p.extend_from_slice(&[0xB9, 0x0D, 0xB9, 0x02, 0xBC, 0x05, 1, 2]);
+        p.extend_from_slice(&[0xB9, 0x0D]);
+        p.extend(meta_field(0x21, b"someone", b"JUNK"));
+        p.extend(meta_field(0x0B, b"2025-04-01", b""));
+        p.extend(meta_field(0x21, b"STOMP - OVERDRIVE", b"leftover text"));
+        p.extend(meta_field(0x21, b"GUITAR", b""));
+        for _ in 4..12 {
+            p.extend(meta_field(0x21, b"", b"xx"));
+        }
+        p.extend(meta_field(0x41, b"A long description", b"zz"));
+        p.extend_from_slice(&PARAM_MARKER);
+        assert_eq!(extract_character(&p).as_deref(), Some("STOMP - OVERDRIVE"));
+        // strlen shorter than the text before the NUL wins.
+        let mut q = vec![0xB9, 0x0D];
+        let mut f = meta_field(0x21, b"CLEANX", b"");
+        let last = f.len() - 1;
+        f[last] = 5;
+        q.extend(meta_field(0x21, b"a", b""));
+        q.extend(meta_field(0x0B, b"d", b""));
+        q.extend(f);
+        for _ in 3..13 {
+            q.extend(meta_field(0x21, b"", b""));
+        }
+        assert_eq!(extract_character(&q).as_deref(), Some("CLEAN"));
+        assert_eq!(extract_character(&[0xB9, 0x0D, 0xB9, 0x02, 0xBC]), None);
     }
 
     #[test]

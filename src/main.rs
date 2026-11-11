@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use midir::{MidiOutput, MidiOutputConnection};
-use slint::{ModelRc, SharedString, VecModel};
-use tonex_serial::{AmpKnob, Event};
+use slint::{ModelRc, VecModel};
+use slint::Model;
+use tonex_serial::{AmpKnob, Event, PresetMeta, PRESET_COUNT};
 
 slint::include_modules!();
 
@@ -179,10 +180,11 @@ fn bank_and_pc(preset_num: i32) -> (u8, u8) {
     ((idx / 128) as u8, (idx % 128) as u8)
 }
 
-/// Preset names read from the pedal over USB serial (index 0 = preset 1).
+/// Preset names and characters read from the pedal over USB serial
+/// (index 0 = preset 1).
 #[derive(Clone, Default)]
 struct PresetNames {
-    names: Arc<Mutex<Vec<String>>>,
+    names: Arc<Mutex<Vec<PresetMeta>>>,
 }
 
 /// Display label: the pedal groups presets in banks of 3 (A/B/C), so
@@ -192,45 +194,121 @@ fn display_label(preset_num: i32, name: &str) -> String {
     if name.is_empty() {
         preset_num.to_string()
     } else {
-        format!("{} {}", (clamp_preset(preset_num) - 1) / 3, name)
+        format!("{} {}", bank_number(preset_num), name)
+    }
+}
+
+fn bank_number(preset_num: i32) -> i32 {
+    (clamp_preset(preset_num) - 1) / 3
+}
+
+/// Colour group of a preset character (`character-color` in app.slint):
+/// 0 none (no badge), 1 clean, 2 crunch, 3 drive, 4 high gain / lead,
+/// 5 stomp (any "STOMP - ..."), 6 bass, 7 acoustic. Unrecognized → 0.
+fn character_kind(character: &str) -> i32 {
+    let c = character.to_uppercase();
+    let has = |w: &str| c.contains(w);
+    if c.is_empty() {
+        0
+    } else if c.starts_with("STOMP") {
+        5
+    } else if has("ACOUSTIC") {
+        7
+    } else if has("BASS") {
+        6
+    } else if has("HIGH GAIN") || has("LEAD") || has("METAL") {
+        4
+    } else if has("CRUNCH") {
+        2
+    } else if has("DRIVE") {
+        3
+    } else if has("CLEAN") {
+        1
+    } else {
+        0
     }
 }
 
 impl PresetNames {
-    fn lock(&self) -> MutexGuard<'_, Vec<String>> {
+    fn lock(&self) -> MutexGuard<'_, Vec<PresetMeta>> {
         self.names.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn meta(&self, preset_num: i32) -> PresetMeta {
+        let names = self.lock();
+        usize::try_from(preset_num - 1)
+            .ok()
+            .and_then(|i| names.get(i))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Label for the current-preset card, or "" when the name is unknown
     /// (the UI then falls back to the bare number).
     fn name_for(&self, preset_num: i32) -> String {
-        let names = self.lock();
-        usize::try_from(preset_num - 1)
-            .ok()
-            .and_then(|i| names.get(i))
-            .filter(|n| !n.is_empty())
-            .map(|n| display_label(preset_num, n))
-            .unwrap_or_default()
+        let meta = self.meta(preset_num);
+        if meta.name.is_empty() {
+            String::new()
+        } else {
+            display_label(preset_num, &meta.name)
+        }
     }
 
-    /// Labels for all presets, for the list view.
-    fn list_model(&self) -> ModelRc<SharedString> {
-        let names = self.lock();
-        let labels: Vec<SharedString> = (MIN_PRESET..=MAX_PRESET)
-            .map(|p| {
-                let name = names.get((p - 1) as usize).map(String::as_str).unwrap_or("");
-                display_label(p, name).into()
-            })
-            .collect();
-        ModelRc::new(VecModel::from(labels))
+    fn row(preset_num: i32, meta: &PresetMeta) -> PresetRow {
+        let number = if meta.name.is_empty() { preset_num } else { bank_number(preset_num) };
+        PresetRow {
+            number: number.to_string().into(),
+            name: meta.name.clone().into(),
+            character: meta.character.clone().into(),
+            kind: character_kind(&meta.character),
+        }
     }
+
+    /// Rows for all presets, for the list view.
+    fn list_model(&self) -> ModelRc<PresetRow> {
+        let names = self.lock();
+        let rows: Vec<PresetRow> = (MIN_PRESET..=MAX_PRESET)
+            .map(|p| Self::row(p, names.get((p - 1) as usize).unwrap_or(&PresetMeta::default())))
+            .collect();
+        ModelRc::new(VecModel::from(rows))
+    }
+
+    /// Stores a preset's character (from a details read) and updates its
+    /// list row in place. Returns false if nothing changed.
+    fn set_character(&self, ui: &AppWindow, preset_idx: u8, character: String) -> bool {
+        let i = usize::from(preset_idx);
+        let meta = {
+            let mut names = self.lock();
+            if names.len() < PRESET_COUNT {
+                names.resize(PRESET_COUNT, PresetMeta::default());
+            }
+            if names[i].character == character {
+                return false;
+            }
+            names[i].character = character;
+            names[i].clone()
+        };
+        let model = ui.get_preset_names();
+        if i < model.row_count() {
+            model.set_row_data(i, Self::row(i as i32 + 1, &meta));
+        }
+        true
+    }
+}
+
+/// Header card: name and character badge of `preset`.
+fn show_preset_meta(ui: &AppWindow, names: &PresetNames, preset: i32) {
+    ui.set_preset_name(names.name_for(preset).into());
+    let character = names.meta(preset).character;
+    ui.set_preset_character_kind(character_kind(&character));
+    ui.set_preset_character(character.into());
 }
 
 /// Shows `preset` as current in the UI. Does NOT send MIDI (used both by the
 /// UI path, which sends separately, and for footswitch changes on the pedal).
 fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
     ui.set_preset(preset);
-    ui.set_preset_name(names.name_for(preset).into());
+    show_preset_meta(ui, names, preset);
     // A (re)loaded preset starts clean.
     ui.set_preset_dirty(false);
 }
@@ -331,10 +409,15 @@ impl SyncCtx {
             }
             Event::Names(Ok(names)) => {
                 *self.names.lock() = names;
-                ui.set_preset_name(self.names.name_for(ui.get_preset()).into());
                 ui.set_preset_names(self.names.list_model());
+                show_preset_meta(ui, &self.names, ui.get_preset());
             }
             Event::Names(Err(e)) => eprintln!("TONEX preset names read failed: {e}"),
+            Event::Character { preset_idx, character } => {
+                if self.names.set_character(ui, preset_idx, character) && ui.get_preset() == i32::from(preset_idx) + 1 {
+                    show_preset_meta(ui, &self.names, ui.get_preset());
+                }
+            }
             Event::AmpParams { preset_idx, result, raw } => {
                 let current = ui.get_preset() == i32::from(preset_idx) + 1;
                 if current {
@@ -609,6 +692,19 @@ fn main() -> Result<(), slint::PlatformError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn character_kinds() {
+        assert_eq!(character_kind("CLEAN"), 1);
+        assert_eq!(character_kind("Crunch"), 2);
+        assert_eq!(character_kind("DRIVE"), 3);
+        assert_eq!(character_kind("HIGH GAIN"), 4);
+        assert_eq!(character_kind("STOMP - OVERDRIVE"), 5);
+        assert_eq!(character_kind("BASS"), 6);
+        assert_eq!(character_kind("ACOUSTIC"), 7);
+        assert_eq!(character_kind(""), 0);
+        assert_eq!(character_kind("SOMETHING ELSE"), 0);
+    }
 
     #[test]
     fn knob_maps_linearly_to_cc() {

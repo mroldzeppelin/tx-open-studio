@@ -23,6 +23,59 @@ export global Theme {
     out property <color> changed: #d4a72c;
 }
 
+// One row of the preset list. `number` is the bank number once the name is
+// known (bare preset number before), `kind` the character colour group
+// (0 = no badge; see character_kind in main.rs).
+export struct PresetRow {
+    number: string,
+    name: string,
+    character: string,
+    kind: int,
+}
+
+// Muted colours per preset character group, shared by list and header.
+export global CharacterColors {
+    pure public function of(kind: int) -> color {
+        if (kind == 1) { return #4a8a6a; } // clean
+        if (kind == 2) { return #a07d1c; } // crunch
+        if (kind == 3) { return #b0632c; } // drive
+        if (kind == 4) { return #a84a42; } // high gain / lead
+        if (kind == 5) { return #8a5bb0; } // stomp
+        if (kind == 6) { return #3d78b8; } // bass
+        if (kind == 7) { return #8a7a50; } // acoustic
+        return Theme.muted;
+    }
+}
+
+// Small badge showing a preset's character ("CLEAN", "DRIVE", ...).
+component CharacterBadge inherits Rectangle {
+    in property <string> text;
+    in property <int> kind;
+    in property <length> font-size: 10px;
+    property <color> tint: CharacterColors.of(root.kind);
+
+    horizontal-stretch: 0;
+    background: root.tint.with-alpha(0.14);
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: root.tint.with-alpha(0.8);
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        padding-top: 1px;
+        padding-bottom: 1px;
+        Text {
+            text: root.text;
+            color: root.tint.brighter(0.35);
+            font-size: root.font-size;
+            font-weight: 600;
+            vertical-alignment: center;
+            wrap: no-wrap;
+        }
+    }
+}
+
 // Hand-made button: std-widgets don't follow the custom palette well.
 component StyledButton inherits Rectangle {
     in property <string> text;
@@ -354,8 +407,12 @@ export component AppWindow inherits Window {
 
     in-out property <int> preset: 43;
     in property <string> preset-name;
-    // 150 display labels ("41 FULDRV"); a bare number or "" until names load.
-    in property <[string]> preset-names;
+    // Character of the current preset ("" = unknown → no badge) and its
+    // colour group (see PresetRow.kind).
+    in property <string> preset-character;
+    in property <int> preset-character-kind;
+    // 150 list rows: bank number, character badge, name (empty until names load).
+    in property <[PresetRow]> preset-names;
     in property <bool> connected: false;
     in property <string> status-text: "Pedal not connected";
     // Current preset modified since it was loaded (set/cleared from Rust).
@@ -490,7 +547,7 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        for name[index] in root.preset-names: Rectangle {
+                        for row[index] in root.preset-names: Rectangle {
                             height: list.row-height;
 
                             property <bool> is-selected: root.preset == index + 1;
@@ -503,14 +560,33 @@ export component AppWindow inherits Window {
                                 border-radius: 8px;
                                 background: is-selected ? Theme.selected : (row-ta.has-hover ? Theme.hover : transparent);
 
+                                // number · [CHARACTER] · name; before names
+                                // load only the bare preset number.
                                 HorizontalLayout {
                                     padding-left: 12px;
                                     padding-right: 10px;
+                                    spacing: 8px;
 
                                     Text {
+                                        horizontal-stretch: 0;
+                                        min-width: 20px;
+                                        text: row.number == "" ? number : row.number;
+                                        color: is-selected ? Theme.ink : Theme.muted;
+                                        font-size: 13px;
+                                        font-weight: is-selected ? 600 : 400;
+                                        vertical-alignment: center;
+                                    }
+                                    if row.kind > 0: VerticalLayout {
+                                        alignment: center;
+                                        CharacterBadge {
+                                            text: row.character;
+                                            kind: row.kind;
+                                            font-size: 9px;
+                                        }
+                                    }
+                                    Text {
                                         horizontal-stretch: 1;
-                                        // Before names load the label is the bare number.
-                                        text: name == "" ? number : name;
+                                        text: row.name;
                                         color: is-selected ? Theme.ink : Theme.secondary-ink;
                                         font-size: 14px;
                                         font-weight: is-selected ? 600 : 400;
@@ -609,6 +685,15 @@ export component AppWindow inherits Window {
                             font-weight: 700;
                             overflow: elide;
                             wrap: no-wrap;
+                        }
+                        // Character from the preset's metadata (none if unknown).
+                        if root.preset-character-kind > 0: HorizontalLayout {
+                            alignment: start;
+                            CharacterBadge {
+                                text: root.preset-character;
+                                kind: root.preset-character-kind;
+                                font-size: 11px;
+                            }
                         }
 
                         HorizontalLayout {

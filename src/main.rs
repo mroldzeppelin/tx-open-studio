@@ -243,11 +243,6 @@ struct SyncCtx {
     global_touched: Arc<Mutex<[Option<Instant>; 2]>>,
 }
 
-/// Global writes resend the whole global config blob (format from Builty,
-/// unverified on hardware; a bad write could alter other pedal-wide
-/// settings such as the MIDI channel), so they are opt-in for now.
-const GLOBAL_WRITE_ENV: &str = "TX_ENABLE_GLOBAL_WRITE";
-
 /// UI global id → (global index, valid range).
 fn global_for_id(id: i32) -> Option<(usize, (f32, f32))> {
     match id {
@@ -509,18 +504,13 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ctx = ctx.clone();
-        let write_enabled = std::env::var_os(GLOBAL_WRITE_ENV).is_some();
         ui.on_global_changed(move |id, value| {
             let Some((index, (min, max))) = global_for_id(id) else {
                 eprintln!("unknown global id {id}");
                 return;
             };
-            let result = if write_enabled {
-                ctx.global_touched.lock().unwrap_or_else(|e| e.into_inner())[id as usize] = Some(Instant::now());
-                ctx.with_serial(|p| p.set_global(index, value.clamp(min, max)))
-            } else {
-                Err(format!("global writes are disabled (unverified format); set {GLOBAL_WRITE_ENV}=1 to enable"))
-            };
+            ctx.global_touched.lock().unwrap_or_else(|e| e.into_inner())[id as usize] = Some(Instant::now());
+            let result = ctx.with_serial(|p| p.set_global(index, value.clamp(min, max)));
             if let Err(e) = result {
                 eprintln!("TONEX global write: {e}");
                 // Show the pedal's actual value again.

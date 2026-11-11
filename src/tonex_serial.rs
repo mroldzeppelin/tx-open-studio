@@ -49,10 +49,41 @@
 //!
 //! The pedal may also send unsolicited state frames (type 0x0201) at any
 //! time; frames without the name marker are simply skipped.
+//!
+//! ## Preset parameters (amp knobs)
+//! Sources:
+//! - Builty/TonexOneController `source/main/usb_tonex.c`
+//!   `usb_tonex_parse_preset_parameters()`: the big-pedal driver parses the
+//!   *summary* (0x00) preset-details response of the current preset this way.
+//! - Builty `source/main/tonex_params.h` `enum TonexParameters` ("defined in
+//!   the same order as they are sent by the Pedal") and `tonex_params.c`
+//!   (ranges).
+//! - brunothesatellite/tonexpedal `index.html` uses the same marker and
+//!   5-byte stride (it only reads AMP enable / CAB type, see caveat below).
+//!
+//! Rule: find the first `BA 03 BA 6D` (`BA 6D` = array of 109 items); right
+//! after it come consecutive `88 <f32 LE>` items, parameter `i` at byte
+//! offset `i * 5`. Indices used here (Builty enum):
+//!   11 EQ bass (0..10)      12 EQ bass freq (75..600 Hz)
+//!   13 EQ mid (0..10)       16 EQ treble (0..10)
+//!   17 EQ treble freq (1000..4000 Hz)
+//!   18 amp enable (0/1)     20 model gain (0..10)   21 model volume (0..10)
+//!   34 model presence (0..10)   35 model depth (0..10)
+//! Values are stored in UI units (0..10), no scaling needed.
+//!
+//! Caveat: brunothesatellite documents AMP enable at index 17 and CAB type
+//! at 22, whereas Builty has them at 18 and 24. Because of this conflict the
+//! parser checks a layout fingerprint before trusting the values: bass freq
+//! (12) and treble freq (17) must lie in their Hz ranges and amp enable (18)
+//! must be 0 or 1. A shifted layout fails this check instead of showing junk.
+//!
+//! All port access is serialized by a process-wide lock so the name scan and
+//! a params read never talk to the pedal at the same time.
 
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serial2::SerialPort;
@@ -83,6 +114,42 @@ const PRESET_DETAILS_HEADER: [u8; 11] = [
 ];
 const NAME_MARKER: [u8; 6] = [0xB9, 0x04, 0xB9, 0x02, 0xBC, 0x21];
 const NAME_LEN: usize = 32;
+
+const PARAMS_DEADLINE: Duration = Duration::from_secs(4);
+const PARAM_MARKER: [u8; 4] = [0xBA, 0x03, 0xBA, 0x6D];
+const FLOAT_TAG: u8 = 0x88;
+const PARAM_STRIDE: usize = 5;
+
+// Parameter indices in the preset-details float array (see header).
+const P_EQ_BASS: usize = 11;
+const P_EQ_BASS_FREQ: usize = 12;
+const P_EQ_MID: usize = 13;
+const P_EQ_TREBLE: usize = 16;
+const P_EQ_TREBLE_FREQ: usize = 17;
+const P_AMP_ENABLE: usize = 18;
+const P_MODEL_GAIN: usize = 20;
+const P_MODEL_VOLUME: usize = 21;
+const P_MODEL_PRESENCE: usize = 34;
+const P_MODEL_DEPTH: usize = 35;
+
+/// Serializes all access to the pedal's serial port.
+static PORT_LOCK: Mutex<()> = Mutex::new(());
+
+fn port_lock() -> MutexGuard<'static, ()> {
+    PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Amp knob values of one preset, in UI units (0.0..=10.0).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AmpParams {
+    pub gain: f32,
+    pub volume: f32,
+    pub presence: f32,
+    pub depth: f32,
+    pub bass: f32,
+    pub mid: f32,
+    pub treble: f32,
+}
 
 // ---------------------------------------------------------------- framing
 
@@ -161,6 +228,65 @@ fn extract_name(payload: &[u8]) -> Option<String> {
     let bytes = payload.get(start..start + NAME_LEN)?;
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     Some(String::from_utf8_lossy(&bytes[..end]).trim().to_string())
+}
+
+/// Reads parameter `index` (an `88 <f32 LE>` item) from the array that
+/// starts at `params`.
+fn param_at(params: &[u8], index: usize) -> Result<f32, String> {
+    let off = index * PARAM_STRIDE;
+    let item = params
+        .get(off..off + PARAM_STRIDE)
+        .ok_or_else(|| format!("param {index}: payload too short"))?;
+    if item[0] != FLOAT_TAG {
+        return Err(format!("param {index}: expected float tag, got {:#04x}", item[0]));
+    }
+    let v = f32::from_le_bytes([item[1], item[2], item[3], item[4]]);
+    if v.is_finite() {
+        Ok(v)
+    } else {
+        Err(format!("param {index}: not a finite float"))
+    }
+}
+
+fn check_range(name: &str, v: f32, min: f32, max: f32) -> Result<(), String> {
+    if (min..=max).contains(&v) {
+        Ok(())
+    } else {
+        Err(format!("unexpected layout: {name} = {v} outside {min}..={max}"))
+    }
+}
+
+/// A 0..10 knob value, rounded to the UI's 0.1 step.
+fn knob_value(params: &[u8], index: usize, name: &str) -> Result<f32, String> {
+    let v = param_at(params, index)?;
+    // Tiny tolerance for float noise at the ends of the range.
+    check_range(name, v, -0.01, 10.01)?;
+    Ok(((v * 10.0).round() / 10.0).clamp(0.0, 10.0))
+}
+
+/// Extracts amp knob values from a preset-details payload (see the
+/// "Preset parameters" section in the module docs for the rule).
+fn extract_amp_params(payload: &[u8]) -> Result<AmpParams, String> {
+    let start = find(payload, &PARAM_MARKER).ok_or("parameter marker not found")? + PARAM_MARKER.len();
+    let params = &payload[start..];
+
+    // Layout fingerprint: guards against a shifted index table.
+    check_range("EQ bass freq", param_at(params, P_EQ_BASS_FREQ)?, 75.0, 600.0)?;
+    check_range("EQ treble freq", param_at(params, P_EQ_TREBLE_FREQ)?, 1000.0, 4000.0)?;
+    let amp_enable = param_at(params, P_AMP_ENABLE)?;
+    if amp_enable != 0.0 && amp_enable != 1.0 {
+        return Err(format!("unexpected layout: amp enable = {amp_enable}"));
+    }
+
+    Ok(AmpParams {
+        gain: knob_value(params, P_MODEL_GAIN, "gain")?,
+        volume: knob_value(params, P_MODEL_VOLUME, "volume")?,
+        presence: knob_value(params, P_MODEL_PRESENCE, "presence")?,
+        depth: knob_value(params, P_MODEL_DEPTH, "depth")?,
+        bass: knob_value(params, P_EQ_BASS, "bass")?,
+        mid: knob_value(params, P_EQ_MID, "mid")?,
+        treble: knob_value(params, P_EQ_TREBLE, "treble")?,
+    })
 }
 
 // ---------------------------------------------------------------- transport
@@ -279,7 +405,38 @@ fn candidate_ports() -> Vec<PathBuf> {
 /// as empty strings; fails only if no name at all could be read.
 /// Bounded by an overall deadline so it never hangs.
 pub fn read_preset_names() -> Result<Vec<String>, String> {
-    let deadline = Instant::now() + OVERALL_DEADLINE;
+    with_pedal(OVERALL_DEADLINE, read_names)
+}
+
+/// Reads the amp knob values of preset `preset_idx` (0-based) from the
+/// summary preset-details response.
+pub fn read_amp_params(preset_idx: u8) -> Result<AmpParams, String> {
+    if usize::from(preset_idx) >= PRESET_COUNT {
+        return Err(format!("preset index {preset_idx} out of range"));
+    }
+    with_pedal(PARAMS_DEADLINE, |link, deadline| {
+        link.send(&preset_request(preset_idx))?;
+        let until = (Instant::now() + PRESET_TIMEOUT).min(deadline);
+        // Skip unrelated frames (e.g. unsolicited state updates); the first
+        // frame carrying a preset name is the details response.
+        while let Some(payload) = link.read_frame(until.saturating_duration_since(Instant::now()), deadline)? {
+            if find(&payload, &NAME_MARKER).is_some() {
+                return extract_amp_params(&payload);
+            }
+        }
+        Err("no preset details received".into())
+    })
+}
+
+/// Takes the port lock, opens the first port that answers the handshake and
+/// runs `op` on it. `timeout` bounds the port work; it starts once the lock
+/// is held, so waiting for another serial user doesn't eat into it.
+fn with_pedal<T>(
+    timeout: Duration,
+    mut op: impl FnMut(&mut Link, Instant) -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = port_lock();
+    let deadline = Instant::now() + timeout;
     let ports = candidate_ports();
     if ports.is_empty() {
         return Err("no /dev/ttyACM* port found".into());
@@ -288,17 +445,19 @@ pub fn read_preset_names() -> Result<Vec<String>, String> {
     let mut errors = Vec::new();
     for path in ports {
         if Instant::now() >= deadline {
+            errors.push("deadline reached".into());
             break;
         }
-        match read_from_port(&path, deadline) {
-            Ok(names) => return Ok(names),
+        let result = open_pedal(&path, deadline).and_then(|mut link| op(&mut link, deadline));
+        match result {
+            Ok(v) => return Ok(v),
             Err(e) => errors.push(format!("{}: {e}", path.display())),
         }
     }
     Err(errors.join("; "))
 }
 
-fn read_from_port(path: &Path, deadline: Instant) -> Result<Vec<String>, String> {
+fn open_pedal(path: &Path, deadline: Instant) -> Result<Link, String> {
     let mut link = Link::open(path)?;
 
     // Handshake. Replies are not strictly required, but the pedal expects
@@ -310,7 +469,10 @@ fn read_from_port(path: &Path, deadline: Instant) -> Result<Vec<String>, String>
     }
     link.send(&REQUEST_STATE_CMD)?;
     let _ = link.read_frame(HANDSHAKE_TIMEOUT, deadline)?;
+    Ok(link)
+}
 
+fn read_names(link: &mut Link, deadline: Instant) -> Result<Vec<String>, String> {
     let mut names = vec![String::new(); PRESET_COUNT];
     let mut read = 0usize;
     for (i, slot) in names.iter_mut().enumerate() {
@@ -364,5 +526,66 @@ mod tests {
         p.extend_from_slice(b"BazPlexi\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
         p.push(0x14);
         assert_eq!(extract_name(&p).as_deref(), Some("BazPlexi"));
+    }
+
+    /// Synthetic summary payload: header + name + param array with the
+    /// given values (unset slots default to 0.0).
+    fn payload_with_params(set: &[(usize, f32)]) -> Vec<u8> {
+        let mut values = [0.0f32; 109];
+        values[P_EQ_BASS_FREQ] = 300.0;
+        values[P_EQ_TREBLE_FREQ] = 1900.0;
+        values[P_AMP_ENABLE] = 1.0;
+        for &(i, v) in set {
+            values[i] = v;
+        }
+        let mut p = vec![0xB9, 0x03, 0x81, 0x04, 0x02];
+        p.extend_from_slice(&NAME_MARKER);
+        p.extend_from_slice(&[b'X'; 33]);
+        p.extend_from_slice(&[0xBA, 0x02, 0x88, 0, 0, 0, 0, 0x88, 0, 0, 0xF0, 0x42]);
+        p.extend_from_slice(&PARAM_MARKER);
+        for v in values {
+            p.push(FLOAT_TAG);
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        p
+    }
+
+    #[test]
+    fn extracts_amp_params() {
+        let p = payload_with_params(&[
+            (P_MODEL_GAIN, 6.9),
+            (P_MODEL_VOLUME, 5.2),
+            (P_MODEL_PRESENCE, 5.0),
+            (P_MODEL_DEPTH, 10.0),
+            (P_EQ_BASS, 5.4),
+            (P_EQ_MID, 4.8),
+            (P_EQ_TREBLE, 6.23),
+        ]);
+        let a = extract_amp_params(&p).unwrap();
+        assert_eq!(
+            a,
+            AmpParams { gain: 6.9, volume: 5.2, presence: 5.0, depth: 10.0, bass: 5.4, mid: 4.8, treble: 6.2 }
+        );
+    }
+
+    #[test]
+    fn rejects_shifted_layout() {
+        // Treble freq in the amp-enable slot, as a one-slot shift would give.
+        let p = payload_with_params(&[(P_AMP_ENABLE, 1900.0)]);
+        assert!(extract_amp_params(&p).is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_knob() {
+        let p = payload_with_params(&[(P_MODEL_GAIN, 100.0)]);
+        assert!(extract_amp_params(&p).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_marker_or_truncated() {
+        assert!(extract_amp_params(&[0xB9, 0x03]).is_err());
+        let p = payload_with_params(&[]);
+        let cut = find(&p, &PARAM_MARKER).unwrap() + PARAM_MARKER.len() + 20 * PARAM_STRIDE;
+        assert!(extract_amp_params(&p[..cut]).is_err());
     }
 }

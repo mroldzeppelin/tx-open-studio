@@ -162,10 +162,12 @@ component NavButton inherits Rectangle {
 }
 
 // Rotary knob (0..10) with label above and value below. Vertical drag
-// changes the value in 0.1 steps.
+// changes the value in 0.1 steps. `edited` fires only for user drags, not
+// when the value is set programmatically (e.g. read back from the pedal).
 component Knob inherits VerticalLayout {
     in property <string> label;
     in-out property <float> value: 5;
+    callback edited(float);
     property <length> size: 48px;
     // Sweep of 270°: 0 → -135°, 10 → +135° (0° = straight up).
     property <angle> sweep: (-135 + root.value * 27) * 1deg;
@@ -214,11 +216,14 @@ component Knob inherits VerticalLayout {
                         root.drag-start = root.value;
                     }
                 }
-                // Placeholder: will drive amp params over MIDI later.
                 moved => {
                     if (self.pressed) {
                         let v = root.drag-start + (self.pressed-y - self.mouse-y) / 15px;
-                        root.value = clamp(round(v * 10) / 10, 0, 10);
+                        let nv = clamp(round(v * 10) / 10, 0, 10);
+                        if (nv != root.value) {
+                            root.value = nv;
+                            root.edited(nv);
+                        }
                     }
                 }
             }
@@ -249,8 +254,20 @@ export component AppWindow inherits Window {
     in property <bool> connected: false;
     in property <string> status-text: "Pedal not connected";
 
+    // Amp knobs, 0..10. Set from Rust when read from the pedal.
+    in-out property <float> amp-gain: 5;
+    in-out property <float> amp-volume: 5;
+    in-out property <float> amp-presence: 5;
+    in-out property <float> amp-depth: 5;
+    in-out property <float> amp-bass: 5;
+    in-out property <float> amp-mid: 5;
+    in-out property <float> amp-treble: 5;
+
     callback preset-changed(int);
     callback reconnect();
+    // User turned an amp knob. id: 0 gain, 1 volume, 2 presence, 3 depth,
+    // 4 bass, 5 mid, 6 treble (matches AmpParam in main.rs).
+    callback amp-param-changed(int, float);
 
     // Label of preset `p` (1-based) from the list model; "" when out of range,
     // the bare number when the name is not loaded yet.
@@ -479,7 +496,8 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Amplifier card (stub values until amp state reading is implemented).
+                // Amplifier card: knobs send MIDI CCs, values are read from the
+                // current preset over USB serial.
                 Rectangle {
                     vertical-stretch: 0;
                     background: Theme.surface;
@@ -523,13 +541,41 @@ export component AppWindow inherits Window {
 
                         HorizontalLayout {
                             spacing: 8px;
-                            Knob { label: "Gain"; value: 6.9; }
-                            Knob { label: "Volume"; value: 5.2; }
-                            Knob { label: "Presence"; value: 5; }
-                            Knob { label: "Depth"; value: 5; }
-                            Knob { label: "Bass"; value: 5.4; }
-                            Knob { label: "Mid"; value: 4.8; }
-                            Knob { label: "Treble"; value: 6.2; }
+                            Knob {
+                                label: "Gain";
+                                value <=> root.amp-gain;
+                                edited(v) => { root.amp-param-changed(0, v); }
+                            }
+                            Knob {
+                                label: "Volume";
+                                value <=> root.amp-volume;
+                                edited(v) => { root.amp-param-changed(1, v); }
+                            }
+                            Knob {
+                                label: "Presence";
+                                value <=> root.amp-presence;
+                                edited(v) => { root.amp-param-changed(2, v); }
+                            }
+                            Knob {
+                                label: "Depth";
+                                value <=> root.amp-depth;
+                                edited(v) => { root.amp-param-changed(3, v); }
+                            }
+                            Knob {
+                                label: "Bass";
+                                value <=> root.amp-bass;
+                                edited(v) => { root.amp-param-changed(4, v); }
+                            }
+                            Knob {
+                                label: "Mid";
+                                value <=> root.amp-mid;
+                                edited(v) => { root.amp-param-changed(5, v); }
+                            }
+                            Knob {
+                                label: "Treble";
+                                value <=> root.amp-treble;
+                                edited(v) => { root.amp-param-changed(6, v); }
+                            }
                         }
                     }
                 }

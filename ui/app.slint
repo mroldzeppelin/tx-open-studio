@@ -576,14 +576,6 @@ export component AppWindow inherits Window {
                                         font-weight: is-selected ? 600 : 400;
                                         vertical-alignment: center;
                                     }
-                                    if row.kind > 0: VerticalLayout {
-                                        alignment: center;
-                                        CharacterBadge {
-                                            text: row.character;
-                                            kind: row.kind;
-                                            font-size: 9px;
-                                        }
-                                    }
                                     Text {
                                         horizontal-stretch: 1;
                                         text: row.name;
@@ -593,6 +585,16 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                         overflow: elide;
                                         wrap: no-wrap;
+                                    }
+                                    // Right-aligned badge; gray TONE when the
+                                    // preset has no character in its metadata.
+                                    if row.name != "": VerticalLayout {
+                                        alignment: center;
+                                        CharacterBadge {
+                                            text: row.kind > 0 ? row.character : "TONE";
+                                            kind: row.kind;
+                                            font-size: 9px;
+                                        }
                                     }
                                 }
 
@@ -686,11 +688,12 @@ export component AppWindow inherits Window {
                             overflow: elide;
                             wrap: no-wrap;
                         }
-                        // Character from the preset's metadata (none if unknown).
-                        if root.preset-character-kind > 0: HorizontalLayout {
+                        // Character from the preset's metadata; gray TONE
+                        // when the preset doesn't name one.
+                        if root.preset-name != "": HorizontalLayout {
                             alignment: start;
                             CharacterBadge {
-                                text: root.preset-character;
+                                text: root.preset-character-kind > 0 ? root.preset-character : "TONE";
                                 kind: root.preset-character-kind;
                                 font-size: 11px;
                             }

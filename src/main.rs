@@ -101,11 +101,15 @@ struct PresetNames {
 }
 
 impl PresetNames {
+    /// Display label: the pedal groups presets in banks of 3 (A/B/C), so
+    /// preset 125 with name "FULDRV" is shown as "41.FULDRV".
     fn name_for(&self, preset_num: i32) -> String {
         let names = self.names.lock().unwrap_or_else(|e| e.into_inner());
         usize::try_from(preset_num - 1)
             .ok()
-            .and_then(|i| names.get(i).cloned())
+            .and_then(|i| names.get(i))
+            .filter(|n| !n.is_empty())
+            .map(|n| format!("{}.{}", (clamp_preset(preset_num) - 1) / 3, n))
             .unwrap_or_default()
     }
 

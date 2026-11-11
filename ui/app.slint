@@ -222,23 +222,13 @@ export component AppWindow inherits Window {
                             background: is-selected ? Theme.selected : (row-ta.has-hover ? Theme.hover : transparent);
 
                             HorizontalLayout {
-                                padding-left: 8px;
+                                padding-left: 12px;
                                 padding-right: 10px;
-                                spacing: 12px;
 
                                 Text {
-                                    width: 34px;
-                                    text: number;
-                                    color: Theme.muted;
-                                    font-size: 12px;
-                                    horizontal-alignment: right;
-                                    vertical-alignment: center;
-                                }
-                                Text {
                                     horizontal-stretch: 1;
-                                    // Before names load the label is just the
-                                    // number, already shown in the left column.
-                                    text: (name == "" || name == number) ? "" : name;
+                                    // Before names load the label is the bare number.
+                                    text: name == "" ? number : name;
                                     color: is-selected ? Theme.ink : Theme.secondary-ink;
                                     font-size: 14px;
                                     font-weight: is-selected ? 600 : 400;

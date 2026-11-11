@@ -340,6 +340,49 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Result of one preset-details read.
+struct DetailsRead {
+    amp: Result<AmpParams, String>,
+    raw: Vec<f32>,
+    character: Option<String>,
+    level: Option<f32>,
+}
+
+impl DetailsRead {
+    fn failed(e: String) -> Self {
+        Self { amp: Err(e), raw: Vec::new(), character: None, level: None }
+    }
+}
+
+/// The lone float right after the preset name in a details payload:
+/// `B9 04 | B9 02 [BC 21 <33-byte name buffer> <strlen>] | BA 01 [88 <f32>] |
+/// BA 03 [params...] ...` (vit3k protocol.md capture; same shape on the big
+/// pedal per a hardware capture).
+///
+/// Assumed to be the preset volume, but NO reference names it: Builty's
+/// enum has no preset volume, and its older parser saw `BA 02 [unknown,
+/// tempo]` here. Read-only until confirmed on hardware.
+fn extract_preset_level(payload: &[u8]) -> Option<f32> {
+    let mut pos = find(payload, &NAME_MARKER)? + NAME_MARKER.len() + (NAME_LEN + 1);
+    read_u16_value(payload, &mut pos)?; // name strlen
+    let item = payload.get(pos..pos + 7)?;
+    if item[..3] != [0xBA, 0x01, FLOAT_TAG] {
+        return None;
+    }
+    let v = f32::from_le_bytes([item[3], item[4], item[5], item[6]]);
+    v.is_finite().then_some(v)
+}
+
+/// A live change of the float after the name: `0x0207` with body
+/// `B9 04 01 00 00 88 <f32>` (section 01, index 0), by analogy with
+/// Builty's preset-tempo message `B9 04 01 00 01 88 <f32>`. Unconfirmed.
+fn extract_level_change(payload: &[u8]) -> Option<f32> {
+    let start = find(payload, &[0xB9, 0x04, 0x01, 0x00, 0x00, FLOAT_TAG])? + 6;
+    let b = payload.get(start..start + 4)?;
+    let v = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+    v.is_finite().then_some(v)
+}
+
 /// Extracts the preset name from a preset-details payload, if present.
 fn extract_name(payload: &[u8]) -> Option<String> {
     let start = find(payload, &NAME_MARKER)? + NAME_MARKER.len();
@@ -765,6 +808,10 @@ pub enum Event {
     Disconnected(String),
     /// Result of `Pedal::request_names`.
     Names(Result<Vec<PresetMeta>, String>),
+    /// The lone per-preset float after the name (`BA 01 88 <f32>`), assumed
+    /// to be the preset volume; see `extract_preset_level`. `preset_idx` is
+    /// None for a live change (applies to the current preset).
+    PresetLevel { preset_idx: Option<u8>, value: f32 },
     /// Character of one preset (0-based), from a details read or push.
     Character { preset_idx: u8, character: String },
     /// Result of `Pedal::request_amp_params` (0-based preset index).
@@ -1028,10 +1075,13 @@ impl<F: Fn(Event)> Session<'_, F> {
             served = true;
         }
         if let Some(idx) = latest_read {
-            let (result, raw, character) = self.read_amp_params(idx)?;
-            (self.on_event)(Event::AmpParams { preset_idx: idx, result, raw });
-            if let Some(character) = character {
+            let read = self.read_amp_params(idx)?;
+            (self.on_event)(Event::AmpParams { preset_idx: idx, result: read.amp, raw: read.raw });
+            if let Some(character) = read.character {
                 (self.on_event)(Event::Character { preset_idx: idx, character });
+            }
+            if let Some(value) = read.level {
+                (self.on_event)(Event::PresetLevel { preset_idx: Some(idx), value });
             }
             served = true;
         }
@@ -1131,10 +1181,12 @@ impl<F: Fn(Event)> Session<'_, F> {
             return false;
         }
         if ty == Some(TYPE_PARAM_CHANGED) {
-            match extract_param_change(payload) {
-                Some((index, value)) => (self.on_event)(Event::ParamChanged { index, value }),
-                None if self.debug => eprintln!("TONEX serial: unparsed 0x0207: {}", hex(payload)),
-                None => {}
+            if let Some((index, value)) = extract_param_change(payload) {
+                (self.on_event)(Event::ParamChanged { index, value });
+            } else if let Some(value) = extract_level_change(payload) {
+                (self.on_event)(Event::PresetLevel { preset_idx: None, value });
+            } else if self.debug {
+                eprintln!("TONEX serial: unparsed 0x0207: {}", hex(payload));
             }
             return false;
         }
@@ -1150,6 +1202,9 @@ impl<F: Fn(Event)> Session<'_, F> {
                 (self.on_event)(Event::PresetChanged { preset_idx: idx, params, raw });
                 if let Some(character) = extract_character(payload) {
                     (self.on_event)(Event::Character { preset_idx: idx, character });
+                }
+                if let Some(value) = extract_preset_level(payload) {
+                    (self.on_event)(Event::PresetLevel { preset_idx: Some(idx), value });
                 }
                 return false;
             }
@@ -1174,16 +1229,20 @@ impl<F: Fn(Event)> Session<'_, F> {
         Ok(None)
     }
 
-    /// Ok(result) for the event; Err only for link failures (session ends).
-    /// Returns the amp params, the raw parameter array and the character.
-    #[allow(clippy::type_complexity)]
-    fn read_amp_params(&mut self, idx: u8) -> Result<(Result<AmpParams, String>, Vec<f32>, Option<String>), String> {
+    /// Reads preset `idx`'s details. Ok(read) for the events; Err only for
+    /// link failures (session ends).
+    fn read_amp_params(&mut self, idx: u8) -> Result<DetailsRead, String> {
         if usize::from(idx) >= PRESET_COUNT {
-            return Ok((Err(format!("preset index {idx} out of range")), Vec::new(), None));
+            return Ok(DetailsRead::failed(format!("preset index {idx} out of range")));
         }
         Ok(match self.fetch_details(idx, PRESET_TIMEOUT)? {
-            Some(payload) => (extract_amp_params(&payload), extract_param_array(&payload), extract_character(&payload)),
-            None => (Err("no preset details received".into()), Vec::new(), None),
+            Some(payload) => DetailsRead {
+                amp: extract_amp_params(&payload),
+                raw: extract_param_array(&payload),
+                character: extract_character(&payload),
+                level: extract_preset_level(&payload),
+            },
+            None => DetailsRead::failed("no preset details received".into()),
         })
     }
 
@@ -1402,6 +1461,31 @@ mod tests {
         assert_eq!(extract_state_preset(&p), None);
         let p = [0xB9, 0x03, 0x81, 0x04, 0x02, 0x01, 0x10, 5];
         assert_eq!(extract_state_preset(&p), None);
+    }
+
+    #[test]
+    fn extracts_preset_level_after_name() {
+        // Shape of vit3k's capture: name buffer (33 B) + strlen, BA 01 float.
+        let mut p = vec![0xB9, 0x03, 0x81, 0x04, 0x02];
+        p.extend_from_slice(&NAME_MARKER);
+        let mut name = b"BazPlexiTrebleCrunch".to_vec();
+        name.resize(NAME_LEN + 1, 0);
+        p.extend_from_slice(&name);
+        p.push(0x14);
+        p.extend_from_slice(&[0xBA, 0x01, FLOAT_TAG]);
+        p.extend_from_slice(&(-3.5f32).to_le_bytes());
+        p.extend_from_slice(&PARAM_MARKER);
+        assert_eq!(extract_preset_level(&p), Some(-3.5));
+        // Different shape → None (not misread).
+        let cut = p.len() - PARAM_MARKER.len() - 7;
+        let mut q = p[..cut].to_vec();
+        q.extend_from_slice(&[0xBA, 0x02, FLOAT_TAG, 0, 0, 0, 0]);
+        assert_eq!(extract_preset_level(&q), None);
+        // Live change, section 01 index 0.
+        let mut c = vec![0xB9, 0x03, 0x81, 0x07, 0x02, 0x0A, 0x80, 0x10, 0x03, 0xB9, 0x04, 0x01, 0x00, 0x00, FLOAT_TAG];
+        c.extend_from_slice(&2.0f32.to_le_bytes());
+        assert_eq!(extract_level_change(&c), Some(2.0));
+        assert_eq!(extract_param_change(&c), None);
     }
 
     #[test]

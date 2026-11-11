@@ -130,6 +130,8 @@ component Knob inherits VerticalLayout {
     in property <int> decimals: 1;
     in property <string> unit;
     in property <length> size: 48px;
+    // false: display only (no drag, no double-click reset), dimmed.
+    in property <bool> enabled: true;
     callback edited(float);
     out property <bool> active: ta.pressed;
     // Sweep of 270°: min → -135°, max → +135° (0° = straight up).
@@ -178,8 +180,10 @@ component Knob inherits VerticalLayout {
                 y: dial.height / 2 - dial.r * cos(root.sweep) - self.height / 2;
             }
 
+            opacity: root.enabled ? 1 : 0.55;
             ta := TouchArea {
-                mouse-cursor: ns-resize;
+                enabled: root.enabled;
+                mouse-cursor: root.enabled ? ns-resize : default;
                 pointer-event(event) => {
                     if (event.kind == PointerEventKind.down) {
                         root.drag-start = root.value;
@@ -489,6 +493,10 @@ export component AppWindow inherits Window {
 
     // Global (pedal-wide) levels in dB. id 0 input trim, 1 master volume.
     in-out property <float> global-trim: 0;
+    // Current preset's level float (read-only, unconfirmed meaning) and
+    // whether it has been read for this preset.
+    in property <float> preset-level: 0;
+    in property <bool> preset-level-known: false;
     in-out property <float> global-volume: 0;
     callback global-changed(int, float);
 
@@ -724,6 +732,27 @@ export component AppWindow inherits Window {
                             spacing: 8px;
                             padding-top: 12px;
 
+                            // Per-preset level: the float stored after the
+                            // preset name. Read-only until its meaning and a
+                            // write message are confirmed (see tonex_serial.rs).
+                            Knob {
+                                horizontal-stretch: 0;
+                                label: "Preset Vol";
+                                size: 40px;
+                                enabled: false;
+                                min-value: -20;
+                                max-value: 20;
+                                step: 0.1;
+                                default-value: 0;
+                                value: root.preset-level-known ? root.preset-level : 0;
+                                opacity: root.preset-level-known ? 1 : 0.4;
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                            }
+
                             // Pedal-wide (global) levels, not stored per preset.
                             Knob {
                                 horizontal-stretch: 0;
@@ -748,11 +777,6 @@ export component AppWindow inherits Window {
                                 unit: " dB";
                                 value <=> root.global-volume;
                                 edited(v) => { root.global-changed(1, v); }
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                min-width: 0px;
                             }
                         }
                     }

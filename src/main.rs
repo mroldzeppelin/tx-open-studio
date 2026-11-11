@@ -308,6 +308,8 @@ fn show_preset_meta(ui: &AppWindow, names: &PresetNames, preset: i32) {
 /// UI path, which sends separately, and for footswitch changes on the pedal).
 fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
     ui.set_preset(preset);
+    // Until the new preset's details arrive.
+    ui.set_preset_level_known(false);
     show_preset_meta(ui, names, preset);
     // A (re)loaded preset starts clean.
     ui.set_preset_dirty(false);
@@ -413,6 +415,16 @@ impl SyncCtx {
                 show_preset_meta(ui, &self.names, ui.get_preset());
             }
             Event::Names(Err(e)) => eprintln!("TONEX preset names read failed: {e}"),
+            Event::PresetLevel { preset_idx, value } => {
+                // Read-only display (see tonex_serial::extract_preset_level).
+                if std::env::var_os("TX_DEBUG_SERIAL").is_some() {
+                    eprintln!("TONEX: float after name (preset {preset_idx:?}): {value}");
+                }
+                if preset_idx.is_none_or(|i| i32::from(i) + 1 == ui.get_preset()) {
+                    ui.set_preset_level((value * 10.0).round() / 10.0);
+                    ui.set_preset_level_known(true);
+                }
+            }
             Event::Character { preset_idx, character } => {
                 if self.names.set_character(ui, preset_idx, character) && ui.get_preset() == i32::from(preset_idx) + 1 {
                     show_preset_meta(ui, &self.names, ui.get_preset());

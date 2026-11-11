@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=TX Open Studio
+Comment=Preset switcher and editor for the IK Multimedia TONEX Pedal
+Exec=tx-open-studio
+Icon=tx-open-studio
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+Keywords=guitar;midi;tonex;pedal;

@@ -270,7 +270,7 @@ component StateButton inherits Rectangle {
     callback toggled(bool);
 
     height: 26px;
-    min-width: 56px;
+    min-width: 48px;
     horizontal-stretch: 1;
     border-radius: 7px;
     border-width: 1px;
@@ -304,7 +304,7 @@ component Stepper inherits Rectangle {
     callback picked(int);
 
     height: 26px;
-    min-width: 84px;
+    min-width: 76px;
     horizontal-stretch: 1;
     border-radius: 7px;
     border-width: 1px;
@@ -360,41 +360,6 @@ component Stepper inherits Rectangle {
                         root.index += 1;
                         root.picked(root.index);
                     }
-                }
-            }
-        }
-    }
-}
-
-// Segmented buttons, one of `options` selected.
-component Segmented inherits HorizontalLayout {
-    in property <[string]> options;
-    in-out property <int> index;
-    callback picked(int);
-
-    spacing: 4px;
-    horizontal-stretch: 1;
-    for opt[i] in root.options: Rectangle {
-        height: 26px;
-        min-width: 44px;
-        horizontal-stretch: 1;
-        border-radius: 7px;
-        border-width: 1px;
-        border-color: root.index == i ? Theme.selected-border : Theme.border;
-        background: root.index == i ? Theme.selected : (seg-ta.has-hover ? Theme.hover : Theme.field);
-        Text {
-            text: opt;
-            color: root.index == i ? Theme.ink : Theme.secondary-ink;
-            font-size: 11px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-        seg-ta := TouchArea {
-            mouse-cursor: pointer;
-            clicked => {
-                if (root.index != i) {
-                    root.index = i;
-                    root.picked(i);
                 }
             }
         }
@@ -493,10 +458,10 @@ export component AppWindow inherits Window {
 
     // Global (pedal-wide) levels in dB. id 0 input trim, 1 master volume.
     in-out property <float> global-trim: 0;
-    // Current preset's level float (read-only, unconfirmed meaning) and
-    // whether it has been read for this preset.
-    in property <float> preset-level: 0;
+    // Current preset's volume (0..10) and whether it has been read.
+    in-out property <float> preset-level: 5;
     in property <bool> preset-level-known: false;
+    callback preset-level-changed(float);
     in-out property <float> global-volume: 0;
     callback global-changed(int, float);
 
@@ -732,20 +697,20 @@ export component AppWindow inherits Window {
                             spacing: 8px;
                             padding-top: 12px;
 
-                            // Per-preset level: the float stored after the
-                            // preset name. Read-only until its meaning and a
-                            // write message are confirmed (see tonex_serial.rs).
+                            // Per-preset output volume (pedal's PRESET VOLUME,
+                            // 0..10; serial section 03, see tonex_serial.rs).
+                            // Dimmed until read for this preset.
                             Knob {
                                 horizontal-stretch: 0;
                                 label: "Preset Vol";
                                 size: 40px;
-                                enabled: false;
-                                min-value: -20;
-                                max-value: 20;
+                                min-value: 0;
+                                max-value: 10;
                                 step: 0.1;
-                                default-value: 0;
-                                value: root.preset-level-known ? root.preset-level : 0;
-                                opacity: root.preset-level-known ? 1 : 0.4;
+                                default-value: 5;
+                                value <=> root.preset-level;
+                                opacity: root.preset-level-known ? 1 : 0.5;
+                                edited(v) => { root.preset-level-changed(v); }
                             }
 
                             Rectangle {
@@ -861,6 +826,8 @@ export component AppWindow inherits Window {
                     // Compressor card
                     Rectangle {
                         horizontal-stretch: 1;
+                        // Same preferred width for all FX cards: exact 50/50.
+                        preferred-width: 100px;
                         background: Theme.surface;
                         border-color: Theme.border;
                         border-width: 1px;
@@ -869,6 +836,9 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             padding: 12px;
                             spacing: 8px;
+                            // Header, selector row, knob row at the same
+                            // heights in every card; spare height goes below.
+                            alignment: start;
 
                             HorizontalLayout {
                                 Text {
@@ -935,6 +905,8 @@ export component AppWindow inherits Window {
                     // Modulation card; knob set depends on the selected type.
                     Rectangle {
                         horizontal-stretch: 1;
+                        // Same preferred width for all FX cards: exact 50/50.
+                        preferred-width: 100px;
                         background: Theme.surface;
                         border-color: Theme.border;
                         border-width: 1px;
@@ -949,6 +921,9 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             padding: 12px;
                             spacing: 8px;
+                            // Header, selector row, knob row at the same
+                            // heights in every card; spare height goes below.
+                            alignment: start;
 
                             HorizontalLayout {
                                 Text {
@@ -1063,6 +1038,8 @@ export component AppWindow inherits Window {
                     // Delay card
                     Rectangle {
                         horizontal-stretch: 1;
+                        // Same preferred width for all FX cards: exact 50/50.
+                        preferred-width: 100px;
                         background: Theme.surface;
                         border-color: Theme.border;
                         border-width: 1px;
@@ -1071,6 +1048,9 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             padding: 12px;
                             spacing: 8px;
+                            // Header, selector row, knob row at the same
+                            // heights in every card; spare height goes below.
+                            alignment: start;
 
                             HorizontalLayout {
                                 Text {
@@ -1086,9 +1066,10 @@ export component AppWindow inherits Window {
                                     toggled(on) => { root.fx-changed(0, on ? 1 : 0); }
                                 }
                             }
+                            // One selector row, like every FX card.
                             HorizontalLayout {
                                 spacing: 6px;
-                                Segmented {
+                                Stepper {
                                     options: ["Digital", "Tape"];
                                     index <=> root.dly-model;
                                     picked(i) => { root.fx-changed(2, i); }
@@ -1099,9 +1080,6 @@ export component AppWindow inherits Window {
                                     off-text: "Pre amp";
                                     toggled(on) => { root.fx-changed(1, on ? 1 : 0); }
                                 }
-                            }
-                            HorizontalLayout {
-                                spacing: 6px;
                                 StateButton {
                                     on <=> root.dly-sync;
                                     on-text: "Sync On";
@@ -1177,6 +1155,8 @@ export component AppWindow inherits Window {
                     // Reverb card
                     Rectangle {
                         horizontal-stretch: 1;
+                        // Same preferred width for all FX cards: exact 50/50.
+                        preferred-width: 100px;
                         background: Theme.surface;
                         border-color: Theme.border;
                         border-width: 1px;
@@ -1185,6 +1165,9 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             padding: 12px;
                             spacing: 8px;
+                            // Header, selector row, knob row at the same
+                            // heights in every card; spare height goes below.
+                            alignment: start;
 
                             HorizontalLayout {
                                 Text {

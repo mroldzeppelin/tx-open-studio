@@ -588,6 +588,9 @@ mod tests {
 pub struct PresetDiff {
     baseline: Vec<f32>,
     current: Vec<f32>,
+    /// Preset volume (section 03, not part of the array).
+    level_base: Option<f32>,
+    level_cur: Option<f32>,
 }
 
 /// Largest difference treated as "unchanged" for parameter `index`: half the
@@ -628,6 +631,20 @@ impl PresetDiff {
         self.current = raw.to_vec();
     }
 
+    /// Preset volume read with the preset's details: baseline right after
+    /// a preset load, else only the current value.
+    pub fn load_level(&mut self, value: f32) {
+        if self.level_base.is_none() {
+            self.level_base = Some(value);
+        }
+        self.level_cur = Some(value);
+    }
+
+    /// Preset volume changed (our write or a pedal report).
+    pub fn set_level(&mut self, value: f32) {
+        self.level_cur = Some(value);
+    }
+
     /// One parameter changed (our write or a pedal report).
     pub fn set(&mut self, index: usize, value: f32) {
         if let Some(v) = self.current.get_mut(index) {
@@ -636,7 +653,11 @@ impl PresetDiff {
     }
 
     pub fn dirty(&self) -> bool {
-        self.baseline
+        // Half the knob's 0.1 step.
+        let level_changed = matches!((self.level_base, self.level_cur), (Some(b), Some(c)) if (c - b).abs() > 0.05);
+        level_changed
+            || self
+                .baseline
             .iter()
             .zip(&self.current)
             .enumerate()
@@ -685,6 +706,22 @@ mod diff_tests {
         assert!(!d.dirty());
         d.set(12, 310.0);
         assert!(d.dirty());
+    }
+
+    #[test]
+    fn preset_level_participates() {
+        let mut d = PresetDiff::default();
+        d.load(&base());
+        d.load_level(8.0);
+        assert!(!d.dirty());
+        d.set_level(8.03);
+        assert!(!d.dirty());
+        d.set_level(7.0);
+        assert!(d.dirty());
+        d.load_level(7.0); // re-read keeps the 8.0 baseline
+        assert!(d.dirty());
+        d.set_level(8.0);
+        assert!(!d.dirty());
     }
 
     #[test]

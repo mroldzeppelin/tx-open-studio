@@ -138,6 +138,8 @@ struct AmpSync {
     last_cc: [Option<u8>; 7],
     knob_touched: [Option<Instant>; 7],
     enable_touched: Option<Instant>,
+    /// When the user last changed the preset volume (echo guard).
+    level_touched: Option<Instant>,
     /// Delay/reverb parameter mirror (see fx.rs).
     fx: fx::FxMirror,
     /// Loaded vs current preset values, for the "Changed" badge.
@@ -416,12 +418,20 @@ impl SyncCtx {
             }
             Event::Names(Err(e)) => eprintln!("TONEX preset names read failed: {e}"),
             Event::PresetLevel { preset_idx, value } => {
-                // Read-only display (see tonex_serial::extract_preset_level).
-                if std::env::var_os("TX_DEBUG_SERIAL").is_some() {
-                    eprintln!("TONEX: float after name (preset {preset_idx:?}): {value}");
+                // preset_idx: Some = details read, None = live change.
+                if !preset_idx.is_none_or(|i| i32::from(i) + 1 == ui.get_preset()) {
+                    return; // stale read of another preset
                 }
-                if preset_idx.is_none_or(|i| i32::from(i) + 1 == ui.get_preset()) {
-                    ui.set_preset_level((value * 10.0).round() / 10.0);
+                let mut amp = self.amp();
+                match preset_idx {
+                    Some(_) => amp.diff.load_level(value),
+                    None => amp.diff.set_level(value),
+                }
+                ui.set_preset_dirty(amp.diff.dirty());
+                let recent = amp.level_touched.is_some_and(|t| t.elapsed() < ECHO_GUARD);
+                if !recent && !ui.get_knob_active() {
+                    let (min, max) = tonex_serial::PRESET_LEVEL_RANGE;
+                    ui.set_preset_level(((value * 10.0).round() / 10.0).clamp(min, max));
                     ui.set_preset_level_known(true);
                 }
             }
@@ -663,6 +673,26 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Err(e) = ctx.with_serial(|p| p.request_globals()) {
                     eprintln!("TONEX global config request failed: {e}");
                 }
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let ctx = ctx.clone();
+        ui.on_preset_level_changed(move |value| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let (min, max) = tonex_serial::PRESET_LEVEL_RANGE;
+            let value = value.clamp(min, max);
+            let mut amp = ctx.amp();
+            amp.level_touched = Some(Instant::now());
+            match ctx.with_serial(|p| p.set_preset_level(value)) {
+                Ok(()) => {
+                    amp.diff.set_level(value);
+                    ui.set_preset_dirty(amp.diff.dirty());
+                    ui.set_preset_level_known(true);
+                }
+                Err(e) => eprintln!("TONEX preset volume write failed: {e}"),
             }
         });
     }

@@ -327,9 +327,10 @@ fn preset_request(index: u8) -> Vec<u8> {
 
 /// Single-parameter write (Builty `usb_tonex_send_single_parameter`, big
 /// pedal; needs the firmware that came with Editor support).
-fn set_param_request(index: u8, value: f32) -> Vec<u8> {
+/// `section` 02 = the 109-param array, 03 = preset volume (index 0).
+fn set_param_request(section: u8, index: u8, value: f32) -> Vec<u8> {
     let mut req = SET_PARAM_HEADER.to_vec();
-    req.extend_from_slice(&PARAM_CHANGED_MARKER);
+    req.extend_from_slice(&[0xB9, 0x04, section, 0x00]);
     req.push(index);
     req.push(FLOAT_TAG);
     req.extend_from_slice(&value.to_le_bytes());
@@ -354,33 +355,113 @@ impl DetailsRead {
     }
 }
 
-/// The lone float right after the preset name in a details payload:
-/// `B9 04 | B9 02 [BC 21 <33-byte name buffer> <strlen>] | BA 01 [88 <f32>] |
-/// BA 03 [params...] ...` (vit3k protocol.md capture; same shape on the big
-/// pedal per a hardware capture).
-///
-/// Assumed to be the preset volume, but NO reference names it: Builty's
-/// enum has no preset volume, and its older parser saw `BA 02 [unknown,
-/// tempo]` here. Read-only until confirmed on hardware.
-fn extract_preset_level(payload: &[u8]) -> Option<f32> {
-    let mut pos = find(payload, &NAME_MARKER)? + NAME_MARKER.len() + (NAME_LEN + 1);
-    read_u16_value(payload, &mut pos)?; // name strlen
-    let item = payload.get(pos..pos + 7)?;
-    if item[..3] != [0xBA, 0x01, FLOAT_TAG] {
+/// Byte length of the encoded value at `pos` (recursing into collections:
+/// `B9 n` / `BA n` = n items, `BC n` = n raw bytes, `88` = f32, `80` = 1
+/// extra byte, `81`/`82` = 2 extra bytes, < 0x80 = literal).
+fn value_len(p: &[u8], pos: usize) -> Option<usize> {
+    let b = *p.get(pos)?;
+    Some(match b {
+        0x00..=0x7F => 1,
+        0x80 => 2,
+        0x81 | 0x82 => 3,
+        FLOAT_TAG => 5,
+        0xBC => 2 + usize::from(*p.get(pos + 1)?),
+        0xB9 | 0xBA => {
+            let n = usize::from(*p.get(pos + 1)?);
+            let mut at = pos + 2;
+            for _ in 0..n {
+                at += value_len(p, at)?;
+            }
+            at - pos
+        }
+        _ => return None,
+    })
+}
+
+/// Start offsets of the items of the collection (`B9 n`/`BA n`) at `pos`.
+fn collection_items(p: &[u8], pos: usize) -> Option<Vec<usize>> {
+    if !matches!(p.get(pos)?, 0xB9 | 0xBA) {
         return None;
     }
-    let v = f32::from_le_bytes([item[3], item[4], item[5], item[6]]);
+    let n = usize::from(*p.get(pos + 1)?);
+    let mut at = pos + 2;
+    let mut items = Vec::with_capacity(n);
+    for _ in 0..n {
+        items.push(at);
+        at += value_len(p, at)?;
+    }
+    Some(items)
+}
+
+fn float_at(p: &[u8], pos: usize) -> Option<f32> {
+    let b = p.get(pos..pos + 5)?;
+    if b[0] != FLOAT_TAG {
+        return None;
+    }
+    let v = f32::from_le_bytes([b[1], b[2], b[3], b[4]]);
     v.is_finite().then_some(v)
 }
 
-/// A live change of the float after the name: `0x0207` with body
-/// `B9 04 01 00 00 88 <f32>` (section 01, index 0), by analogy with
-/// Builty's preset-tempo message `B9 04 01 00 01 88 <f32>`. Unconfirmed.
+/// Element 0 of float array `n` (0-based) inside the effects collection
+/// `BA 03 [BA 6D <109 params>, BA .., BA ..]`.
+fn effects_array_first(payload: &[u8], n: usize) -> Option<f32> {
+    let ba03 = find(payload, &PARAM_MARKER)?;
+    let arrays = collection_items(payload, ba03)?;
+    let first = *collection_items(payload, *arrays.get(n)?)?.first()?;
+    float_at(payload, first)
+}
+
+/// The float in the name group: `B9 02 [BC 21 <33 B> <strlen>] BA 01 [88 f32]`
+/// (vit3k capture). Only logged for diagnostics: the preset-volume knob
+/// sweep arrived as section 03, which isn't this array.
+fn name_group_float(payload: &[u8]) -> Option<f32> {
+    let mut pos = find(payload, &NAME_MARKER)? + NAME_MARKER.len() + (NAME_LEN + 1);
+    read_u16_value(payload, &mut pos)?; // name strlen
+    if payload.get(pos..pos + 2)? != [0xBA, 0x01] {
+        return None;
+    }
+    float_at(payload, pos + 2)
+}
+
+/// Write section of the preset volume (`B9 04 03 00 00 88 <f32>`), from a
+/// hardware capture of the pedal's PRESET VOLUME knob (values 9.2 … 6.9).
+pub const LEVEL_SECTION: u8 = 0x03;
+/// Section of the 109-entry parameter array (`B9 04 02 00 <idx> ...`).
+const PARAM_SECTION: u8 = 0x02;
+/// Preset volume range (as shown on the pedal; observed 6.9..9.2).
+pub const PRESET_LEVEL_RANGE: (f32, f32) = (0.0, 10.0);
+
+/// Preset volume from a details payload.
+///
+/// Writes address float arrays as `<section> 00 <index>`. Section 02 is the
+/// 109-param array (`BA 03`'s first array, confirmed), and Builty's old
+/// preset-tempo write `01 00 01` hit element 1 of the name group's float
+/// array, i.e. sections count float arrays in document order. Section 03 is
+/// then the second array inside `BA 03`, element 0. UNVERIFIED against a
+/// details dump: `TX_DEBUG_SERIAL=1` logs every candidate
+/// (`preset_level_candidates`) to settle it. Range-checked so a wrong guess
+/// shows nothing rather than nonsense.
+fn extract_preset_level(payload: &[u8]) -> Option<f32> {
+    effects_array_first(payload, 1).filter(|v| (PRESET_LEVEL_RANGE.0..=PRESET_LEVEL_RANGE.1).contains(v))
+}
+
+/// All plausible locations of the preset volume, for a debug log.
+fn preset_level_candidates(payload: &[u8]) -> String {
+    format!(
+        "name-group BA01[0]={:?}  BA03[0][0]={:?}  BA03[1][0]={:?}  BA03[2][0]={:?}",
+        name_group_float(payload),
+        effects_array_first(payload, 0),
+        effects_array_first(payload, 1),
+        effects_array_first(payload, 2),
+    )
+}
+
+/// A live change of the preset volume: `0x0207` with body
+/// `B9 04 03 00 00 88 <f32>` (captured on hardware while turning the knob:
+/// `B9 03 81 07 02 0A 02 B9 04 03 00 00 88 <f32>`).
 fn extract_level_change(payload: &[u8]) -> Option<f32> {
-    let start = find(payload, &[0xB9, 0x04, 0x01, 0x00, 0x00, FLOAT_TAG])? + 6;
-    let b = payload.get(start..start + 4)?;
-    let v = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-    v.is_finite().then_some(v)
+    let start = find(payload, &[0xB9, 0x04, LEVEL_SECTION, 0x00, 0x00, FLOAT_TAG])? + 5;
+    float_at(payload, start)
 }
 
 /// Extracts the preset name from a preset-details payload, if present.
@@ -883,7 +964,8 @@ pub fn knob_from_pedal(v: f32) -> Option<f32> {
 enum Request {
     Names,
     AmpParams(u8),
-    SetParam(u8, f32),
+    /// (section, index, value).
+    SetParam(u8, u8, f32),
     Globals,
     SetGlobal(usize, f32),
 }
@@ -937,12 +1019,17 @@ impl Pedal {
     /// Writes one preset parameter (index < 0x80) on the pedal.
     pub fn set_param(&self, index: usize, value: f32) -> Result<(), String> {
         match u8::try_from(index) {
-            Ok(i) if i < 0x80 => self.send(Request::SetParam(i, value)),
+            Ok(i) if i < 0x80 => self.send(Request::SetParam(PARAM_SECTION, i, value)),
             _ => Err(format!("param index {index} not supported for writes")),
         }
     }
 
     /// Reads the amp params of `preset_idx` (0-based).
+    /// Writes the current preset's volume (section 03, index 0).
+    pub fn set_preset_level(&self, value: f32) -> Result<(), String> {
+        self.send(Request::SetParam(LEVEL_SECTION, 0, value))
+    }
+
     pub fn request_amp_params(&self, preset_idx: u8) -> Result<(), String> {
         self.send(Request::AmpParams(preset_idx))
     }
@@ -1040,7 +1127,7 @@ impl<F: Fn(Event)> Session<'_, F> {
     /// Serves queued quick requests: all writes (in order), then only the
     /// newest amp-params read. Returns whether anything was served.
     fn serve_quick(&mut self) -> Result<bool, String> {
-        let mut writes: Vec<(u8, f32)> = Vec::new();
+        let mut writes: Vec<(u8, u8, f32)> = Vec::new();
         let mut global_writes: Vec<(usize, f32)> = Vec::new();
         let mut read_globals = false;
         let mut latest_read = None;
@@ -1049,10 +1136,12 @@ impl<F: Fn(Event)> Session<'_, F> {
             match r {
                 // A drag queues many writes per param: keep the latest value,
                 // in first-seen order across params.
-                Request::SetParam(index, value) => match writes.iter_mut().find(|(i, _)| *i == index) {
-                    Some(w) => w.1 = value,
-                    None => writes.push((index, value)),
-                },
+                Request::SetParam(section, index, value) => {
+                    match writes.iter_mut().find(|(s, i, _)| (*s, *i) == (section, index)) {
+                        Some(w) => w.2 = value,
+                        None => writes.push((section, index, value)),
+                    }
+                }
                 Request::SetGlobal(index, value) => match global_writes.iter_mut().find(|(i, _)| *i == index) {
                     Some(w) => w.1 = value,
                     None => global_writes.push((index, value)),
@@ -1063,8 +1152,8 @@ impl<F: Fn(Event)> Session<'_, F> {
             }
         }
         self.queue = rest;
-        for &(index, value) in &writes {
-            self.link.send(&set_param_request(index, value))?;
+        for &(section, index, value) in &writes {
+            self.link.send(&set_param_request(section, index, value))?;
         }
         let mut served = !writes.is_empty() || !global_writes.is_empty();
         if !global_writes.is_empty() {
@@ -1235,7 +1324,11 @@ impl<F: Fn(Event)> Session<'_, F> {
         if usize::from(idx) >= PRESET_COUNT {
             return Ok(DetailsRead::failed(format!("preset index {idx} out of range")));
         }
-        Ok(match self.fetch_details(idx, PRESET_TIMEOUT)? {
+        let details = self.fetch_details(idx, PRESET_TIMEOUT)?;
+        if let (true, Some(payload)) = (self.debug, details.as_deref()) {
+            eprintln!("TONEX serial: preset {idx} level candidates: {}", preset_level_candidates(payload));
+        }
+        Ok(match details {
             Some(payload) => DetailsRead {
                 amp: extract_amp_params(&payload),
                 raw: extract_param_array(&payload),
@@ -1464,28 +1557,60 @@ mod tests {
     }
 
     #[test]
-    fn extracts_preset_level_after_name() {
-        // Shape of vit3k's capture: name buffer (33 B) + strlen, BA 01 float.
+    fn parses_captured_preset_volume_frames() {
+        // Exact frames pushed while turning PRESET VOLUME (9.2, then 6.9).
+        for v in [9.2f32, 6.9] {
+            let mut f = vec![0xB9, 0x03, 0x81, 0x07, 0x02, 0x0A, 0x02, 0xB9, 0x04, 0x03, 0x00, 0x00, 0x88];
+            f.extend_from_slice(&v.to_le_bytes());
+            assert_eq!(frame_type(&f), Some(TYPE_PARAM_CHANGED));
+            assert_eq!(extract_level_change(&f), Some(v));
+            assert_eq!(extract_param_change(&f), None);
+        }
+    }
+
+    #[test]
+    fn preset_level_write_bytes() {
+        let req = set_param_request(LEVEL_SECTION, 0, 7.5);
+        let mut want = SET_PARAM_HEADER.to_vec();
+        want.extend_from_slice(&[0xB9, 0x04, 0x03, 0x00, 0x00, 0x88]);
+        want.extend_from_slice(&7.5f32.to_le_bytes());
+        assert_eq!(req, want);
+        // Body length matches the header's size field (0x0A).
+        assert_eq!(req.len() - SET_PARAM_HEADER.len(), 0x0A);
+        // The pedal's own push format parses back.
+        assert_eq!(extract_level_change(&req), Some(7.5));
+    }
+
+    #[test]
+    fn walks_effects_arrays() {
+        // name group with BA 01 float, then BA 03 [BA 03 params, BA 02, BA 01].
         let mut p = vec![0xB9, 0x03, 0x81, 0x04, 0x02];
         p.extend_from_slice(&NAME_MARKER);
-        let mut name = b"BazPlexiTrebleCrunch".to_vec();
-        name.resize(NAME_LEN + 1, 0);
-        p.extend_from_slice(&name);
-        p.push(0x14);
-        p.extend_from_slice(&[0xBA, 0x01, FLOAT_TAG]);
-        p.extend_from_slice(&(-3.5f32).to_le_bytes());
-        p.extend_from_slice(&PARAM_MARKER);
-        assert_eq!(extract_preset_level(&p), Some(-3.5));
-        // Different shape → None (not misread).
-        let cut = p.len() - PARAM_MARKER.len() - 7;
-        let mut q = p[..cut].to_vec();
-        q.extend_from_slice(&[0xBA, 0x02, FLOAT_TAG, 0, 0, 0, 0]);
-        assert_eq!(extract_preset_level(&q), None);
-        // Live change, section 01 index 0.
-        let mut c = vec![0xB9, 0x03, 0x81, 0x07, 0x02, 0x0A, 0x80, 0x10, 0x03, 0xB9, 0x04, 0x01, 0x00, 0x00, FLOAT_TAG];
-        c.extend_from_slice(&2.0f32.to_le_bytes());
-        assert_eq!(extract_level_change(&c), Some(2.0));
-        assert_eq!(extract_param_change(&c), None);
+        p.extend_from_slice(&[0u8; NAME_LEN + 1]);
+        p.push(0x00); // strlen
+        p.extend_from_slice(&[0xBA, 0x01, 0x88]);
+        p.extend_from_slice(&1.0f32.to_le_bytes());
+        let ba03 = p.len();
+        p.extend_from_slice(&[0xBA, 0x03, 0xBA, 0x03]);
+        for v in [0.0f32, 2.0, 3.0] {
+            p.push(0x88);
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        p.extend_from_slice(&[0xBA, 0x02]);
+        for v in [8.3f32, 4.0] {
+            p.push(0x88);
+            p.extend_from_slice(&v.to_le_bytes());
+        }
+        p.extend_from_slice(&[0xBA, 0x01, 0x88]);
+        p.extend_from_slice(&5.5f32.to_le_bytes());
+        // Real data is found via the `BA 03 BA 6D` marker; here the walker
+        // is tested directly from the known offset.
+        let arrays = collection_items(&p, ba03).unwrap();
+        assert_eq!(arrays.len(), 3);
+        assert_eq!(float_at(&p, collection_items(&p, arrays[1]).unwrap()[0]), Some(8.3));
+        assert_eq!(float_at(&p, collection_items(&p, arrays[2]).unwrap()[0]), Some(5.5));
+        assert_eq!(name_group_float(&p), Some(1.0));
+        assert_eq!(value_len(&p, ba03), Some(p.len() - ba03));
     }
 
     #[test]
@@ -1519,7 +1644,7 @@ mod tests {
 
     #[test]
     fn set_param_matches_builty_bytes() {
-        let req = set_param_request(18, 1.0);
+        let req = set_param_request(PARAM_SECTION, 18, 1.0);
         assert_eq!(
             req,
             [
@@ -1535,7 +1660,7 @@ mod tests {
     #[test]
     fn parses_param_changed_frame() {
         // Same layout as our write; the pedal reports changes this way.
-        let frame = set_param_request(P_MODEL_GAIN as u8, 7.5);
+        let frame = set_param_request(PARAM_SECTION, P_MODEL_GAIN as u8, 7.5);
         assert_eq!(extract_param_change(&frame), Some((P_MODEL_GAIN, 7.5)));
         assert_eq!(AmpKnob::from_param_index(P_MODEL_GAIN), Some(AmpKnob::Gain));
         assert_eq!(AmpKnob::from_param_index(P_AMP_ENABLE), None);

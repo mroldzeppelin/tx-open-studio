@@ -408,10 +408,6 @@ export component AppWindow inherits Window {
 
     in-out property <int> preset: 43;
     in property <string> preset-name;
-    // Bare name of the current preset (no bank prefix), to prefill editing.
-    in property <string> preset-raw-name;
-    // True while the name is being edited in place.
-    in-out property <bool> editing-name: false;
     // Character of the current preset ("" = unknown → no badge) and its
     // colour group (see PresetRow.kind).
     in property <string> preset-character;
@@ -438,8 +434,6 @@ export component AppWindow inherits Window {
 
     callback preset-changed(int);
     callback reconnect();
-    // User confirmed a new name for the current preset.
-    callback rename-preset(string);
     // User turned an amp knob. id: 0 gain, 1 volume, 2 presence, 3 depth,
     // 4 bass, 5 mid, 6 treble (matches AmpParam in main.rs).
     callback amp-param-changed(int, float);
@@ -687,83 +681,14 @@ export component AppWindow inherits Window {
                         }
 
                         // Name read over USB serial; falls back to the bare
-                        // preset number until names are loaded. The pencil
-                        // (only once a name is known) edits it in place:
-                        // Enter confirms, Esc or losing focus cancels.
-                        HorizontalLayout {
-                            spacing: 10px;
-
-                            if !root.editing-name: Text {
-                                horizontal-stretch: 0;
-                                text: root.preset-name == "" ? root.preset : root.preset-name;
-                                color: Theme.ink;
-                                font-size: 30px;
-                                font-weight: 700;
-                                overflow: elide;
-                                wrap: no-wrap;
-                            }
-                            if !root.editing-name && root.preset-name != "": Rectangle {
-                                width: 28px;
-                                border-radius: 6px;
-                                background: pencil-ta.has-hover ? Theme.hover : transparent;
-                                Text {
-                                    text: "✎";
-                                    color: pencil-ta.has-hover ? Theme.ink : Theme.muted;
-                                    font-size: 18px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                                pencil-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        root.editing-name = true;
-                                    }
-                                }
-                            }
-                            if root.editing-name: Rectangle {
-                                horizontal-stretch: 1;
-                                border-radius: 8px;
-                                border-width: 1px;
-                                border-color: Theme.selected-border;
-                                background: Theme.field;
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    name-input := TextInput {
-                                        text: root.preset-raw-name;
-                                        color: Theme.ink;
-                                        selection-background-color: Theme.selected;
-                                        font-size: 30px;
-                                        font-weight: 700;
-                                        single-line: true;
-                                        vertical-alignment: center;
-                                        init => {
-                                            self.focus();
-                                            self.select-all();
-                                        }
-                                        accepted => {
-                                            root.editing-name = false;
-                                            root.rename-preset(self.text);
-                                        }
-                                        key-pressed(event) => {
-                                            if (event.text == Key.Escape) {
-                                                root.editing-name = false;
-                                                return accept;
-                                            }
-                                            reject
-                                        }
-                                        changed has-focus => {
-                                            if (!self.has-focus) {
-                                                root.editing-name = false;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if !root.editing-name: Rectangle {
-                                horizontal-stretch: 1;
-                                min-width: 0px;
-                            }
+                        // preset number until names are loaded.
+                        Text {
+                            text: root.preset-name == "" ? root.preset : root.preset-name;
+                            color: Theme.ink;
+                            font-size: 30px;
+                            font-weight: 700;
+                            overflow: elide;
+                            wrap: no-wrap;
                         }
                         // Character from the preset's metadata; gray TONE
                         // when the preset doesn't name one.

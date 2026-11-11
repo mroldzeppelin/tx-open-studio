@@ -296,29 +296,10 @@ impl PresetNames {
     }
 }
 
-/// Longest preset name the pedal stores (32-byte NUL-padded field).
-const PRESET_NAME_MAX: usize = 32;
-
-/// Cleans a user-entered preset name: trimmed, cut to 32 bytes on a char
-/// boundary. None if empty.
-fn clean_preset_name(input: &str) -> Option<String> {
-    let mut name = input.trim();
-    if name.len() > PRESET_NAME_MAX {
-        let mut cut = PRESET_NAME_MAX;
-        while !name.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        name = name[..cut].trim_end();
-    }
-    (!name.is_empty()).then(|| name.to_string())
-}
-
 /// Header card: name and character badge of `preset`.
 fn show_preset_meta(ui: &AppWindow, names: &PresetNames, preset: i32) {
     ui.set_preset_name(names.name_for(preset).into());
-    let meta = names.meta(preset);
-    ui.set_preset_raw_name(meta.name.into());
-    let character = meta.character;
+    let character = names.meta(preset).character;
     ui.set_preset_character_kind(character_kind(&character));
     ui.set_preset_character(character.into());
 }
@@ -327,8 +308,6 @@ fn show_preset_meta(ui: &AppWindow, names: &PresetNames, preset: i32) {
 /// UI path, which sends separately, and for footswitch changes on the pedal).
 fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
     ui.set_preset(preset);
-    // Leaving a preset abandons an unfinished rename.
-    ui.set_editing_name(false);
     show_preset_meta(ui, names, preset);
     // A (re)loaded preset starts clean.
     ui.set_preset_dirty(false);
@@ -677,31 +656,6 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let ctx = ctx.clone();
-        ui.on_rename_preset(move |input| {
-            let Some(ui) = ui_weak.upgrade() else { return };
-            let preset = ui.get_preset();
-            let Some(name) = clean_preset_name(&input) else { return };
-            if name == ctx.names.meta(preset).name {
-                return;
-            }
-            // No confirmed way to write a preset name exists in the
-            // references: Builty's big-pedal driver leaves USB_COMMAND_SAVE_PRESET
-            // as "todo - need to send back the entire 32kb+ preset details"
-            // (usb_tonex.c), and brunothesatellite/tonexpedal renames only in
-            // its own localStorage. So nothing is sent and the local caches are
-            // left alone: the header keeps showing the pedal's name.
-            eprintln!(
-                "TONEX: rename of preset {preset} to {name:?} not sent: the serial message that writes \
-                 a preset name (and whether a separate save/store command is needed) is unknown; \
-                 capture what the official editor sends to implement it"
-            );
-            show_preset_meta(&ui, &ctx.names, preset);
-        });
-    }
-
-    {
-        let ui_weak = ui.as_weak();
-        let ctx = ctx.clone();
         ui.on_fx_changed(move |id, value| {
             let Some(ui) = ui_weak.upgrade() else { return };
             match fx::FxControl::from_id(id) {
@@ -738,17 +692,6 @@ fn main() -> Result<(), slint::PlatformError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn preset_name_cleaning() {
-        assert_eq!(clean_preset_name("  CL Twin "), Some("CL Twin".into()));
-        assert_eq!(clean_preset_name("   "), None);
-        let long = "A".repeat(40);
-        assert_eq!(clean_preset_name(&long).map(|n| n.len()), Some(32));
-        // Multi-byte char straddling byte 32 is dropped, not split.
-        let s = format!("{}é", "B".repeat(31));
-        assert_eq!(clean_preset_name(&s), Some("B".repeat(31)));
-    }
 
     #[test]
     fn character_kinds() {

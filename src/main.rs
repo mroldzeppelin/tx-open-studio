@@ -482,9 +482,11 @@ impl SyncCtx {
         ui.set_preset_dirty(amp.diff.dirty());
     }
 
-    /// User changed a delay/reverb control: write it over serial.
+    /// User changed an effect-card control: write it over serial.
     fn fx_changed(&self, ui: &AppWindow, control: fx::FxControl, value: f32) {
-        let index = fx::index_for(ui, control);
+        let Some(index) = fx::index_for(ui, control) else {
+            return; // knob slot the selected modulation model doesn't have
+        };
         let mut amp = self.amp();
         match self.with_serial(|p| p.set_param(index, value)) {
             Ok(()) => {

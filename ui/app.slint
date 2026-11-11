@@ -401,7 +401,7 @@ export component AppWindow inherits Window {
     title: "TX Open Studio";
     icon: @image-url("../assets/icon.png");
     preferred-width: 960px;
-    preferred-height: 860px;
+    preferred-height: 1020px;
     min-width: 780px;
     min-height: 600px;
     background: Theme.bg;
@@ -461,12 +461,31 @@ export component AppWindow inherits Window {
     // Pedal's time-signature list (index = value sent to the pedal).
     out property <[string]> delay-divisions: ["1/32", "1/32 D", "1/32 T", "1/16", "1/16 D", "1/16 T", "1/8", "1/8 D", "1/8 T",
         "1/4", "1/4 D", "1/4 T", "1/2", "1/2 D", "1/2 T", "1/1", "1/1 D", "1/1 T"];
-    // User changed a delay/reverb control. id (matches FxControl in main.rs):
+    // User changed an effect control. id (matches FxControl in fx.rs):
     // 0 dly on, 1 dly post, 2 dly model, 3 dly sync, 4 dly division,
     // 5 dly time, 6 dly feedback, 7 dly ping-pong, 8 dly mix,
     // 10 rvb on, 11 rvb post, 12 rvb model, 13 rvb time, 14 rvb predelay,
-    // 15 rvb color, 16 rvb mix.
+    // 15 rvb color, 16 rvb mix,
+    // 20 comp on, 21 comp post, 22 comp threshold, 23 comp gain, 24 comp attack,
+    // 30 mod on, 31 mod post, 32 mod model, 33 mod sync, 34 mod division,
+    // 35..38 mod knobs 1..4 of the selected type.
     callback fx-changed(int, float);
+
+    // Compressor / Modulation (pedal units; see fx.rs).
+    in-out property <bool> comp-enabled: false;
+    in-out property <bool> comp-post: true;
+    in-out property <float> comp-threshold: -14;
+    in-out property <float> comp-gain: -12;
+    in-out property <float> comp-attack: 14;
+    in-out property <bool> mod-enabled: false;
+    in-out property <bool> mod-post: false;
+    in-out property <int> mod-model: 0;
+    in-out property <bool> mod-sync: false;
+    in-out property <int> mod-division: 9;
+    in-out property <float> mod-k1: 0.5;
+    in-out property <float> mod-k2: 0;
+    in-out property <float> mod-k3: 5;
+    in-out property <float> mod-k4: 5;
 
     // Global (pedal-wide) levels in dB. id 0 input trim, 1 master volume.
     in-out property <float> global-trim: 0;
@@ -804,6 +823,208 @@ export component AppWindow inherits Window {
                                 label: "Treble";
                                 value <=> root.amp-treble;
                                 edited(v) => { root.amp-param-changed(6, v); }
+                            }
+                        }
+                    }
+                }
+
+                // Compressor + Modulation, side by side; written and read over
+                // USB serial like Delay/Reverb (see fx.rs FxControl).
+                HorizontalLayout {
+                    vertical-stretch: 0;
+                    spacing: 14px;
+
+                    // Compressor card
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: Theme.surface;
+                        border-color: Theme.border;
+                        border-width: 1px;
+                        border-radius: 12px;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Compressor";
+                                    color: Theme.ink;
+                                    font-size: 15px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                OnOffChip {
+                                    on <=> root.comp-enabled;
+                                    toggled(on) => { root.fx-changed(20, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                StateButton {
+                                    on <=> root.comp-post;
+                                    on-text: "Post amp";
+                                    off-text: "Pre amp";
+                                    toggled(on) => { root.fx-changed(21, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Knob {
+                                    label: "Threshold";
+                                    size: 40px;
+                                    min-value: -40;
+                                    max-value: 0;
+                                    step: 0.1;
+                                    default-value: -14;
+                                    unit: " dB";
+                                    value <=> root.comp-threshold;
+                                    edited(v) => { root.fx-changed(22, v); }
+                                }
+                                Knob {
+                                    label: "Gain";
+                                    size: 40px;
+                                    min-value: -30;
+                                    max-value: 10;
+                                    step: 0.1;
+                                    default-value: -12;
+                                    unit: " dB";
+                                    value <=> root.comp-gain;
+                                    edited(v) => { root.fx-changed(23, v); }
+                                }
+                                Knob {
+                                    label: "Attack";
+                                    size: 40px;
+                                    min-value: 1;
+                                    max-value: 51;
+                                    step: 1;
+                                    decimals: 0;
+                                    default-value: 14;
+                                    unit: " ms";
+                                    value <=> root.comp-attack;
+                                    edited(v) => { root.fx-changed(24, v); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Modulation card; knob set depends on the selected type.
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: Theme.surface;
+                        border-color: Theme.border;
+                        border-width: 1px;
+                        border-radius: 12px;
+
+                        // Per-type knob definitions, indexed by mod-model
+                        // (Chorus, Tremolo, Phaser, Flanger, Rotary); ranges
+                        // must match MOD_KNOBS in fx.rs.
+                        property <int> m: clamp(root.mod-model, 0, 4);
+                        property <bool> has-k4: m == 1 || m == 3 || m == 4;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Modulation";
+                                    color: Theme.ink;
+                                    font-size: 15px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                OnOffChip {
+                                    on <=> root.mod-enabled;
+                                    toggled(on) => { root.fx-changed(30, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Stepper {
+                                    options: ["Chorus", "Tremolo", "Phaser", "Flanger", "Rotary"];
+                                    index <=> root.mod-model;
+                                    picked(i) => { root.fx-changed(32, i); }
+                                }
+                                StateButton {
+                                    on <=> root.mod-post;
+                                    on-text: "Post amp";
+                                    off-text: "Pre amp";
+                                    toggled(on) => { root.fx-changed(31, on ? 1 : 0); }
+                                }
+                                StateButton {
+                                    on <=> root.mod-sync;
+                                    on-text: "Sync On";
+                                    off-text: "Sync Off";
+                                    toggled(on) => { root.fx-changed(33, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                // Synced: note division instead of rate/speed.
+                                if root.mod-sync: VerticalLayout {
+                                    horizontal-stretch: 2;
+                                    spacing: 4px;
+                                    alignment: center;
+                                    Text {
+                                        text: "Division";
+                                        color: Theme.muted;
+                                        font-size: 12px;
+                                        horizontal-alignment: center;
+                                    }
+                                    Stepper {
+                                        options: root.delay-divisions;
+                                        index <=> root.mod-division;
+                                        picked(i) => { root.fx-changed(34, i); }
+                                    }
+                                }
+                                if !root.mod-sync: Knob {
+                                    label: m == 4 ? "Speed" : "Rate";
+                                    size: 40px;
+                                    min-value: m == 4 ? 0 : 0.1;
+                                    max-value: m == 4 ? 400 : 10;
+                                    step: m == 4 ? 1 : 0.1;
+                                    decimals: m == 4 ? 0 : 1;
+                                    unit: m == 4 ? "" : " Hz";
+                                    default-value: m == 4 ? 200 : 0.5;
+                                    value <=> root.mod-k1;
+                                    edited(v) => { root.fx-changed(35, v); }
+                                }
+                                Knob {
+                                    label: ["Depth", "Shape", "Depth", "Depth", "Radius"][m];
+                                    size: 40px;
+                                    min-value: 0;
+                                    max-value: [100, 10, 100, 100, 300][m];
+                                    step: m == 1 ? 0.1 : 1;
+                                    decimals: m == 1 ? 1 : 0;
+                                    unit: m == 1 || m == 4 ? "" : "%";
+                                    default-value: m == 4 ? 150 : 0;
+                                    value <=> root.mod-k2;
+                                    edited(v) => { root.fx-changed(36, v); }
+                                }
+                                Knob {
+                                    label: ["Level", "Spread", "Level", "Feedback", "Spread"][m];
+                                    size: 40px;
+                                    min-value: 0;
+                                    max-value: [10, 100, 10, 100, 100][m];
+                                    step: m == 0 || m == 2 ? 0.1 : 1;
+                                    decimals: m == 0 || m == 2 ? 1 : 0;
+                                    unit: m == 0 || m == 2 ? "" : "%";
+                                    default-value: m == 0 || m == 2 ? 5 : 0;
+                                    value <=> root.mod-k3;
+                                    edited(v) => { root.fx-changed(37, v); }
+                                }
+                                if has-k4: Knob {
+                                    label: "Level";
+                                    size: 40px;
+                                    min-value: 0;
+                                    max-value: 10;
+                                    step: 0.1;
+                                    default-value: 5;
+                                    value <=> root.mod-k4;
+                                    edited(v) => { root.fx-changed(38, v); }
+                                }
                             }
                         }
                     }

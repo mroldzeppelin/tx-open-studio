@@ -522,12 +522,11 @@ fn global_write_request(received: &[u8]) -> Result<Vec<u8>, String> {
     if frame_type(received) != Some(TYPE_GLOBAL_CONFIG) {
         return Err("stored global config has an unexpected header".into());
     }
-    // Header: B9 03 <type> <size> <unknown>.
-    let mut pos = 2;
-    for _ in 0..3 {
-        read_u16_value(received, &mut pos).ok_or("unparsable global config header")?;
-    }
-    let body = &received[pos..];
+    // The body always starts at `B9 01 B9 02 BA 16`; locating it by marker
+    // is robust against header-encoding variations (literal vs 80-prefixed).
+    let start = find(received, &[0xB9, 0x01, 0xB9, 0x02, 0xBA, 0x16])
+        .ok_or("global config body marker not found")?;
+    let body = &received[start..];
     let len = u16::try_from(body.len()).map_err(|_| "global config too large")?;
     let mut req = GLOBAL_WRITE_HEADER.to_vec();
     req[6..8].copy_from_slice(&len.to_le_bytes());
@@ -691,7 +690,16 @@ fn candidate_ports() -> Vec<PathBuf> {
 fn read_u16_value(p: &[u8], pos: &mut usize) -> Option<u16> {
     let b = *p.get(*pos)?;
     match b {
-        0x80..=0x82 => {
+        // One extra byte: u8 values 128..=255 (seen on the wire as
+        // `80 8C` for preset index 140; the next byte after it is the
+        // following value, not a high byte).
+        0x80 => {
+            let v = *p.get(*pos + 1)?;
+            *pos += 2;
+            Some(u16::from(v))
+        }
+        // Two extra bytes: u16 LE.
+        0x81 | 0x82 => {
             let lo = *p.get(*pos + 1)?;
             let hi = *p.get(*pos + 2)?;
             *pos += 3;
@@ -1331,8 +1339,9 @@ mod tests {
         // Exact frame from the user's pedal (on preset 10 = index 9).
         let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x04, 0x10, 0xB9, 0x02, 0x09, 0x00];
         assert_eq!(extract_state_preset(&p), Some(9));
-        // Same layout, preset >= 128 as `80 lo hi`.
-        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x06, 0x10, 0xB9, 0x02, 0x80, 140, 0x00, 0x00];
+        // Exact frame from the user's pedal on preset 141: `80 <u8>` is a
+        // ONE-byte extended value; the 0x01 after it is the next list item.
+        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x05, 0x10, 0xB9, 0x02, 0x80, 0x8C, 0x01];
         assert_eq!(extract_state_preset(&p), Some(140));
     }
 
@@ -1382,16 +1391,16 @@ mod tests {
 
     #[test]
     fn extracts_state_preset() {
-        // Builty's layout: preset index is unframed[9].
-        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x01, 0x80, 0x10, 0x03, 63];
+        // Index as a bare value right after the header (no list wrapper).
+        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x01, 0x10, 63];
         assert_eq!(extract_state_preset(&p), Some(63));
-        // Preset >= 128 encoded as u16 `80 lo hi`; 2-byte size field.
-        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x82, 0x03, 0x00, 0x80, 0x10, 0x03, 0x80, 140, 0x00];
+        // 2-byte size field; index >= 128 as one-byte-extended `80 <u8>`.
+        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x82, 0x03, 0x00, 0x10, 0x80, 140];
         assert_eq!(extract_state_preset(&p), Some(140));
         // Out of range / wrong type.
-        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x03, 0x80, 0x10, 0x03, 0x80, 200, 0x00];
+        let p = [0xB9, 0x03, 0x81, 0x01, 0x02, 0x03, 0x10, 0x80, 200];
         assert_eq!(extract_state_preset(&p), None);
-        let p = [0xB9, 0x03, 0x81, 0x04, 0x02, 0x01, 0x80, 0x10, 0x03, 5];
+        let p = [0xB9, 0x03, 0x81, 0x04, 0x02, 0x01, 0x10, 5];
         assert_eq!(extract_state_preset(&p), None);
     }
 

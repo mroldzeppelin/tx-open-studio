@@ -1,0 +1,4 @@
+# IK Multimedia TONEX Pedal — grant the active seated user access to the
+# USB CDC serial port (preset names protocol). Installed to
+# /etc/udev/rules.d/ (or /usr/lib/udev/rules.d/ when packaged).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1963", ATTRS{idProduct}=="0068", TAG+="uaccess"

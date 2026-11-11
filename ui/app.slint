@@ -67,11 +67,10 @@ component NavButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
 
-    min-width: 120px;
-    preferred-width: 190px;
+    min-width: 110px;
+    preferred-width: 150px;
     horizontal-stretch: 0;
-    // No fixed height: stretches to the row, so it lines up with the
-    // global knob columns next to it.
+    height: 40px;
     border-radius: 10px;
     border-width: 1px;
     border-color: Theme.border;
@@ -82,14 +81,14 @@ component NavButton inherits Rectangle {
 
     VerticalLayout {
         alignment: center;
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 2px;
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 1px;
 
         Text {
             text: root.title;
             color: Theme.ink;
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 700;
             overflow: elide;
             wrap: no-wrap;
@@ -97,7 +96,7 @@ component NavButton inherits Rectangle {
         Text {
             text: root.subtitle;
             color: Theme.muted;
-            font-size: 12px;
+            font-size: 11px;
             overflow: elide;
             wrap: no-wrap;
         }
@@ -654,20 +653,28 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             spacing: 8px;
 
-                            NavButton {
-                                title: "← Previous";
-                                subtitle: root.label-for(root.preset - 1);
-                                enabled: root.preset > 1;
-                                clicked => {
-                                    root.preset-changed(root.preset - 1);
-                                }
-                            }
-                            NavButton {
-                                title: "Next →";
-                                subtitle: root.label-for(root.preset + 1);
-                                enabled: root.preset < 150;
-                                clicked => {
-                                    root.preset-changed(root.preset + 1);
+                            // Centered so the buttons sit level with the
+                            // knob dials, not the whole knob columns.
+                            VerticalLayout {
+                                alignment: center;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    NavButton {
+                                        title: "← Previous";
+                                        subtitle: root.label-for(root.preset - 1);
+                                        enabled: root.preset > 1;
+                                        clicked => {
+                                            root.preset-changed(root.preset - 1);
+                                        }
+                                    }
+                                    NavButton {
+                                        title: "Next →";
+                                        subtitle: root.label-for(root.preset + 1);
+                                        enabled: root.preset < 150;
+                                        clicked => {
+                                            root.preset-changed(root.preset + 1);
+                                        }
+                                    }
                                 }
                             }
 

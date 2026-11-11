@@ -93,6 +93,19 @@
 //!   `B9 03 81 07 02 82 0A 00 80 10 03 | B9 04 02 00 <idx> 88 <f32 LE>`
 //!   (type 0x0207, size 0x000A = body length).
 //!
+//! ## Global config (pedal-wide, not per preset)
+//! Source: Builty `usb_tonex.c` (`usb_tonex_request_global_config`,
+//! `usb_tonex_parse_global_config`, `usb_tonex_send_global_config`,
+//! `GLOBAL_CONFIG_INDEX_*`), ranges from `tonex_params.c`.
+//! - Request: `B9 03 00 82 06 00 80 10 03 | B9 02 81 06 02 10`.
+//! - Reply (and, per Builty's handler, possibly pushed): type `0x0206`;
+//!   22 `88 <f32>` items after `B9 02 BA 16`. Index 9 = input trim
+//!   (-15..15 dB), 10 = main volume (-40..+3 dB); both default 0 dB.
+//! - Write: there is no single-global message; Builty resends the whole
+//!   config blob (type 0x0206 header + received body with values patched).
+//!   Implemented in `global_write_request`, unverified on hardware, and
+//!   opt-in in main.rs.
+//!
 //! A `Pedal` session thread owns the port for as long as the app is
 //! connected: it answers our requests (names, params, writes) over the same
 //! connection and reports unsolicited frames as `Event`s. Set
@@ -187,8 +200,30 @@ pub const P_DELAY_FIRST_BLOCK: usize = 97;
 pub const DELAY_BLOCK_LEN: usize = 6;
 pub const DELAY_MODELS: usize = 2;
 
+// Global config (Builty `usb_tonex.c`: `usb_tonex_request_global_config`,
+// `usb_tonex_parse_global_config`, `usb_tonex_send_global_config`,
+// `GLOBAL_CONFIG_INDEX_*`; ranges from `tonex_params.c`).
+const REQUEST_GLOBALS_CMD: [u8; 15] = [
+    0xB9, 0x03, 0x00, 0x82, 0x06, 0x00, 0x80, 0x10, 0x03, 0xB9, 0x02, 0x81, 0x06, 0x02, 0x10,
+];
+const GLOBALS_TIMEOUT: Duration = Duration::from_millis(1500);
+/// `BA 16` = array of 22 globals (`88 <f32>` each), inside `B9 02`.
+const GLOBALS_MARKER: [u8; 4] = [0xB9, 0x02, 0xBA, 0x16];
+const GLOBALS_COUNT: usize = 22;
+/// Input trim, dB (-15..=15, default 0).
+pub const G_INPUT_TRIM: usize = 9;
+/// Main (master) volume, dB (-40..=3, default 0).
+pub const G_MAIN_VOLUME: usize = 10;
+pub const INPUT_TRIM_RANGE: (f32, f32) = (-15.0, 15.0);
+pub const MAIN_VOLUME_RANGE: (f32, f32) = (-40.0, 3.0);
+/// Global-config write header: type 0x0206, `82 <size LE>` patched in.
+const GLOBAL_WRITE_HEADER: [u8; 11] = [
+    0xB9, 0x03, 0x81, 0x06, 0x02, 0x82, 0x00, 0x00, 0x80, 0x10, 0x03,
+];
+
 // Message types (header value after `B9 03`), big pedal.
 const TYPE_PRESET_DETAILS: u16 = 0x0204;
+const TYPE_GLOBAL_CONFIG: u16 = 0x0206;
 const TYPE_PARAM_CHANGED: u16 = 0x0207;
 /// Body of a 0x0207 message: `B9 04 02 00 <param idx> 88 <f32 LE>`.
 const PARAM_CHANGED_MARKER: [u8; 4] = [0xB9, 0x04, 0x02, 0x00];
@@ -340,6 +375,71 @@ fn check_range(name: &str, v: f32, min: f32, max: f32) -> Result<(), String> {
 fn knob_value(params: &[u8], index: usize, name: &str) -> Result<f32, String> {
     let v = param_at(params, index)?;
     knob_from_pedal(v).ok_or_else(|| format!("unexpected layout: {name} = {v} outside 0..=10"))
+}
+
+/// Global levels, in dB.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Globals {
+    pub input_trim: f32,
+    pub master_volume: f32,
+}
+
+/// Byte offset of global `index`'s `88 <f32>` item in a global config payload.
+fn global_offset(payload: &[u8], index: usize) -> Result<usize, String> {
+    let start = find(payload, &GLOBALS_MARKER).ok_or("global config marker not found")? + GLOBALS_MARKER.len();
+    let off = start + index * PARAM_STRIDE;
+    match payload.get(off..off + PARAM_STRIDE) {
+        Some(item) if item[0] == FLOAT_TAG => Ok(off),
+        Some(_) => Err(format!("global {index}: expected float tag")),
+        None => Err(format!("global {index}: payload too short")),
+    }
+}
+
+fn global_at(payload: &[u8], index: usize) -> Result<f32, String> {
+    let off = global_offset(payload, index)?;
+    Ok(f32::from_le_bytes([payload[off + 1], payload[off + 2], payload[off + 3], payload[off + 4]]))
+}
+
+/// Input trim and main volume from a global config payload (type 0x0206):
+/// floats after `B9 02 BA 16`, indices 9 and 10. Range-checked.
+fn extract_globals(payload: &[u8]) -> Result<Globals, String> {
+    let trim = global_at(payload, G_INPUT_TRIM)?;
+    let vol = global_at(payload, G_MAIN_VOLUME)?;
+    check_range("input trim", trim, INPUT_TRIM_RANGE.0, INPUT_TRIM_RANGE.1)?;
+    check_range("main volume", vol, MAIN_VOLUME_RANGE.0, MAIN_VOLUME_RANGE.1)?;
+    Ok(Globals { input_trim: trim, master_volume: vol })
+}
+
+/// Replaces global `index` in a stored global config payload.
+fn patch_global(payload: &mut [u8], index: usize, value: f32) -> Result<(), String> {
+    let off = global_offset(payload, index)?;
+    payload[off + 1..off + 5].copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+/// Builds a global-config write from a received global config payload:
+/// Builty's write header (`B9 03 81 06 02 82 <size> 80 10 03`) followed by
+/// the received body (everything after the received header, i.e. from
+/// `B9 01 B9 02 BA 16 ...`), with the size field set to the body length.
+///
+/// Builty sends a literal 0x7E before the header, a hard-coded size 0x0DF0,
+/// and includes the 2 received CRC bytes at the end of its body (its unframe
+/// keeps them); none of that is reproduced here.
+fn global_write_request(received: &[u8]) -> Result<Vec<u8>, String> {
+    if frame_type(received) != Some(TYPE_GLOBAL_CONFIG) {
+        return Err("stored global config has an unexpected header".into());
+    }
+    // Header: B9 03 <type> <size> <unknown>.
+    let mut pos = 2;
+    for _ in 0..3 {
+        read_u16_value(received, &mut pos).ok_or("unparsable global config header")?;
+    }
+    let body = &received[pos..];
+    let len = u16::try_from(body.len()).map_err(|_| "global config too large")?;
+    let mut req = GLOBAL_WRITE_HEADER.to_vec();
+    req[6..8].copy_from_slice(&len.to_le_bytes());
+    req.extend_from_slice(body);
+    Ok(req)
 }
 
 /// The whole preset parameter array (`88 <f32>` items after the marker),
@@ -571,6 +671,8 @@ pub enum Event {
     /// A parameter changed on the pedal (e.g. a physical knob was turned).
     /// `index` is the preset-parameter index (see `AmpKnob::param_index`).
     ParamChanged { index: usize, value: f32 },
+    /// Global config (reply to `request_globals`, or pushed by the pedal).
+    Globals(Result<Globals, String>),
     /// The pedal switched preset by itself (footswitch); carries the new
     /// preset's amp params when they parsed, and its raw parameter array.
     PresetChanged { preset_idx: u8, params: Option<AmpParams>, raw: Vec<f32> },
@@ -629,6 +731,8 @@ enum Request {
     Names,
     AmpParams(u8),
     SetParam(u8, f32),
+    Globals,
+    SetGlobal(usize, f32),
 }
 
 /// Handle to the session thread that owns the serial port. Dropping it ends
@@ -657,7 +761,11 @@ impl Pedal {
                     return;
                 }
             };
-            let mut session = Session { link, rx, queue: VecDeque::new(), on_event: &on_event, debug: debug_enabled() };
+            let mut session = Session { link, rx, queue: VecDeque::new(), on_event: &on_event,
+                debug: debug_enabled(),
+                globals: None,
+                globals_seen: 0,
+            };
             let reason = session.run();
             on_event(Event::Disconnected(reason));
         });
@@ -683,6 +791,21 @@ impl Pedal {
     /// Reads the amp params of `preset_idx` (0-based).
     pub fn request_amp_params(&self, preset_idx: u8) -> Result<(), String> {
         self.send(Request::AmpParams(preset_idx))
+    }
+
+    /// Reads the global config; answered with `Event::Globals`.
+    pub fn request_globals(&self) -> Result<(), String> {
+        self.send(Request::Globals)
+    }
+
+    /// Writes one global (`G_INPUT_TRIM` / `G_MAIN_VOLUME`) by sending the
+    /// last global config read back with that value changed. See the
+    /// module docs: unverified on hardware.
+    pub fn set_global(&self, index: usize, value: f32) -> Result<(), String> {
+        if index >= GLOBALS_COUNT {
+            return Err(format!("global index {index} out of range"));
+        }
+        self.send(Request::SetGlobal(index, value))
     }
 }
 
@@ -723,6 +846,10 @@ struct Session<'a, F: Fn(Event)> {
     queue: VecDeque<Request>,
     on_event: &'a F,
     debug: bool,
+    /// Last global config payload received (needed to write a global).
+    globals: Option<Vec<u8>>,
+    /// Counts received global config frames (to detect our reply).
+    globals_seen: u32,
 }
 
 impl<F: Fn(Event)> Session<'_, F> {
@@ -750,6 +877,8 @@ impl<F: Fn(Event)> Session<'_, F> {
     /// newest amp-params read. Returns whether anything was served.
     fn serve_quick(&mut self) -> Result<bool, String> {
         let mut writes: Vec<(u8, f32)> = Vec::new();
+        let mut global_writes: Vec<(usize, f32)> = Vec::new();
+        let mut read_globals = false;
         let mut latest_read = None;
         let mut rest = VecDeque::new();
         for r in std::mem::take(&mut self.queue) {
@@ -760,6 +889,11 @@ impl<F: Fn(Event)> Session<'_, F> {
                     Some(w) => w.1 = value,
                     None => writes.push((index, value)),
                 },
+                Request::SetGlobal(index, value) => match global_writes.iter_mut().find(|(i, _)| *i == index) {
+                    Some(w) => w.1 = value,
+                    None => global_writes.push((index, value)),
+                },
+                Request::Globals => read_globals = true,
                 Request::AmpParams(idx) => latest_read = Some(idx),
                 other => rest.push_back(other),
             }
@@ -768,7 +902,14 @@ impl<F: Fn(Event)> Session<'_, F> {
         for &(index, value) in &writes {
             self.link.send(&set_param_request(index, value))?;
         }
-        let mut served = !writes.is_empty();
+        let mut served = !writes.is_empty() || !global_writes.is_empty();
+        if !global_writes.is_empty() {
+            self.write_globals(&global_writes)?;
+        }
+        if read_globals {
+            self.read_globals()?;
+            served = true;
+        }
         if let Some(idx) = latest_read {
             let (result, raw) = self.read_amp_params(idx)?;
             (self.on_event)(Event::AmpParams { preset_idx: idx, result, raw });
@@ -796,6 +937,46 @@ impl<F: Fn(Event)> Session<'_, F> {
         }
     }
 
+    /// Requests the global config; the reply is reported from `dispatch`.
+    fn read_globals(&mut self) -> Result<(), String> {
+        let seen = self.globals_seen;
+        self.link.send(&REQUEST_GLOBALS_CMD)?;
+        let until = Instant::now() + GLOBALS_TIMEOUT;
+        while self.globals_seen == seen {
+            match self.link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
+                Some(payload) => {
+                    self.dispatch(&payload, false);
+                }
+                None => {
+                    (self.on_event)(Event::Globals(Err("no global config received".into())));
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Sends the stored global config back with `changes` applied.
+    fn write_globals(&mut self, changes: &[(usize, f32)]) -> Result<(), String> {
+        let Some(stored) = self.globals.as_mut() else {
+            eprintln!("TONEX: global write skipped: global config not read yet");
+            return Ok(());
+        };
+        for &(index, value) in changes {
+            if let Err(e) = patch_global(stored, index, value) {
+                eprintln!("TONEX: global write skipped: {e}");
+                return Ok(());
+            }
+        }
+        match global_write_request(stored) {
+            Ok(req) => self.link.send(&req),
+            Err(e) => {
+                eprintln!("TONEX: global write skipped: {e}");
+                Ok(())
+            }
+        }
+    }
+
     /// Waits a short while for unsolicited frames.
     fn idle(&mut self) -> Result<(), String> {
         let far = Instant::now() + Duration::from_secs(3600);
@@ -815,6 +996,15 @@ impl<F: Fn(Event)> Session<'_, F> {
     /// request is missed (rare; the next preset change re-syncs).
     fn dispatch(&mut self, payload: &[u8], awaiting: bool) -> bool {
         let ty = frame_type(payload);
+        if ty == Some(TYPE_GLOBAL_CONFIG) {
+            let result = extract_globals(payload);
+            if result.is_ok() {
+                self.globals = Some(payload.to_vec());
+            }
+            self.globals_seen = self.globals_seen.wrapping_add(1);
+            (self.on_event)(Event::Globals(result));
+            return false;
+        }
         if ty == Some(TYPE_PARAM_CHANGED) {
             match extract_param_change(payload) {
                 Some((index, value)) => (self.on_event)(Event::ParamChanged { index, value }),
@@ -989,6 +1179,51 @@ mod tests {
         let cut = find(&p, &PARAM_MARKER).unwrap() + PARAM_MARKER.len() + 50 * PARAM_STRIDE + 2;
         assert_eq!(extract_param_array(&p[..cut]).len(), 50);
         assert!(extract_param_array(&[0xB9, 0x03]).is_empty());
+    }
+
+    /// Synthetic global config reply: header, `B9 01 B9 02 BA 16`, 22 floats,
+    /// plus a trailing item standing in for the rest of the config.
+    fn globals_payload(trim: f32, vol: f32) -> Vec<u8> {
+        let mut body = vec![0xB9, 0x01];
+        body.extend_from_slice(&GLOBALS_MARKER);
+        for i in 0..GLOBALS_COUNT {
+            let v = match i {
+                G_INPUT_TRIM => trim,
+                G_MAIN_VOLUME => vol,
+                _ => 1.0,
+            };
+            body.push(FLOAT_TAG);
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        body.extend_from_slice(&[0xBC, 0x02, 0x41, 0x42]);
+        let mut p = vec![0xB9, 0x03, 0x81, 0x06, 0x02, 0x82];
+        p.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        p.extend_from_slice(&[0x80, 0x10, 0x03]);
+        p.extend_from_slice(&body);
+        p
+    }
+
+    #[test]
+    fn extracts_globals() {
+        let p = globals_payload(-3.5, -12.0);
+        assert_eq!(frame_type(&p), Some(TYPE_GLOBAL_CONFIG));
+        assert_eq!(extract_globals(&p).unwrap(), Globals { input_trim: -3.5, master_volume: -12.0 });
+        assert!(extract_globals(&globals_payload(40.0, 0.0)).is_err());
+        assert!(extract_globals(&[0xB9, 0x03]).is_err());
+    }
+
+    #[test]
+    fn global_write_resends_patched_body() {
+        let mut stored = globals_payload(0.0, 0.0);
+        patch_global(&mut stored, G_MAIN_VOLUME, -6.0).unwrap();
+        let req = global_write_request(&stored).unwrap();
+        assert_eq!(&req[..6], &[0xB9, 0x03, 0x81, 0x06, 0x02, 0x82]);
+        assert_eq!(&req[8..11], &[0x80, 0x10, 0x03]);
+        let size = usize::from(u16::from_le_bytes([req[6], req[7]]));
+        assert_eq!(size, req.len() - GLOBAL_WRITE_HEADER.len());
+        assert_eq!(&req[11..17], &[0xB9, 0x01, 0xB9, 0x02, 0xBA, 0x16]);
+        assert_eq!(extract_globals(&req).unwrap().master_volume, -6.0);
+        assert!(global_write_request(&[0xB9, 0x03, 0x81, 0x04, 0x02]).is_err());
     }
 
     #[test]

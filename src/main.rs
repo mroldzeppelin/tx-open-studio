@@ -238,6 +238,23 @@ struct SyncCtx {
     amp: Arc<Mutex<AmpSync>>,
     /// The live serial session; replaced on reconnect.
     serial: Arc<Mutex<Option<tonex_serial::Pedal>>>,
+    /// When the user last changed each global (0 trim, 1 master). Globals
+    /// are pedal-wide, so this is NOT cleared on preset change.
+    global_touched: Arc<Mutex<[Option<Instant>; 2]>>,
+}
+
+/// Global writes resend the whole global config blob (format from Builty,
+/// unverified on hardware; a bad write could alter other pedal-wide
+/// settings such as the MIDI channel), so they are opt-in for now.
+const GLOBAL_WRITE_ENV: &str = "TX_ENABLE_GLOBAL_WRITE";
+
+/// UI global id → (global index, valid range).
+fn global_for_id(id: i32) -> Option<(usize, (f32, f32))> {
+    match id {
+        0 => Some((tonex_serial::G_INPUT_TRIM, tonex_serial::INPUT_TRIM_RANGE)),
+        1 => Some((tonex_serial::G_MAIN_VOLUME, tonex_serial::MAIN_VOLUME_RANGE)),
+        _ => None,
+    }
 }
 
 impl SyncCtx {
@@ -264,6 +281,7 @@ impl SyncCtx {
         });
         // Params first: the knobs shouldn't wait for the ~10 s name scan.
         let _ = pedal.request_amp_params((clamp_preset(preset) - 1) as u8);
+        let _ = pedal.request_globals();
         let _ = pedal.request_names();
         *self.serial.lock().unwrap_or_else(|e| e.into_inner()) = Some(pedal);
     }
@@ -314,6 +332,18 @@ impl SyncCtx {
                 }
             }
             Event::ParamChanged { index, value } => self.apply_param_change(ui, index, value),
+            Event::Globals(Ok(g)) => {
+                let touched = *self.global_touched.lock().unwrap_or_else(|e| e.into_inner());
+                let recent = |i: usize| touched[i].is_some_and(|t| t.elapsed() < ECHO_GUARD);
+                let tenth = |v: f32| (v * 10.0).round() / 10.0;
+                if !recent(0) {
+                    ui.set_global_trim(tenth(g.input_trim));
+                }
+                if !recent(1) {
+                    ui.set_global_volume(tenth(g.master_volume));
+                }
+            }
+            Event::Globals(Err(e)) => eprintln!("TONEX global config read failed: {e}"),
             Event::PresetChanged { preset_idx, params, raw } => {
                 let preset = i32::from(preset_idx) + 1;
                 if preset != ui.get_preset() {
@@ -473,6 +503,30 @@ fn main() -> Result<(), slint::PlatformError> {
                 // No CC exists for amp on/off, so serial is the only way.
                 eprintln!("TONEX amp enable write failed: {e}");
                 ui.set_amp_enabled(!on);
+            }
+        });
+    }
+
+    {
+        let ctx = ctx.clone();
+        let write_enabled = std::env::var_os(GLOBAL_WRITE_ENV).is_some();
+        ui.on_global_changed(move |id, value| {
+            let Some((index, (min, max))) = global_for_id(id) else {
+                eprintln!("unknown global id {id}");
+                return;
+            };
+            let result = if write_enabled {
+                ctx.global_touched.lock().unwrap_or_else(|e| e.into_inner())[id as usize] = Some(Instant::now());
+                ctx.with_serial(|p| p.set_global(index, value.clamp(min, max)))
+            } else {
+                Err(format!("global writes are disabled (unverified format); set {GLOBAL_WRITE_ENV}=1 to enable"))
+            };
+            if let Err(e) = result {
+                eprintln!("TONEX global write: {e}");
+                // Show the pedal's actual value again.
+                if let Err(e) = ctx.with_serial(|p| p.request_globals()) {
+                    eprintln!("TONEX global config request failed: {e}");
+                }
             }
         });
     }

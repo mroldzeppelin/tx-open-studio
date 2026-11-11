@@ -61,9 +61,9 @@ component StyledButton inherits Rectangle {
 export component AppWindow inherits Window {
     title: "TX Open Studio";
     preferred-width: 420px;
-    preferred-height: 560px;
-    min-width: 380px;
-    min-height: 520px;
+    preferred-height: 320px;
+    min-width: 360px;
+    min-height: 260px;
     background: Theme.bg;
 
     in-out property <int> preset: 43;
@@ -119,30 +119,15 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     alignment: center;
                     padding: 16px;
-                    spacing: 4px;
+                    spacing: 8px;
 
+                    // Name read over USB serial; falls back to the bare
+                    // preset number until names are loaded.
                     Text {
-                        text: "PRESET";
-                        color: Theme.muted;
-                        font-size: 12px;
-                        font-weight: 600;
-                        letter-spacing: 2px;
-                        horizontal-alignment: center;
-                    }
-                    Text {
-                        text: root.preset;
+                        text: root.preset-name == "" ? root.preset : root.preset-name;
                         color: Theme.ink;
-                        font-size: 96px;
+                        font-size: 32px;
                         font-weight: 700;
-                        font-family: "monospace";
-                        horizontal-alignment: center;
-                    }
-                    // Preset name read over USB serial; empty when unknown.
-                    Text {
-                        text: root.preset-name;
-                        color: Theme.ink;
-                        font-size: 20px;
-                        font-weight: 600;
                         horizontal-alignment: center;
                         overflow: elide;
                         wrap: no-wrap;
@@ -180,31 +165,6 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Quick jump
-            VerticalLayout {
-                spacing: 8px;
-                Text {
-                    text: "QUICK JUMP";
-                    color: Theme.muted;
-                    font-size: 11px;
-                    font-weight: 600;
-                    letter-spacing: 1.5px;
-                }
-                HorizontalLayout {
-                    spacing: 6px;
-                    for n in [1, 25, 50, 75, 100, 125, 150]: StyledButton {
-                        horizontal-stretch: 1;
-                        height: 36px;
-                        text: "\{n}";
-                        font-size: 13px;
-                        base-color: Theme.field;
-                        active: root.preset == n;
-                        clicked => {
-                            root.preset-changed(n);
-                        }
-                    }
-                }
-            }
         }
 
         // Status bar

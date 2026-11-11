@@ -536,61 +536,6 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Amplifier card (stub values until amp state reading is implemented).
-                Rectangle {
-                    vertical-stretch: 0;
-                    background: Theme.surface;
-                    border-color: Theme.border;
-                    border-width: 1px;
-                    border-radius: 12px;
-
-                    VerticalLayout {
-                        padding: 16px;
-                        spacing: 12px;
-
-                        HorizontalLayout {
-                            Text {
-                                horizontal-stretch: 1;
-                                text: "Amplifier";
-                                color: Theme.ink;
-                                font-size: 17px;
-                                font-weight: 700;
-                                vertical-alignment: center;
-                            }
-                            Rectangle {
-                                horizontal-stretch: 0;
-                                background: Theme.soft;
-                                border-radius: 6px;
-                                border-width: 1px;
-                                border-color: Theme.border;
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-top: 3px;
-                                    padding-bottom: 3px;
-                                    Text {
-                                        text: "On";
-                                        color: Theme.secondary-ink;
-                                        font-size: 11px;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                        }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Knob { label: "Gain"; value: 6.9; }
-                            Knob { label: "Volume"; value: 5.2; }
-                            Knob { label: "Presence"; value: 5; }
-                            Knob { label: "Depth"; value: 5; }
-                            Knob { label: "Bass"; value: 5.4; }
-                            Knob { label: "Mid"; value: 4.8; }
-                            Knob { label: "Treble"; value: 6.2; }
-                        }
-                    }
-                }
-
                 // Placeholder grid until effect state reading is implemented.
                 VerticalLayout {
                     vertical-stretch: 1;
@@ -655,6 +600,61 @@ export component AppWindow inherits Window {
                             state: "On";
                             fill: #2869ad;
                             outline: #2869ad;
+                        }
+                    }
+                }
+
+                // Amplifier card (stub values until amp state reading is implemented).
+                Rectangle {
+                    vertical-stretch: 0;
+                    background: Theme.surface;
+                    border-color: Theme.border;
+                    border-width: 1px;
+                    border-radius: 12px;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 12px;
+
+                        HorizontalLayout {
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "Amplifier";
+                                color: Theme.ink;
+                                font-size: 17px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 0;
+                                background: Theme.soft;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-top: 3px;
+                                    padding-bottom: 3px;
+                                    Text {
+                                        text: "On";
+                                        color: Theme.secondary-ink;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Knob { label: "Gain"; value: 6.9; }
+                            Knob { label: "Volume"; value: 5.2; }
+                            Knob { label: "Presence"; value: 5; }
+                            Knob { label: "Depth"; value: 5; }
+                            Knob { label: "Bass"; value: 5.4; }
+                            Knob { label: "Mid"; value: 4.8; }
+                            Knob { label: "Treble"; value: 6.2; }
                         }
                     }
                 }

@@ -60,57 +60,6 @@ component StyledButton inherits Rectangle {
     }
 }
 
-// Two-line navigation button: title plus a small muted subtitle.
-component NavButton inherits Rectangle {
-    in property <string> title;
-    in property <string> subtitle;
-    in property <bool> enabled: true;
-    callback clicked();
-
-    min-width: 110px;
-    preferred-width: 150px;
-    horizontal-stretch: 0;
-    height: 40px;
-    border-radius: 10px;
-    border-width: 1px;
-    border-color: Theme.border;
-    background: !root.enabled ? Theme.surface-alt : (ta.pressed ? Theme.selected : (ta.has-hover ? Theme.hover : Theme.soft));
-    opacity: root.enabled ? 1.0 : 0.5;
-
-    animate background { duration: 90ms; }
-
-    VerticalLayout {
-        alignment: center;
-        padding-left: 10px;
-        padding-right: 10px;
-        spacing: 1px;
-
-        Text {
-            text: root.title;
-            color: Theme.ink;
-            font-size: 13px;
-            font-weight: 700;
-            overflow: elide;
-            wrap: no-wrap;
-        }
-        Text {
-            text: root.subtitle;
-            color: Theme.muted;
-            font-size: 11px;
-            overflow: elide;
-            wrap: no-wrap;
-        }
-    }
-
-    ta := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: root.enabled ? pointer : default;
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
 // Rotary knob with label above and value below. Vertical drag changes the
 // value in `step` increments (a full sweep is ~150 px). `edited` fires only
 // for user drags, not when the value is set programmatically (e.g. read back
@@ -462,17 +411,6 @@ export component AppWindow inherits Window {
     in-out property <float> global-volume: 0;
     callback global-changed(int, float);
 
-    // Label of preset `p` (1-based) from the list model; "" when out of range,
-    // the bare number when the name is not loaded yet.
-    pure function label-for(p: int) -> string {
-        if (p < 1 || p > root.preset-names.length) {
-            return "";
-        }
-        let name = root.preset-names[p - 1];
-        return name == "" ? "\{p}" : name;
-    }
-
-
     changed preset => {
         list.ensure-selected-visible();
     }
@@ -653,36 +591,6 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             spacing: 8px;
 
-                            // Centered so the buttons sit level with the
-                            // knob dials, not the whole knob columns.
-                            VerticalLayout {
-                                alignment: center;
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    NavButton {
-                                        title: "← Previous";
-                                        subtitle: root.label-for(root.preset - 1);
-                                        enabled: root.preset > 1;
-                                        clicked => {
-                                            root.preset-changed(root.preset - 1);
-                                        }
-                                    }
-                                    NavButton {
-                                        title: "Next →";
-                                        subtitle: root.label-for(root.preset + 1);
-                                        enabled: root.preset < 150;
-                                        clicked => {
-                                            root.preset-changed(root.preset + 1);
-                                        }
-                                    }
-                                }
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                min-width: 0px;
-                            }
-
                             // Pedal-wide (global) levels, not stored per preset.
                             Knob {
                                 horizontal-stretch: 0;
@@ -707,6 +615,11 @@ export component AppWindow inherits Window {
                                 unit: " dB";
                                 value <=> root.global-volume;
                                 edited(v) => { root.global-changed(1, v); }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
                             }
                         }
                     }

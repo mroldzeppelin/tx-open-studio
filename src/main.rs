@@ -1,3 +1,4 @@
+mod fx;
 mod tonex_serial;
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -135,6 +136,8 @@ struct AmpSync {
     last_cc: [Option<u8>; 7],
     knob_touched: [Option<Instant>; 7],
     enable_touched: Option<Instant>,
+    /// Delay/reverb parameter mirror (see fx.rs).
+    fx: fx::FxMirror,
 }
 
 impl AmpSync {
@@ -299,18 +302,25 @@ impl SyncCtx {
                 ui.set_preset_names(self.names.list_model());
             }
             Event::Names(Err(e)) => eprintln!("TONEX preset names read failed: {e}"),
-            Event::AmpParams { preset_idx, result } => match result {
-                Ok(p) if ui.get_preset() == i32::from(preset_idx) + 1 => self.apply_amp_params(ui, &p),
-                Ok(_) => {} // stale: the UI moved on to another preset
-                Err(e) => eprintln!("TONEX amp params read failed (preset {}): {e}", i32::from(preset_idx) + 1),
-            },
+            Event::AmpParams { preset_idx, result, raw } => {
+                let current = ui.get_preset() == i32::from(preset_idx) + 1;
+                if current {
+                    self.load_fx(ui, &raw);
+                }
+                match result {
+                    Ok(p) if current => self.apply_amp_params(ui, &p),
+                    Ok(_) => {} // stale: the UI moved on to another preset
+                    Err(e) => eprintln!("TONEX amp params read failed (preset {}): {e}", i32::from(preset_idx) + 1),
+                }
+            }
             Event::ParamChanged { index, value } => self.apply_param_change(ui, index, value),
-            Event::PresetChanged { preset_idx, params } => {
+            Event::PresetChanged { preset_idx, params, raw } => {
                 let preset = i32::from(preset_idx) + 1;
                 if preset != ui.get_preset() {
                     show_preset(ui, &self.names, preset);
                     self.amp().clear();
                 }
+                self.load_fx(ui, &raw);
                 match params {
                     Some(p) => self.apply_amp_params(ui, &p),
                     None => self.request_amp_params(preset),
@@ -321,7 +331,44 @@ impl SyncCtx {
 
     /// A single parameter changed on the pedal (physical knob, or the echo
     /// of our own change).
+    /// Takes delay/reverb values from a freshly read parameter array.
+    fn load_fx(&self, ui: &AppWindow, raw: &[f32]) {
+        let mut amp = self.amp();
+        for card in amp.fx.load(raw) {
+            fx::refresh(ui, &amp.fx, card);
+        }
+    }
+
+    /// User changed a delay/reverb control: write it over serial.
+    fn fx_changed(&self, ui: &AppWindow, control: fx::FxControl, value: f32) {
+        let index = fx::index_for(ui, control);
+        let mut amp = self.amp();
+        match self.with_serial(|p| p.set_param(index, value)) {
+            Ok(()) => {
+                amp.fx.wrote(index, value);
+                // A new model shows that model's own stored values.
+                if control.is_model() {
+                    fx::refresh(ui, &amp.fx, control.card());
+                }
+            }
+            Err(e) => {
+                eprintln!("TONEX {control:?} write failed: {e}");
+                // Show what the pedal still has.
+                fx::refresh(ui, &amp.fx, control.card());
+            }
+        }
+    }
+
     fn apply_param_change(&self, ui: &AppWindow, index: usize, value: f32) {
+        {
+            let mut amp = self.amp();
+            if fx::card_of(index).is_some() {
+                if let Some(card) = amp.fx.pedal_changed(index, value) {
+                    fx::refresh(ui, &amp.fx, card);
+                }
+                return;
+            }
+        }
         if index == tonex_serial::AMP_ENABLE_PARAM {
             if !self.amp().enable_recent() {
                 ui.set_amp_enabled(value != 0.0);
@@ -426,6 +473,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 // No CC exists for amp on/off, so serial is the only way.
                 eprintln!("TONEX amp enable write failed: {e}");
                 ui.set_amp_enabled(!on);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
+        let ctx = ctx.clone();
+        ui.on_fx_changed(move |id, value| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            match fx::FxControl::from_id(id) {
+                Some(control) => ctx.fx_changed(&ui, control, value),
+                None => eprintln!("unknown fx control id {id}"),
             }
         });
     }

@@ -161,22 +161,34 @@ component NavButton inherits Rectangle {
     }
 }
 
-// Rotary knob (0..10) with label above and value below. Vertical drag
-// changes the value in 0.1 steps. `edited` fires only for user drags, not
-// when the value is set programmatically (e.g. read back from the pedal).
+// Rotary knob with label above and value below. Vertical drag changes the
+// value in `step` increments (a full sweep is ~150 px). `edited` fires only
+// for user drags, not when the value is set programmatically (e.g. read back
+// from the pedal). Shown with `decimals` (0 or 1) and a `unit` suffix.
 component Knob inherits VerticalLayout {
     in property <string> label;
     in-out property <float> value: 5;
+    in property <float> min-value: 0;
+    in property <float> max-value: 10;
+    in property <float> step: 0.1;
+    in property <int> decimals: 1;
+    in property <string> unit;
+    in property <length> size: 48px;
     callback edited(float);
     out property <bool> active: ta.pressed;
-    property <length> size: 48px;
-    // Sweep of 270°: 0 → -135°, 10 → +135° (0° = straight up).
-    property <angle> sweep: (-135 + root.value * 27) * 1deg;
+    // Sweep of 270°: min → -135°, max → +135° (0° = straight up).
+    property <float> frac: clamp((root.value - root.min-value) / max(root.max-value - root.min-value, 0.0001), 0, 1);
+    property <angle> sweep: (-135 + root.frac * 270) * 1deg;
     property <int> tenths: round(root.value * 10);
+    property <int> abs-tenths: abs(root.tenths);
+    property <string> number: root.decimals == 0
+        ? "\{round(root.value)}"
+        : (root.tenths < 0 ? "-" : "") + "\{floor(root.abs-tenths / 10)}"
+            + (mod(root.abs-tenths, 10) == 0 ? "" : ".\{mod(root.abs-tenths, 10)}");
     property <float> drag-start: 0;
 
-    spacing: 6px;
-    min-width: 48px;
+    spacing: 4px;
+    min-width: root.size;
     horizontal-stretch: 1;
 
     Text {
@@ -219,8 +231,8 @@ component Knob inherits VerticalLayout {
                 }
                 moved => {
                     if (self.pressed) {
-                        let v = root.drag-start + (self.pressed-y - self.mouse-y) / 15px;
-                        let nv = clamp(round(v * 10) / 10, 0, 10);
+                        let v = root.drag-start + (self.pressed-y - self.mouse-y) / 150px * (root.max-value - root.min-value);
+                        let nv = clamp(round(v / root.step) * root.step, root.min-value, root.max-value);
                         if (nv != root.value) {
                             root.value = nv;
                             root.edited(nv);
@@ -232,18 +244,203 @@ component Knob inherits VerticalLayout {
     }
 
     Text {
-        text: mod(root.tenths, 10) == 0 ? "\{floor(root.tenths / 10)}" : "\{floor(root.tenths / 10)}.\{mod(root.tenths, 10)}";
+        text: root.number + root.unit;
         color: Theme.secondary-ink;
-        font-size: 13px;
+        font-size: 12px;
         font-family: "monospace";
         horizontal-alignment: center;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+}
+
+// On/Off chip for an effect block header: green dot + "On", muted "Off".
+component OnOffChip inherits Rectangle {
+    in-out property <bool> on: true;
+    callback toggled(bool);
+
+    horizontal-stretch: 0;
+    background: chip-ta.pressed ? Theme.selected : (chip-ta.has-hover ? Theme.hover : Theme.soft);
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: root.on ? Theme.ok : Theme.border;
+    animate background { duration: 90ms; }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 3px;
+        padding-bottom: 3px;
+        spacing: 6px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 7px;
+                height: 7px;
+                border-radius: 3.5px;
+                background: root.on ? Theme.ok : Theme.muted.with-alpha(0.5);
+            }
+        }
+        Text {
+            text: root.on ? "On" : "Off";
+            color: root.on ? Theme.ink : Theme.muted;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+    chip-ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.on = !root.on;
+            root.toggled(root.on);
+        }
+    }
+}
+
+// Small two-state button whose caption names the current state
+// ("Pre amp" / "Post amp"); highlighted when `on`.
+component StateButton inherits Rectangle {
+    in-out property <bool> on;
+    in property <string> on-text;
+    in property <string> off-text;
+    callback toggled(bool);
+
+    height: 26px;
+    min-width: 56px;
+    horizontal-stretch: 1;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: root.on ? Theme.selected-border : Theme.border;
+    background: sb-ta.pressed ? Theme.selected : (sb-ta.has-hover ? Theme.hover : Theme.field);
+    animate background { duration: 90ms; }
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.on ? root.on-text : root.off-text;
+        color: root.on ? Theme.ink : Theme.secondary-ink;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    sb-ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.on = !root.on;
+            root.toggled(root.on);
+        }
+    }
+}
+
+// Compact selector: ‹ label › cycling through `options` (no wrap-around).
+component Stepper inherits Rectangle {
+    in property <[string]> options;
+    in-out property <int> index;
+    callback picked(int);
+
+    height: 26px;
+    min-width: 84px;
+    horizontal-stretch: 1;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.field;
+
+    HorizontalLayout {
+        prev := Rectangle {
+            width: 22px;
+            border-radius: 7px;
+            background: prev-ta.has-hover && root.index > 0 ? Theme.hover : transparent;
+            Text {
+                text: "‹";
+                color: root.index > 0 ? Theme.ink : Theme.muted.with-alpha(0.4);
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            prev-ta := TouchArea {
+                mouse-cursor: root.index > 0 ? pointer : default;
+                clicked => {
+                    if (root.index > 0) {
+                        root.index -= 1;
+                        root.picked(root.index);
+                    }
+                }
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.index >= 0 && root.index < root.options.length ? root.options[root.index] : "?";
+            color: Theme.ink;
+            font-size: 11px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Rectangle {
+            width: 22px;
+            border-radius: 7px;
+            background: next-ta.has-hover && root.index < root.options.length - 1 ? Theme.hover : transparent;
+            Text {
+                text: "›";
+                color: root.index < root.options.length - 1 ? Theme.ink : Theme.muted.with-alpha(0.4);
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            next-ta := TouchArea {
+                mouse-cursor: root.index < root.options.length - 1 ? pointer : default;
+                clicked => {
+                    if (root.index < root.options.length - 1) {
+                        root.index += 1;
+                        root.picked(root.index);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Segmented buttons, one of `options` selected.
+component Segmented inherits HorizontalLayout {
+    in property <[string]> options;
+    in-out property <int> index;
+    callback picked(int);
+
+    spacing: 4px;
+    horizontal-stretch: 1;
+    for opt[i] in root.options: Rectangle {
+        height: 26px;
+        min-width: 44px;
+        horizontal-stretch: 1;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: root.index == i ? Theme.selected-border : Theme.border;
+        background: root.index == i ? Theme.selected : (seg-ta.has-hover ? Theme.hover : Theme.field);
+        Text {
+            text: opt;
+            color: root.index == i ? Theme.ink : Theme.secondary-ink;
+            font-size: 11px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        seg-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                if (root.index != i) {
+                    root.index = i;
+                    root.picked(i);
+                }
+            }
+        }
     }
 }
 
 export component AppWindow inherits Window {
     title: "TX Open Studio";
     preferred-width: 960px;
-    preferred-height: 720px;
+    preferred-height: 860px;
     min-width: 780px;
     min-height: 600px;
     background: Theme.bg;
@@ -275,6 +472,34 @@ export component AppWindow inherits Window {
     callback amp-param-changed(int, float);
     // User toggled the amp on/off chip.
     callback amp-enable-changed(bool);
+
+    // Delay / Reverb blocks (values in pedal units; switches as bool,
+    // selectors as option index). Set from Rust from the pedal's state.
+    in-out property <bool> dly-enabled: false;
+    in-out property <bool> dly-post: false;
+    in-out property <int> dly-model: 0;
+    in-out property <bool> dly-sync: false;
+    in-out property <int> dly-division: 9;
+    in-out property <float> dly-time: 320;
+    in-out property <float> dly-feedback: 0;
+    in-out property <bool> dly-pingpong: false;
+    in-out property <float> dly-mix: 0;
+    in-out property <bool> rvb-enabled: false;
+    in-out property <bool> rvb-post: false;
+    in-out property <int> rvb-model: 5;
+    in-out property <float> rvb-time: 5;
+    in-out property <float> rvb-predelay: 0;
+    in-out property <float> rvb-color: 0;
+    in-out property <float> rvb-mix: 0;
+    // Pedal's time-signature list (index = value sent to the pedal).
+    out property <[string]> delay-divisions: ["1/32", "1/32 D", "1/32 T", "1/16", "1/16 D", "1/16 T", "1/8", "1/8 D", "1/8 T",
+        "1/4", "1/4 D", "1/4 T", "1/2", "1/2 D", "1/2 T", "1/1", "1/1 D", "1/1 T"];
+    // User changed a delay/reverb control. id (matches FxControl in main.rs):
+    // 0 dly on, 1 dly post, 2 dly model, 3 dly sync, 4 dly division,
+    // 5 dly time, 6 dly feedback, 7 dly ping-pong, 8 dly mix,
+    // 10 rvb on, 11 rvb post, 12 rvb model, 13 rvb time, 14 rvb predelay,
+    // 15 rvb color, 16 rvb mix.
+    callback fx-changed(int, float);
 
     // Label of preset `p` (1-based) from the list model; "" when out of range,
     // the bare number when the name is not loaded yet.
@@ -526,42 +751,9 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center;
                             }
                             // Amp enable/bypass toggle (written over USB serial).
-                            Rectangle {
-                                horizontal-stretch: 0;
-                                background: amp-ta.pressed ? Theme.selected : (amp-ta.has-hover ? Theme.hover : Theme.soft);
-                                border-radius: 6px;
-                                border-width: 1px;
-                                border-color: root.amp-enabled ? Theme.ok : Theme.border;
-                                animate background { duration: 90ms; }
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-top: 3px;
-                                    padding-bottom: 3px;
-                                    spacing: 6px;
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Rectangle {
-                                            width: 7px;
-                                            height: 7px;
-                                            border-radius: 3.5px;
-                                            background: root.amp-enabled ? Theme.ok : Theme.muted.with-alpha(0.5);
-                                        }
-                                    }
-                                    Text {
-                                        text: root.amp-enabled ? "On" : "Off";
-                                        color: root.amp-enabled ? Theme.ink : Theme.muted;
-                                        font-size: 11px;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                                amp-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        root.amp-enabled = !root.amp-enabled;
-                                        root.amp-enable-changed(root.amp-enabled);
-                                    }
-                                }
+                            OnOffChip {
+                                on <=> root.amp-enabled;
+                                toggled(on) => { root.amp-enable-changed(on); }
                             }
                         }
 
@@ -601,6 +793,210 @@ export component AppWindow inherits Window {
                                 label: "Treble";
                                 value <=> root.amp-treble;
                                 edited(v) => { root.amp-param-changed(6, v); }
+                            }
+                        }
+                    }
+                }
+
+                // Delay + Reverb, side by side. All values are written and
+                // read over USB serial (see main.rs FxControl).
+                HorizontalLayout {
+                    vertical-stretch: 0;
+                    spacing: 14px;
+
+                    // Delay card
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: Theme.surface;
+                        border-color: Theme.border;
+                        border-width: 1px;
+                        border-radius: 12px;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Delay";
+                                    color: Theme.ink;
+                                    font-size: 15px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                OnOffChip {
+                                    on <=> root.dly-enabled;
+                                    toggled(on) => { root.fx-changed(0, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Segmented {
+                                    options: ["Digital", "Tape"];
+                                    index <=> root.dly-model;
+                                    picked(i) => { root.fx-changed(2, i); }
+                                }
+                                StateButton {
+                                    on <=> root.dly-post;
+                                    on-text: "Post amp";
+                                    off-text: "Pre amp";
+                                    toggled(on) => { root.fx-changed(1, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                StateButton {
+                                    on <=> root.dly-sync;
+                                    on-text: "Sync On";
+                                    off-text: "Sync Off";
+                                    toggled(on) => { root.fx-changed(3, on ? 1 : 0); }
+                                }
+                                StateButton {
+                                    on <=> root.dly-pingpong;
+                                    on-text: "Ping-pong";
+                                    off-text: "Normal";
+                                    toggled(on) => { root.fx-changed(7, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                // Synced: note division instead of a time in ms.
+                                if root.dly-sync: VerticalLayout {
+                                    horizontal-stretch: 2;
+                                    spacing: 4px;
+                                    alignment: center;
+                                    Text {
+                                        text: "Division";
+                                        color: Theme.muted;
+                                        font-size: 12px;
+                                        horizontal-alignment: center;
+                                    }
+                                    Stepper {
+                                        options: root.delay-divisions;
+                                        index <=> root.dly-division;
+                                        picked(i) => { root.fx-changed(4, i); }
+                                    }
+                                }
+                                if !root.dly-sync: Knob {
+                                    label: "Time";
+                                    size: 40px;
+                                    min-value: 0;
+                                    max-value: 1000;
+                                    step: 1;
+                                    decimals: 0;
+                                    unit: " ms";
+                                    value <=> root.dly-time;
+                                    edited(v) => { root.fx-changed(5, v); }
+                                }
+                                Knob {
+                                    label: "Feedback";
+                                    size: 40px;
+                                    min-value: 0;
+                                    max-value: 100;
+                                    step: 1;
+                                    decimals: 0;
+                                    unit: "%";
+                                    value <=> root.dly-feedback;
+                                    edited(v) => { root.fx-changed(6, v); }
+                                }
+                                Knob {
+                                    label: "Mix";
+                                    size: 40px;
+                                    min-value: 0;
+                                    max-value: 100;
+                                    step: 1;
+                                    decimals: 0;
+                                    unit: "%";
+                                    value <=> root.dly-mix;
+                                    edited(v) => { root.fx-changed(8, v); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Reverb card
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: Theme.surface;
+                        border-color: Theme.border;
+                        border-width: 1px;
+                        border-radius: 12px;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+
+                            HorizontalLayout {
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Reverb";
+                                    color: Theme.ink;
+                                    font-size: 15px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                OnOffChip {
+                                    on <=> root.rvb-enabled;
+                                    toggled(on) => { root.fx-changed(10, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Stepper {
+                                    options: ["Spring 1", "Spring 2", "Spring 3", "Spring 4", "Room", "Plate"];
+                                    index <=> root.rvb-model;
+                                    picked(i) => { root.fx-changed(12, i); }
+                                }
+                                StateButton {
+                                    on <=> root.rvb-post;
+                                    on-text: "Post amp";
+                                    off-text: "Pre amp";
+                                    toggled(on) => { root.fx-changed(11, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Knob {
+                                    label: "Time";
+                                    size: 40px;
+                                    min-value: 0;
+                                    max-value: 10;
+                                    step: 0.1;
+                                    value <=> root.rvb-time;
+                                    edited(v) => { root.fx-changed(13, v); }
+                                }
+                                Knob {
+                                    label: "Predelay";
+                                    size: 40px;
+                                    min-value: 0;
+                                    max-value: 500;
+                                    step: 1;
+                                    decimals: 0;
+                                    unit: " ms";
+                                    value <=> root.rvb-predelay;
+                                    edited(v) => { root.fx-changed(14, v); }
+                                }
+                                Knob {
+                                    label: "Mix";
+                                    size: 40px;
+                                    min-value: 0;
+                                    max-value: 100;
+                                    step: 1;
+                                    decimals: 0;
+                                    unit: "%";
+                                    value <=> root.rvb-mix;
+                                    edited(v) => { root.fx-changed(16, v); }
+                                }
+                                Knob {
+                                    label: "Color";
+                                    size: 40px;
+                                    min-value: -10;
+                                    max-value: 10;
+                                    step: 0.1;
+                                    value <=> root.rvb-color;
+                                    edited(v) => { root.fx-changed(15, v); }
+                                }
                             }
                         }
                     }

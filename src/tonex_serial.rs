@@ -157,6 +157,36 @@ const P_MODEL_VOLUME: usize = 21;
 const P_MODEL_PRESENCE: usize = 34;
 const P_MODEL_DEPTH: usize = 35;
 
+/// Number of items in the preset parameter array (`BA 6D` = 109;
+/// Builty `TONEX_PARAM_LAST`).
+pub const PARAM_COUNT: usize = 109;
+
+// Delay / reverb parameter indices (Builty `enum TonexParameters`; ranges
+// from `tonex_params.c`, units as the pedal stores them).
+/// Reverb: 0 pre / 1 post amp (TouchOSC calls the CC84 switch "post").
+pub const P_REVERB_POSITION: usize = 36;
+/// Reverb on/off (0/1).
+pub const P_REVERB_ENABLE: usize = 37;
+/// Reverb model 0..=5: Spring 1-4, Room, Plate (`TonexReverbModels`).
+pub const P_REVERB_MODEL: usize = 38;
+/// First per-model reverb block (Spring 1); each model has 4 params in the
+/// order time (0..10), predelay (0..500 ms), color (-10..10), mix (0..100 %).
+pub const P_REVERB_FIRST_BLOCK: usize = 39;
+pub const REVERB_BLOCK_LEN: usize = 4;
+pub const REVERB_MODELS: usize = 6;
+/// Delay: 0 pre / 1 post amp.
+pub const P_DELAY_POST: usize = 94;
+/// Delay on/off (0/1).
+pub const P_DELAY_ENABLE: usize = 95;
+/// Delay model 0 Digital / 1 Tape (`TonexDelayModels`).
+pub const P_DELAY_MODEL: usize = 96;
+/// First per-model delay block (Digital); each model has 6 params in the
+/// order sync (0/1), time signature (0..=17), time (0..1000 ms),
+/// feedback (0..100 %), mode (0 normal / 1 ping-pong), mix (0..100 %).
+pub const P_DELAY_FIRST_BLOCK: usize = 97;
+pub const DELAY_BLOCK_LEN: usize = 6;
+pub const DELAY_MODELS: usize = 2;
+
 // Message types (header value after `B9 03`), big pedal.
 const TYPE_PRESET_DETAILS: u16 = 0x0204;
 const TYPE_PARAM_CHANGED: u16 = 0x0207;
@@ -310,6 +340,18 @@ fn check_range(name: &str, v: f32, min: f32, max: f32) -> Result<(), String> {
 fn knob_value(params: &[u8], index: usize, name: &str) -> Result<f32, String> {
     let v = param_at(params, index)?;
     knob_from_pedal(v).ok_or_else(|| format!("unexpected layout: {name} = {v} outside 0..=10"))
+}
+
+/// The whole preset parameter array (`88 <f32>` items after the marker),
+/// up to `PARAM_COUNT` items; stops early at the first non-float item, so a
+/// shorter result means the tail is unknown. Empty if there's no marker.
+pub fn extract_param_array(payload: &[u8]) -> Vec<f32> {
+    let Some(start) = find(payload, &PARAM_MARKER) else { return Vec::new() };
+    payload[start + PARAM_MARKER.len()..]
+        .chunks_exact(PARAM_STRIDE)
+        .take(PARAM_COUNT)
+        .map_while(|c| (c[0] == FLOAT_TAG).then(|| f32::from_le_bytes([c[1], c[2], c[3], c[4]])))
+        .collect()
 }
 
 /// Extracts amp knob values from a preset-details payload (see the
@@ -523,13 +565,15 @@ pub enum Event {
     /// Result of `Pedal::request_names`.
     Names(Result<Vec<String>, String>),
     /// Result of `Pedal::request_amp_params` (0-based preset index).
-    AmpParams { preset_idx: u8, result: Result<AmpParams, String> },
+    /// `raw` is the whole parameter array as far as it parsed (see
+    /// `extract_param_array`), empty if the details didn't arrive.
+    AmpParams { preset_idx: u8, result: Result<AmpParams, String>, raw: Vec<f32> },
     /// A parameter changed on the pedal (e.g. a physical knob was turned).
     /// `index` is the preset-parameter index (see `AmpKnob::param_index`).
     ParamChanged { index: usize, value: f32 },
     /// The pedal switched preset by itself (footswitch); carries the new
-    /// preset's amp params when they parsed.
-    PresetChanged { preset_idx: u8, params: Option<AmpParams> },
+    /// preset's amp params when they parsed, and its raw parameter array.
+    PresetChanged { preset_idx: u8, params: Option<AmpParams>, raw: Vec<f32> },
 }
 
 /// The 7 amp knobs, in the UI's id order.
@@ -705,23 +749,29 @@ impl<F: Fn(Event)> Session<'_, F> {
     /// Serves queued quick requests: all writes (in order), then only the
     /// newest amp-params read. Returns whether anything was served.
     fn serve_quick(&mut self) -> Result<bool, String> {
-        let mut served = false;
+        let mut writes: Vec<(u8, f32)> = Vec::new();
         let mut latest_read = None;
         let mut rest = VecDeque::new();
         for r in std::mem::take(&mut self.queue) {
             match r {
-                Request::SetParam(index, value) => {
-                    self.link.send(&set_param_request(index, value))?;
-                    served = true;
-                }
+                // A drag queues many writes per param: keep the latest value,
+                // in first-seen order across params.
+                Request::SetParam(index, value) => match writes.iter_mut().find(|(i, _)| *i == index) {
+                    Some(w) => w.1 = value,
+                    None => writes.push((index, value)),
+                },
                 Request::AmpParams(idx) => latest_read = Some(idx),
                 other => rest.push_back(other),
             }
         }
         self.queue = rest;
+        for &(index, value) in &writes {
+            self.link.send(&set_param_request(index, value))?;
+        }
+        let mut served = !writes.is_empty();
         if let Some(idx) = latest_read {
-            let result = self.read_amp_params(idx)?;
-            (self.on_event)(Event::AmpParams { preset_idx: idx, result });
+            let (result, raw) = self.read_amp_params(idx)?;
+            (self.on_event)(Event::AmpParams { preset_idx: idx, result, raw });
             served = true;
         }
         Ok(served)
@@ -781,7 +831,8 @@ impl<F: Fn(Event)> Session<'_, F> {
                 let params = extract_amp_params(payload)
                     .map_err(|e| eprintln!("TONEX: pushed preset {idx} params: {e}"))
                     .ok();
-                (self.on_event)(Event::PresetChanged { preset_idx: idx, params });
+                let raw = extract_param_array(payload);
+                (self.on_event)(Event::PresetChanged { preset_idx: idx, params, raw });
                 return false;
             }
         }
@@ -806,13 +857,14 @@ impl<F: Fn(Event)> Session<'_, F> {
     }
 
     /// Ok(result) for the event; Err only for link failures (session ends).
-    fn read_amp_params(&mut self, idx: u8) -> Result<Result<AmpParams, String>, String> {
+    /// Returns the amp params and the raw parameter array.
+    fn read_amp_params(&mut self, idx: u8) -> Result<(Result<AmpParams, String>, Vec<f32>), String> {
         if usize::from(idx) >= PRESET_COUNT {
-            return Ok(Err(format!("preset index {idx} out of range")));
+            return Ok((Err(format!("preset index {idx} out of range")), Vec::new()));
         }
         Ok(match self.fetch_details(idx, PRESET_TIMEOUT)? {
-            Some(payload) => extract_amp_params(&payload),
-            None => Err("no preset details received".into()),
+            Some(payload) => (extract_amp_params(&payload), extract_param_array(&payload)),
+            None => (Err("no preset details received".into()), Vec::new()),
         })
     }
 
@@ -924,6 +976,19 @@ mod tests {
                 amp_enabled: true
             }
         );
+    }
+
+    #[test]
+    fn extracts_full_param_array() {
+        let p = payload_with_params(&[(P_DELAY_ENABLE, 1.0), (PARAM_COUNT - 1, 42.0)]);
+        let raw = extract_param_array(&p);
+        assert_eq!(raw.len(), PARAM_COUNT);
+        assert_eq!(raw[P_DELAY_ENABLE], 1.0);
+        assert_eq!(raw[PARAM_COUNT - 1], 42.0);
+        // Truncated: only the complete items before the cut.
+        let cut = find(&p, &PARAM_MARKER).unwrap() + PARAM_MARKER.len() + 50 * PARAM_STRIDE + 2;
+        assert_eq!(extract_param_array(&p[..cut]).len(), 50);
+        assert!(extract_param_array(&[0xB9, 0x03]).is_empty());
     }
 
     #[test]

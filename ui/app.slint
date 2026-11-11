@@ -270,7 +270,7 @@ component StateButton inherits Rectangle {
     callback toggled(bool);
 
     height: 26px;
-    min-width: 48px;
+    min-width: 32px;
     horizontal-stretch: 1;
     border-radius: 7px;
     border-width: 1px;
@@ -304,7 +304,7 @@ component Stepper inherits Rectangle {
     callback picked(int);
 
     height: 26px;
-    min-width: 76px;
+    min-width: 60px;
     horizontal-stretch: 1;
     border-radius: 7px;
     border-width: 1px;
@@ -825,9 +825,15 @@ export component AppWindow inherits Window {
 
                     // Compressor card
                     Rectangle {
+                        // Hard 50/50: explicit zero min/preferred widths
+                        // override the content-derived ones, so equal
+                        // stretch splits each FX row exactly in half and the
+                        // seams of both rows line up at every window width.
+                        // Content shrinks/elides and is clipped, never pushes.
                         horizontal-stretch: 1;
-                        // Same preferred width for all FX cards: exact 50/50.
-                        preferred-width: 100px;
+                        min-width: 0px;
+                        preferred-width: 0px;
+                        clip: true;
                         background: Theme.surface;
                         border-color: Theme.border;
                         border-width: 1px;
@@ -904,9 +910,15 @@ export component AppWindow inherits Window {
 
                     // Modulation card; knob set depends on the selected type.
                     Rectangle {
+                        // Hard 50/50: explicit zero min/preferred widths
+                        // override the content-derived ones, so equal
+                        // stretch splits each FX row exactly in half and the
+                        // seams of both rows line up at every window width.
+                        // Content shrinks/elides and is clipped, never pushes.
                         horizontal-stretch: 1;
-                        // Same preferred width for all FX cards: exact 50/50.
-                        preferred-width: 100px;
+                        min-width: 0px;
+                        preferred-width: 0px;
+                        clip: true;
                         background: Theme.surface;
                         border-color: Theme.border;
                         border-width: 1px;
@@ -1037,9 +1049,15 @@ export component AppWindow inherits Window {
 
                     // Delay card
                     Rectangle {
+                        // Hard 50/50: explicit zero min/preferred widths
+                        // override the content-derived ones, so equal
+                        // stretch splits each FX row exactly in half and the
+                        // seams of both rows line up at every window width.
+                        // Content shrinks/elides and is clipped, never pushes.
                         horizontal-stretch: 1;
-                        // Same preferred width for all FX cards: exact 50/50.
-                        preferred-width: 100px;
+                        min-width: 0px;
+                        preferred-width: 0px;
+                        clip: true;
                         background: Theme.surface;
                         border-color: Theme.border;
                         border-width: 1px;
@@ -1154,9 +1172,15 @@ export component AppWindow inherits Window {
 
                     // Reverb card
                     Rectangle {
+                        // Hard 50/50: explicit zero min/preferred widths
+                        // override the content-derived ones, so equal
+                        // stretch splits each FX row exactly in half and the
+                        // seams of both rows line up at every window width.
+                        // Content shrinks/elides and is clipped, never pushes.
                         horizontal-stretch: 1;
-                        // Same preferred width for all FX cards: exact 50/50.
-                        preferred-width: 100px;
+                        min-width: 0px;
+                        preferred-width: 0px;
+                        clip: true;
                         background: Theme.surface;
                         border-color: Theme.border;
                         border-width: 1px;

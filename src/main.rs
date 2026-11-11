@@ -1,12 +1,11 @@
 mod tonex_serial;
 
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use midir::{MidiOutput, MidiOutputConnection};
 use slint::{ModelRc, SharedString, VecModel};
+use tonex_serial::{AmpKnob, Event};
 
 slint::include_modules!();
 
@@ -92,7 +91,7 @@ impl MidiEngine {
     }
 }
 
-/// Amp knobs and their TONEX Pedal (big floor unit) MIDI CC numbers.
+/// MIDI CC number of each amp knob on the TONEX Pedal (big floor unit).
 ///
 /// Source: ThibaultDucray/TonexPedal-TouchOSC-Template v4.3
 /// (`ToneX-controler-4-3-1.tosc`, controls radialGain=102,
@@ -101,44 +100,22 @@ impl MidiEngine {
 /// chart (post Nov-2024 firmware). Every one of them sends the control's
 /// 0..1 position scaled linearly to CC value 0..127; the pedal shows these
 /// params as 0..10, so the mapping is linear: cc = round(v / 10 * 127).
-/// The order matches the `amp-param-changed` ids in app.slint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AmpParam {
-    Gain,
-    Volume,
-    Presence,
-    Depth,
-    Bass,
-    Mid,
-    Treble,
+/// Verified on hardware. Amp on/off has no CC; it is written over serial.
+fn knob_cc(knob: AmpKnob) -> u8 {
+    match knob {
+        AmpKnob::Gain => 102,
+        AmpKnob::Volume => 103,
+        AmpKnob::Presence => 106,
+        AmpKnob::Depth => 107,
+        AmpKnob::Bass => 23,
+        AmpKnob::Mid => 25,
+        AmpKnob::Treble => 28,
+    }
 }
 
-impl AmpParam {
-    const ALL: [AmpParam; 7] = [
-        AmpParam::Gain,
-        AmpParam::Volume,
-        AmpParam::Presence,
-        AmpParam::Depth,
-        AmpParam::Bass,
-        AmpParam::Mid,
-        AmpParam::Treble,
-    ];
-
-    fn from_id(id: i32) -> Option<Self> {
-        usize::try_from(id).ok().and_then(|i| Self::ALL.get(i).copied())
-    }
-
-    fn cc(self) -> u8 {
-        match self {
-            AmpParam::Gain => 102,
-            AmpParam::Volume => 103,
-            AmpParam::Presence => 106,
-            AmpParam::Depth => 107,
-            AmpParam::Bass => 23,
-            AmpParam::Mid => 25,
-            AmpParam::Treble => 28,
-        }
-    }
+/// UI knob id (`amp-param-changed` in app.slint) → knob.
+fn knob_from_id(id: i32) -> Option<AmpKnob> {
+    usize::try_from(id).ok().and_then(|i| AmpKnob::ALL.get(i).copied())
 }
 
 /// UI knob value (0..10, 0.1 steps) → CC value 0..127.
@@ -147,75 +124,43 @@ fn knob_to_cc(v: f32) -> u8 {
     (v.clamp(0.0, 10.0) / 10.0 * 127.0).round() as u8
 }
 
-/// Last CC value sent per amp param, to skip redundant sends. Cleared when
-/// the pedal's state changes under us (preset change, reconnect).
-#[derive(Clone, Default)]
-struct AmpCcCache {
-    last: Rc<RefCell<[Option<u8>; 7]>>,
+/// After we change a value, pedal reports for it are ignored this long, so
+/// late echoes of our own changes don't yank the control back.
+const ECHO_GUARD: Duration = Duration::from_millis(600);
+
+/// Bookkeeping for two-way amp sync: last CC sent per knob (to skip
+/// redundant sends) and when we last changed each control.
+#[derive(Default)]
+struct AmpSync {
+    last_cc: [Option<u8>; 7],
+    knob_touched: [Option<Instant>; 7],
+    enable_touched: Option<Instant>,
 }
 
-impl AmpCcCache {
-    /// Returns true when `value` differs from the last value sent for `param`.
-    fn changed(&self, param: AmpParam, value: u8) -> bool {
-        self.last.borrow()[param as usize] != Some(value)
+impl AmpSync {
+    /// Forget what the pedal holds (preset change, reconnect).
+    fn clear(&mut self) {
+        *self = Self::default();
     }
 
-    fn record(&self, param: AmpParam, value: u8) {
-        self.last.borrow_mut()[param as usize] = Some(value);
+    fn knob_recent(&self, knob: AmpKnob) -> bool {
+        self.knob_touched[knob as usize].is_some_and(|t| t.elapsed() < ECHO_GUARD)
     }
 
-    fn clear(&self) {
-        *self.last.borrow_mut() = [None; 7];
+    fn enable_recent(&self) -> bool {
+        self.enable_touched.is_some_and(|t| t.elapsed() < ECHO_GUARD)
     }
 }
 
-fn set_amp_knobs(ui: &AppWindow, p: &tonex_serial::AmpParams) {
-    ui.set_amp_gain(p.gain);
-    ui.set_amp_volume(p.volume);
-    ui.set_amp_presence(p.presence);
-    ui.set_amp_depth(p.depth);
-    ui.set_amp_bass(p.bass);
-    ui.set_amp_mid(p.mid);
-    ui.set_amp_treble(p.treble);
-}
-
-/// Reads amp params over serial on a single worker thread. Requests that
-/// pile up while a read is running are coalesced to the latest one, and a
-/// result is applied only if the UI still shows that preset.
-#[derive(Clone)]
-struct AmpParamsReader {
-    tx: mpsc::Sender<i32>,
-}
-
-impl AmpParamsReader {
-    fn spawn(ui: slint::Weak<AppWindow>) -> Self {
-        let (tx, rx) = mpsc::channel::<i32>();
-        std::thread::spawn(move || {
-            while let Ok(mut preset) = rx.recv() {
-                // Coalesce: only the newest pending request matters.
-                while let Ok(newer) = rx.try_recv() {
-                    preset = newer;
-                }
-                let idx = (clamp_preset(preset) - 1) as u8;
-                match tonex_serial::read_amp_params(idx) {
-                    Ok(params) => {
-                        let _ = ui.upgrade_in_event_loop(move |ui| {
-                            if ui.get_preset() == preset {
-                                set_amp_knobs(&ui, &params);
-                            }
-                        });
-                    }
-                    Err(e) => eprintln!("TONEX amp params read failed (preset {preset}): {e}"),
-                }
-            }
-        });
-        Self { tx }
-    }
-
-    /// Queues a read of `preset`'s amp params (1-based).
-    fn request(&self, preset: i32) {
-        // Only fails if the worker is gone, which leaves the knobs as-is.
-        let _ = self.tx.send(preset);
+fn set_knob(ui: &AppWindow, knob: AmpKnob, v: f32) {
+    match knob {
+        AmpKnob::Gain => ui.set_amp_gain(v),
+        AmpKnob::Volume => ui.set_amp_volume(v),
+        AmpKnob::Presence => ui.set_amp_presence(v),
+        AmpKnob::Depth => ui.set_amp_depth(v),
+        AmpKnob::Bass => ui.set_amp_bass(v),
+        AmpKnob::Mid => ui.set_amp_mid(v),
+        AmpKnob::Treble => ui.set_amp_treble(v),
     }
 }
 
@@ -232,7 +177,6 @@ fn bank_and_pc(preset_num: i32) -> (u8, u8) {
 #[derive(Clone, Default)]
 struct PresetNames {
     names: Arc<Mutex<Vec<String>>>,
-    loading: Arc<AtomicBool>,
 }
 
 /// Display label: the pedal groups presets in banks of 3 (A/B/C), so
@@ -274,30 +218,127 @@ impl PresetNames {
             .collect();
         ModelRc::new(VecModel::from(labels))
     }
+}
 
-    /// Reads names in a background thread and pushes the current preset's
-    /// name into the UI. A no-op while a previous read is still running.
-    fn refresh(&self, ui: slint::Weak<AppWindow>) {
-        if self.loading.swap(true, Ordering::SeqCst) {
+/// Shows `preset` as current in the UI. Does NOT send MIDI (used both by the
+/// UI path, which sends separately, and for footswitch changes on the pedal).
+fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
+    ui.set_preset(preset);
+    ui.set_preset_name(names.name_for(preset).into());
+}
+
+/// State shared between the UI callbacks and the serial event handler
+/// (which runs in the UI thread, but must be `Send` to get there).
+#[derive(Clone, Default)]
+struct SyncCtx {
+    names: PresetNames,
+    amp: Arc<Mutex<AmpSync>>,
+    /// The live serial session; replaced on reconnect.
+    serial: Arc<Mutex<Option<tonex_serial::Pedal>>>,
+}
+
+impl SyncCtx {
+    fn amp(&self) -> MutexGuard<'_, AmpSync> {
+        self.amp.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn with_serial<T>(&self, f: impl FnOnce(&tonex_serial::Pedal) -> Result<T, String>) -> Result<T, String> {
+        let guard = self.serial.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(pedal) => f(pedal),
+            None => Err("serial session not started".into()),
+        }
+    }
+
+    /// (Re)starts the serial session; the previous one ends when its handle
+    /// is dropped and releases the port before the new one opens it. Then
+    /// reads the current preset's amp params and all names.
+    fn start_serial(&self, ui: slint::Weak<AppWindow>, preset: i32) {
+        let ctx = self.clone();
+        let pedal = tonex_serial::Pedal::start(move |event| {
+            let ctx = ctx.clone();
+            let _ = ui.upgrade_in_event_loop(move |ui| ctx.handle_event(&ui, event));
+        });
+        // Params first: the knobs shouldn't wait for the ~10 s name scan.
+        let _ = pedal.request_amp_params((clamp_preset(preset) - 1) as u8);
+        let _ = pedal.request_names();
+        *self.serial.lock().unwrap_or_else(|e| e.into_inner()) = Some(pedal);
+    }
+
+    fn request_amp_params(&self, preset: i32) {
+        if let Err(e) = self.with_serial(|p| p.request_amp_params((clamp_preset(preset) - 1) as u8)) {
+            eprintln!("TONEX amp params request failed: {e}");
+        }
+    }
+
+    /// Applies a full set of amp values read from the pedal, unless the user
+    /// is dragging a knob right now.
+    fn apply_amp_params(&self, ui: &AppWindow, p: &tonex_serial::AmpParams) {
+        if ui.get_knob_active() {
             return;
         }
-        let this = self.clone();
-        std::thread::spawn(move || {
-            let result = tonex_serial::read_preset_names();
-            this.loading.store(false, Ordering::SeqCst);
-            let names = match result {
-                Ok(names) => names,
-                Err(e) => {
-                    eprintln!("TONEX preset names read failed: {e}");
-                    Vec::new()
+        let mut amp = self.amp();
+        let values = [p.gain, p.volume, p.presence, p.depth, p.bass, p.mid, p.treble];
+        for (knob, v) in AmpKnob::ALL.into_iter().zip(values) {
+            set_knob(ui, knob, v);
+            amp.last_cc[knob as usize] = Some(knob_to_cc(v));
+        }
+        ui.set_amp_enabled(p.amp_enabled);
+    }
+
+    /// Runs in the UI thread for every event from the serial session.
+    fn handle_event(&self, ui: &AppWindow, event: Event) {
+        match event {
+            Event::Connected(port) => eprintln!("TONEX serial session on {port}"),
+            Event::Disconnected(reason) => {
+                eprintln!("TONEX serial session ended: {reason} (press Reconnect to retry)")
+            }
+            Event::Names(Ok(names)) => {
+                *self.names.lock() = names;
+                ui.set_preset_name(self.names.name_for(ui.get_preset()).into());
+                ui.set_preset_names(self.names.list_model());
+            }
+            Event::Names(Err(e)) => eprintln!("TONEX preset names read failed: {e}"),
+            Event::AmpParams { preset_idx, result } => match result {
+                Ok(p) if ui.get_preset() == i32::from(preset_idx) + 1 => self.apply_amp_params(ui, &p),
+                Ok(_) => {} // stale: the UI moved on to another preset
+                Err(e) => eprintln!("TONEX amp params read failed (preset {}): {e}", i32::from(preset_idx) + 1),
+            },
+            Event::ParamChanged { index, value } => self.apply_param_change(ui, index, value),
+            Event::PresetChanged { preset_idx, params } => {
+                let preset = i32::from(preset_idx) + 1;
+                if preset != ui.get_preset() {
+                    show_preset(ui, &self.names, preset);
+                    self.amp().clear();
                 }
-            };
-            *this.lock() = names;
-            let _ = ui.upgrade_in_event_loop(move |ui| {
-                ui.set_preset_name(this.name_for(ui.get_preset()).into());
-                ui.set_preset_names(this.list_model());
-            });
-        });
+                match params {
+                    Some(p) => self.apply_amp_params(ui, &p),
+                    None => self.request_amp_params(preset),
+                }
+            }
+        }
+    }
+
+    /// A single parameter changed on the pedal (physical knob, or the echo
+    /// of our own change).
+    fn apply_param_change(&self, ui: &AppWindow, index: usize, value: f32) {
+        if index == tonex_serial::AMP_ENABLE_PARAM {
+            if !self.amp().enable_recent() {
+                ui.set_amp_enabled(value != 0.0);
+            }
+            return;
+        }
+        let Some(knob) = AmpKnob::from_param_index(index) else { return };
+        let Some(v) = tonex_serial::knob_from_pedal(value) else {
+            eprintln!("TONEX: param {index} value {value} out of range, ignored");
+            return;
+        };
+        let mut amp = self.amp();
+        if ui.get_knob_active() || amp.knob_recent(knob) {
+            return;
+        }
+        set_knob(ui, knob, v);
+        amp.last_cc[knob as usize] = Some(knob_to_cc(v));
     }
 }
 
@@ -314,12 +355,10 @@ fn show_disconnected(ui: &AppWindow) {
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     let engine = MidiEngine::default();
-    let names = PresetNames::default();
-    let amp_reader = AmpParamsReader::spawn(ui.as_weak());
-    let cc_cache = AmpCcCache::default();
+    let ctx = SyncCtx::default();
 
     ui.set_preset(DEFAULT_PRESET);
-    ui.set_preset_names(names.list_model());
+    ui.set_preset_names(ctx.names.list_model());
 
     match engine.try_connect() {
         Ok(name) => show_connected(&ui, &name),
@@ -328,50 +367,46 @@ fn main() -> Result<(), slint::PlatformError> {
             show_disconnected(&ui);
         }
     }
-    // Queue the (short) params read first so the knobs don't wait for the
-    // full name scan; serial access is serialized inside tonex_serial.
-    amp_reader.request(ui.get_preset());
-    names.refresh(ui.as_weak());
+    ctx.start_serial(ui.as_weak(), ui.get_preset());
 
     {
         let ui_weak = ui.as_weak();
         let engine = engine.clone();
-        let names = names.clone();
-        let amp_reader = amp_reader.clone();
-        let cc_cache = cc_cache.clone();
+        let ctx = ctx.clone();
         ui.on_preset_changed(move |requested| {
             let Some(ui) = ui_weak.upgrade() else { return };
             let preset = clamp_preset(requested);
 
-            ui.set_preset(preset);
-            ui.set_preset_name(names.name_for(preset).into());
+            show_preset(&ui, &ctx.names, preset);
 
             // The pedal loads the preset's own amp settings.
-            cc_cache.clear();
+            ctx.amp().clear();
             if let Err(e) = engine.send_preset(preset) {
                 eprintln!("MIDI send failed: {e}");
                 show_disconnected(&ui);
             }
-            amp_reader.request(preset);
+            ctx.request_amp_params(preset);
         });
     }
 
     {
         let ui_weak = ui.as_weak();
         let engine = engine.clone();
-        let cc_cache = cc_cache.clone();
+        let ctx = ctx.clone();
         ui.on_amp_param_changed(move |id, value| {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let Some(param) = AmpParam::from_id(id) else {
+            let Some(knob) = knob_from_id(id) else {
                 eprintln!("unknown amp param id {id}");
                 return;
             };
             let cc_value = knob_to_cc(value);
-            if !cc_cache.changed(param, cc_value) {
+            let mut amp = ctx.amp();
+            amp.knob_touched[knob as usize] = Some(Instant::now());
+            if amp.last_cc[knob as usize] == Some(cc_value) {
                 return;
             }
-            match engine.send_cc(param.cc(), cc_value) {
-                Ok(()) => cc_cache.record(param, cc_value),
+            match engine.send_cc(knob_cc(knob), cc_value) {
+                Ok(()) => amp.last_cc[knob as usize] = Some(cc_value),
                 Err(e) => {
                     eprintln!("MIDI send failed: {e}");
                     show_disconnected(&ui);
@@ -382,15 +417,27 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ui_weak = ui.as_weak();
+        let ctx = ctx.clone();
+        ui.on_amp_enable_changed(move |on| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            ctx.amp().enable_touched = Some(Instant::now());
+            let value = if on { 1.0 } else { 0.0 };
+            if let Err(e) = ctx.with_serial(|p| p.set_param(tonex_serial::AMP_ENABLE_PARAM, value)) {
+                // No CC exists for amp on/off, so serial is the only way.
+                eprintln!("TONEX amp enable write failed: {e}");
+                ui.set_amp_enabled(!on);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
         let engine = engine.clone();
-        let names = names.clone();
-        let amp_reader = amp_reader.clone();
-        let cc_cache = cc_cache.clone();
+        let ctx = ctx.clone();
         ui.on_reconnect(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            cc_cache.clear();
-            amp_reader.request(ui.get_preset());
-            names.refresh(ui_weak.clone());
+            ctx.amp().clear();
+            ctx.start_serial(ui_weak.clone(), ui.get_preset());
             match engine.try_connect() {
                 Ok(name) => {
                     show_connected(&ui, &name);
@@ -427,9 +474,9 @@ mod tests {
 
     #[test]
     fn amp_param_ids_match_ui_order() {
-        let ccs: Vec<u8> = (0..7).filter_map(AmpParam::from_id).map(AmpParam::cc).collect();
+        let ccs: Vec<u8> = (0..7).filter_map(knob_from_id).map(knob_cc).collect();
         assert_eq!(ccs, [102, 103, 106, 107, 23, 25, 28]);
-        assert_eq!(AmpParam::from_id(7), None);
-        assert_eq!(AmpParam::from_id(-1), None);
+        assert_eq!(knob_from_id(7), None);
+        assert_eq!(knob_from_id(-1), None);
     }
 }

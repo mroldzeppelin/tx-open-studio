@@ -168,6 +168,7 @@ component Knob inherits VerticalLayout {
     in property <string> label;
     in-out property <float> value: 5;
     callback edited(float);
+    out property <bool> active: ta.pressed;
     property <length> size: 48px;
     // Sweep of 270°: 0 → -135°, 10 → +135° (0° = straight up).
     property <angle> sweep: (-135 + root.value * 27) * 1deg;
@@ -262,12 +263,18 @@ export component AppWindow inherits Window {
     in-out property <float> amp-bass: 5;
     in-out property <float> amp-mid: 5;
     in-out property <float> amp-treble: 5;
+    in-out property <bool> amp-enabled: true;
+    // True while any amp knob is being dragged (Rust skips pedal updates then).
+    out property <bool> knob-active: k-gain.active || k-volume.active || k-presence.active
+        || k-depth.active || k-bass.active || k-mid.active || k-treble.active;
 
     callback preset-changed(int);
     callback reconnect();
     // User turned an amp knob. id: 0 gain, 1 volume, 2 presence, 3 depth,
     // 4 bass, 5 mid, 6 treble (matches AmpParam in main.rs).
     callback amp-param-changed(int, float);
+    // User toggled the amp on/off chip.
+    callback amp-enable-changed(bool);
 
     // Label of preset `p` (1-based) from the list model; "" when out of range,
     // the bare number when the name is not loaded yet.
@@ -518,22 +525,41 @@ export component AppWindow inherits Window {
                                 font-weight: 700;
                                 vertical-alignment: center;
                             }
+                            // Amp enable/bypass toggle (written over USB serial).
                             Rectangle {
                                 horizontal-stretch: 0;
-                                background: Theme.soft;
+                                background: amp-ta.pressed ? Theme.selected : (amp-ta.has-hover ? Theme.hover : Theme.soft);
                                 border-radius: 6px;
                                 border-width: 1px;
-                                border-color: Theme.border;
+                                border-color: root.amp-enabled ? Theme.ok : Theme.border;
+                                animate background { duration: 90ms; }
                                 HorizontalLayout {
                                     padding-left: 8px;
                                     padding-right: 8px;
                                     padding-top: 3px;
                                     padding-bottom: 3px;
+                                    spacing: 6px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 7px;
+                                            height: 7px;
+                                            border-radius: 3.5px;
+                                            background: root.amp-enabled ? Theme.ok : Theme.muted.with-alpha(0.5);
+                                        }
+                                    }
                                     Text {
-                                        text: "On";
-                                        color: Theme.secondary-ink;
+                                        text: root.amp-enabled ? "On" : "Off";
+                                        color: root.amp-enabled ? Theme.ink : Theme.muted;
                                         font-size: 11px;
                                         vertical-alignment: center;
+                                    }
+                                }
+                                amp-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.amp-enabled = !root.amp-enabled;
+                                        root.amp-enable-changed(root.amp-enabled);
                                     }
                                 }
                             }
@@ -541,37 +567,37 @@ export component AppWindow inherits Window {
 
                         HorizontalLayout {
                             spacing: 8px;
-                            Knob {
+                            k-gain := Knob {
                                 label: "Gain";
                                 value <=> root.amp-gain;
                                 edited(v) => { root.amp-param-changed(0, v); }
                             }
-                            Knob {
+                            k-volume := Knob {
                                 label: "Volume";
                                 value <=> root.amp-volume;
                                 edited(v) => { root.amp-param-changed(1, v); }
                             }
-                            Knob {
+                            k-presence := Knob {
                                 label: "Presence";
                                 value <=> root.amp-presence;
                                 edited(v) => { root.amp-param-changed(2, v); }
                             }
-                            Knob {
+                            k-depth := Knob {
                                 label: "Depth";
                                 value <=> root.amp-depth;
                                 edited(v) => { root.amp-param-changed(3, v); }
                             }
-                            Knob {
+                            k-bass := Knob {
                                 label: "Bass";
                                 value <=> root.amp-bass;
                                 edited(v) => { root.amp-param-changed(4, v); }
                             }
-                            Knob {
+                            k-mid := Knob {
                                 label: "Mid";
                                 value <=> root.amp-mid;
                                 edited(v) => { root.amp-param-changed(5, v); }
                             }
-                            Knob {
+                            k-treble := Knob {
                                 label: "Treble";
                                 value <=> root.amp-treble;
                                 edited(v) => { root.amp-param-changed(6, v); }

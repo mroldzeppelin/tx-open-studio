@@ -1,5 +1,6 @@
-//! Reads preset names from an IK Multimedia TONEX Pedal (the big floor unit,
-//! USB ID 1963:0068) over its USB CDC-ACM serial port.
+//! Talks to an IK Multimedia TONEX Pedal (the big floor unit, USB ID
+//! 1963:0068) over its USB CDC-ACM serial port: preset names, amp params,
+//! live change notifications and parameter writes.
 //!
 //! # Protocol notes (unofficial)
 //!
@@ -77,13 +78,34 @@
 //! (12) and treble freq (17) must lie in their Hz ranges and amp enable (18)
 //! must be 0 or 1. A shifted layout fails this check instead of showing junk.
 //!
-//! All port access is serialized by a process-wide lock so the name scan and
-//! a params read never talk to the pedal at the same time.
+//! ## Live session (unsolicited messages, parameter writes)
+//! Source: Builty `usb_tonex.c` `usb_tonex_parse()` type switch (big pedal):
+//! - `0x0207` PARAM_CHANGED: body `B9 04 02 00 <param idx> 88 <f32 LE>`
+//!   (`usb_tonex_parse_param_changed`). Builty refreshes its UI on these,
+//!   which is how it follows changes made on the pedal ("IK new parameter
+//!   comms", firmware with Editor support).
+//! - `0x0204` preset details pushed by the pedal when the preset is changed
+//!   on it; they contain `B9 04 00 00 [80] <preset idx>`
+//!   (`TonexPresetIndexByteMarker`: "when preset is changed on pedal, this
+//!   byte sequence is in the preset details"; absent in sync responses).
+//! - `0x0201` state update (current preset at a fixed offset): not used.
+//! - Writing one parameter (`usb_tonex_send_single_parameter`):
+//!   `B9 03 81 07 02 82 0A 00 80 10 03 | B9 04 02 00 <idx> 88 <f32 LE>`
+//!   (type 0x0207, size 0x000A = body length).
+//!
+//! A `Pedal` session thread owns the port for as long as the app is
+//! connected: it answers our requests (names, params, writes) over the same
+//! connection and reports unsolicited frames as `Event`s. Set
+//! `TX_DEBUG_SERIAL=1` to log frames it doesn't handle (hex) to stderr.
+//!
+//! All port access is serialized by a process-wide lock: a new session
+//! waits until the previous one has released the port.
 
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::collections::VecDeque;
+use std::sync::{mpsc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serial2::SerialPort;
@@ -115,7 +137,8 @@ const PRESET_DETAILS_HEADER: [u8; 11] = [
 const NAME_MARKER: [u8; 6] = [0xB9, 0x04, 0xB9, 0x02, 0xBC, 0x21];
 const NAME_LEN: usize = 32;
 
-const PARAMS_DEADLINE: Duration = Duration::from_secs(4);
+/// Read poll while idle, waiting for unsolicited frames.
+const IDLE_POLL: Duration = Duration::from_millis(100);
 const PARAM_MARKER: [u8; 4] = [0xBA, 0x03, 0xBA, 0x6D];
 const FLOAT_TAG: u8 = 0x88;
 const PARAM_STRIDE: usize = 5;
@@ -127,10 +150,25 @@ const P_EQ_MID: usize = 13;
 const P_EQ_TREBLE: usize = 16;
 const P_EQ_TREBLE_FREQ: usize = 17;
 const P_AMP_ENABLE: usize = 18;
+/// Amp on/off (0.0 / 1.0); no MIDI CC exists for it, written over serial.
+pub const AMP_ENABLE_PARAM: usize = P_AMP_ENABLE;
 const P_MODEL_GAIN: usize = 20;
 const P_MODEL_VOLUME: usize = 21;
 const P_MODEL_PRESENCE: usize = 34;
 const P_MODEL_DEPTH: usize = 35;
+
+// Message types (header value after `B9 03`), big pedal.
+const TYPE_PRESET_DETAILS: u16 = 0x0204;
+const TYPE_PARAM_CHANGED: u16 = 0x0207;
+/// Body of a 0x0207 message: `B9 04 02 00 <param idx> 88 <f32 LE>`.
+const PARAM_CHANGED_MARKER: [u8; 4] = [0xB9, 0x04, 0x02, 0x00];
+/// Header of a single-parameter write (type 0x0207, body size 0x000A).
+const SET_PARAM_HEADER: [u8; 11] = [
+    0xB9, 0x03, 0x81, 0x07, 0x02, 0x82, 0x0A, 0x00, 0x80, 0x10, 0x03,
+];
+/// In preset details pushed after a footswitch preset change:
+/// `B9 04 00 00 [80] <preset idx>`.
+const PRESET_INDEX_MARKER: [u8; 4] = [0xB9, 0x04, 0x00, 0x00];
 
 /// Serializes all access to the pedal's serial port.
 static PORT_LOCK: Mutex<()> = Mutex::new(());
@@ -149,6 +187,7 @@ pub struct AmpParams {
     pub bass: f32,
     pub mid: f32,
     pub treble: f32,
+    pub amp_enabled: bool,
 }
 
 // ---------------------------------------------------------------- framing
@@ -218,6 +257,17 @@ fn preset_request(index: u8) -> Vec<u8> {
     req
 }
 
+/// Single-parameter write (Builty `usb_tonex_send_single_parameter`, big
+/// pedal; needs the firmware that came with Editor support).
+fn set_param_request(index: u8, value: f32) -> Vec<u8> {
+    let mut req = SET_PARAM_HEADER.to_vec();
+    req.extend_from_slice(&PARAM_CHANGED_MARKER);
+    req.push(index);
+    req.push(FLOAT_TAG);
+    req.extend_from_slice(&value.to_le_bytes());
+    req
+}
+
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
@@ -259,9 +309,7 @@ fn check_range(name: &str, v: f32, min: f32, max: f32) -> Result<(), String> {
 /// A 0..10 knob value, rounded to the UI's 0.1 step.
 fn knob_value(params: &[u8], index: usize, name: &str) -> Result<f32, String> {
     let v = param_at(params, index)?;
-    // Tiny tolerance for float noise at the ends of the range.
-    check_range(name, v, -0.01, 10.01)?;
-    Ok(((v * 10.0).round() / 10.0).clamp(0.0, 10.0))
+    knob_from_pedal(v).ok_or_else(|| format!("unexpected layout: {name} = {v} outside 0..=10"))
 }
 
 /// Extracts amp knob values from a preset-details payload (see the
@@ -286,6 +334,7 @@ fn extract_amp_params(payload: &[u8]) -> Result<AmpParams, String> {
         bass: knob_value(params, P_EQ_BASS, "bass")?,
         mid: knob_value(params, P_EQ_MID, "mid")?,
         treble: knob_value(params, P_EQ_TREBLE, "treble")?,
+        amp_enabled: amp_enable != 0.0,
     })
 }
 
@@ -356,7 +405,8 @@ impl Link {
                 return Ok(None);
             }
             match self.port.read(&mut chunk) {
-                Ok(0) => {}
+                // poll() said readable but nothing came: hang-up (unplugged).
+                Ok(0) => return Err("device disconnected".into()),
                 Ok(n) => self.rx.extend_from_slice(&chunk[..n]),
                 Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
                 Err(e) => return Err(format!("read: {e}")),
@@ -399,58 +449,209 @@ fn candidate_ports() -> Vec<PathBuf> {
     ik
 }
 
-// ---------------------------------------------------------------- public API
+// ---------------------------------------------------------------- frame classification
 
-/// Reads all 150 preset names from the pedal. Unreadable slots are returned
-/// as empty strings; fails only if no name at all could be read.
-/// Bounded by an overall deadline so it never hangs.
-pub fn read_preset_names() -> Result<Vec<String>, String> {
-    with_pedal(OVERALL_DEADLINE, read_names)
-}
-
-/// Reads the amp knob values of preset `preset_idx` (0-based) from the
-/// summary preset-details response.
-pub fn read_amp_params(preset_idx: u8) -> Result<AmpParams, String> {
-    if usize::from(preset_idx) >= PRESET_COUNT {
-        return Err(format!("preset index {preset_idx} out of range"));
-    }
-    with_pedal(PARAMS_DEADLINE, |link, deadline| {
-        link.send(&preset_request(preset_idx))?;
-        let until = (Instant::now() + PRESET_TIMEOUT).min(deadline);
-        // Skip unrelated frames (e.g. unsolicited state updates); the first
-        // frame carrying a preset name is the details response.
-        while let Some(payload) = link.read_frame(until.saturating_duration_since(Instant::now()), deadline)? {
-            if find(&payload, &NAME_MARKER).is_some() {
-                return extract_amp_params(&payload);
-            }
+/// Reads one value at `*pos` in the `B9/BA/80/81/82/literal` encoding,
+/// returning it as u16 (collections are not values; returns None).
+fn read_u16_value(p: &[u8], pos: &mut usize) -> Option<u16> {
+    let b = *p.get(*pos)?;
+    match b {
+        0x80..=0x82 => {
+            let lo = *p.get(*pos + 1)?;
+            let hi = *p.get(*pos + 2)?;
+            *pos += 3;
+            Some(u16::from(lo) | (u16::from(hi) << 8))
         }
-        Err("no preset details received".into())
-    })
+        0x00..=0x7F => {
+            *pos += 1;
+            Some(u16::from(b))
+        }
+        _ => None,
+    }
 }
 
-/// Takes the port lock, opens the first port that answers the handshake and
-/// runs `op` on it. `timeout` bounds the port work; it starts once the lock
-/// is held, so waiting for another serial user doesn't eat into it.
-fn with_pedal<T>(
-    timeout: Duration,
-    mut op: impl FnMut(&mut Link, Instant) -> Result<T, String>,
-) -> Result<T, String> {
-    let _guard = port_lock();
-    let deadline = Instant::now() + timeout;
+/// Message type from the `B9 03 <type> <size> <unknown>` header.
+fn frame_type(payload: &[u8]) -> Option<u16> {
+    if payload.get(..2)? != [0xB9, 0x03] {
+        return None;
+    }
+    let mut pos = 2;
+    read_u16_value(payload, &mut pos)
+}
+
+/// `0x0207` param-changed body: `B9 04 02 00 <param idx> 88 <f32 LE>`.
+/// Returns (param index, value).
+fn extract_param_change(payload: &[u8]) -> Option<(usize, f32)> {
+    let start = find(payload, &PARAM_CHANGED_MARKER)? + PARAM_CHANGED_MARKER.len();
+    let item = payload.get(start..start + 6)?;
+    // Indices >= 0x80 would be u16-encoded; none of ours are, skip them.
+    if item[0] >= 0x80 || item[1] != FLOAT_TAG {
+        return None;
+    }
+    let v = f32::from_le_bytes([item[2], item[3], item[4], item[5]]);
+    v.is_finite().then_some((usize::from(item[0]), v))
+}
+
+/// Preset index from an unsolicited preset-details frame
+/// (`B9 04 00 00 [80] <idx>`; absent in responses to our own requests).
+fn extract_current_preset(payload: &[u8]) -> Option<u8> {
+    let mut pos = find(payload, &PRESET_INDEX_MARKER)? + PRESET_INDEX_MARKER.len();
+    if *payload.get(pos)? == 0x80 {
+        pos += 1;
+    }
+    let idx = *payload.get(pos)?;
+    (usize::from(idx) < PRESET_COUNT).then_some(idx)
+}
+
+fn debug_enabled() -> bool {
+    std::env::var_os("TX_DEBUG_SERIAL").is_some()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+}
+
+// ---------------------------------------------------------------- session
+
+/// Something the pedal told us. Delivered from the session thread.
+#[derive(Debug)]
+pub enum Event {
+    /// Handshake done; the session is live.
+    Connected(String),
+    /// The session ended (open failed, unplugged, I/O error).
+    Disconnected(String),
+    /// Result of `Pedal::request_names`.
+    Names(Result<Vec<String>, String>),
+    /// Result of `Pedal::request_amp_params` (0-based preset index).
+    AmpParams { preset_idx: u8, result: Result<AmpParams, String> },
+    /// A parameter changed on the pedal (e.g. a physical knob was turned).
+    /// `index` is the preset-parameter index (see `AmpKnob::param_index`).
+    ParamChanged { index: usize, value: f32 },
+    /// The pedal switched preset by itself (footswitch); carries the new
+    /// preset's amp params when they parsed.
+    PresetChanged { preset_idx: u8, params: Option<AmpParams> },
+}
+
+/// The 7 amp knobs, in the UI's id order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AmpKnob {
+    Gain,
+    Volume,
+    Presence,
+    Depth,
+    Bass,
+    Mid,
+    Treble,
+}
+
+impl AmpKnob {
+    pub const ALL: [AmpKnob; 7] = [
+        AmpKnob::Gain,
+        AmpKnob::Volume,
+        AmpKnob::Presence,
+        AmpKnob::Depth,
+        AmpKnob::Bass,
+        AmpKnob::Mid,
+        AmpKnob::Treble,
+    ];
+
+    /// Index in the preset parameter array / `0x0207` messages.
+    pub fn param_index(self) -> usize {
+        match self {
+            AmpKnob::Gain => P_MODEL_GAIN,
+            AmpKnob::Volume => P_MODEL_VOLUME,
+            AmpKnob::Presence => P_MODEL_PRESENCE,
+            AmpKnob::Depth => P_MODEL_DEPTH,
+            AmpKnob::Bass => P_EQ_BASS,
+            AmpKnob::Mid => P_EQ_MID,
+            AmpKnob::Treble => P_EQ_TREBLE,
+        }
+    }
+
+    pub fn from_param_index(index: usize) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.param_index() == index)
+    }
+}
+
+/// A 0..10 knob value from the pedal, rounded to the UI's 0.1 step;
+/// None when out of range.
+pub fn knob_from_pedal(v: f32) -> Option<f32> {
+    (-0.01..=10.01)
+        .contains(&v)
+        .then(|| ((v * 10.0).round() / 10.0).clamp(0.0, 10.0))
+}
+
+enum Request {
+    Names,
+    AmpParams(u8),
+    SetParam(u8, f32),
+}
+
+/// Handle to the session thread that owns the serial port. Dropping it ends
+/// the session (the thread notices within one read poll, or after the
+/// current preset during a name scan).
+pub struct Pedal {
+    tx: mpsc::Sender<Request>,
+}
+
+impl Pedal {
+    /// Starts a session thread: it waits for any previous session to release
+    /// the port, opens + handshakes, then serves requests and reports
+    /// unsolicited pedal messages through `on_event` until the port fails or
+    /// the handle is dropped. Returns immediately.
+    pub fn start(on_event: impl Fn(Event) + Send + 'static) -> Self {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _guard = port_lock();
+            let link = match open_any() {
+                Ok((link, path)) => {
+                    on_event(Event::Connected(path.display().to_string()));
+                    link
+                }
+                Err(e) => {
+                    on_event(Event::Disconnected(e));
+                    return;
+                }
+            };
+            let mut session = Session { link, rx, queue: VecDeque::new(), on_event: &on_event, debug: debug_enabled() };
+            let reason = session.run();
+            on_event(Event::Disconnected(reason));
+        });
+        Self { tx }
+    }
+
+    fn send(&self, r: Request) -> Result<(), String> {
+        self.tx.send(r).map_err(|_| "serial session not running".to_string())
+    }
+
+    pub fn request_names(&self) -> Result<(), String> {
+        self.send(Request::Names)
+    }
+
+    /// Writes one preset parameter (index < 0x80) on the pedal.
+    pub fn set_param(&self, index: usize, value: f32) -> Result<(), String> {
+        match u8::try_from(index) {
+            Ok(i) if i < 0x80 => self.send(Request::SetParam(i, value)),
+            _ => Err(format!("param index {index} not supported for writes")),
+        }
+    }
+
+    /// Reads the amp params of `preset_idx` (0-based).
+    pub fn request_amp_params(&self, preset_idx: u8) -> Result<(), String> {
+        self.send(Request::AmpParams(preset_idx))
+    }
+}
+
+/// Opens the first candidate port that answers the handshake.
+fn open_any() -> Result<(Link, PathBuf), String> {
     let ports = candidate_ports();
     if ports.is_empty() {
         return Err("no /dev/ttyACM* port found".into());
     }
-
     let mut errors = Vec::new();
     for path in ports {
-        if Instant::now() >= deadline {
-            errors.push("deadline reached".into());
-            break;
-        }
-        let result = open_pedal(&path, deadline).and_then(|mut link| op(&mut link, deadline));
-        match result {
-            Ok(v) => return Ok(v),
+        match open_pedal(&path, Instant::now() + HANDSHAKE_TIMEOUT * 2) {
+            Ok(link) => return Ok((link, path)),
             Err(e) => errors.push(format!("{}: {e}", path.display())),
         }
     }
@@ -472,32 +673,180 @@ fn open_pedal(path: &Path, deadline: Instant) -> Result<Link, String> {
     Ok(link)
 }
 
-fn read_names(link: &mut Link, deadline: Instant) -> Result<Vec<String>, String> {
-    let mut names = vec![String::new(); PRESET_COUNT];
-    let mut read = 0usize;
-    for (i, slot) in names.iter_mut().enumerate() {
-        if Instant::now() >= deadline {
-            break;
-        }
-        link.send(&preset_request(i as u8))?;
-        let until = (Instant::now() + PRESET_TIMEOUT).min(deadline);
-        // Skip unrelated frames (e.g. unsolicited state updates).
-        while let Some(payload) = link.read_frame(until.saturating_duration_since(Instant::now()), deadline)? {
-            if let Some(name) = extract_name(&payload) {
-                *slot = name;
-                read += 1;
-                break;
+struct Session<'a, F: Fn(Event)> {
+    link: Link,
+    rx: mpsc::Receiver<Request>,
+    queue: VecDeque<Request>,
+    on_event: &'a F,
+    debug: bool,
+}
+
+impl<F: Fn(Event)> Session<'_, F> {
+    /// Main loop; returns why the session ended.
+    fn run(&mut self) -> String {
+        loop {
+            if !self.pull_requests() {
+                return "session closed".into();
+            }
+            let result = match self.serve_quick() {
+                Ok(true) => Ok(()),
+                Ok(false) if self.take_names_request() => {
+                    self.read_names().map(|r| (self.on_event)(Event::Names(r)))
+                }
+                Ok(false) => self.idle(),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = result {
+                return e;
             }
         }
     }
 
-    if read == 0 {
-        return Err("pedal answered but no preset names were received".into());
+    /// Serves queued quick requests: all writes (in order), then only the
+    /// newest amp-params read. Returns whether anything was served.
+    fn serve_quick(&mut self) -> Result<bool, String> {
+        let mut served = false;
+        let mut latest_read = None;
+        let mut rest = VecDeque::new();
+        for r in std::mem::take(&mut self.queue) {
+            match r {
+                Request::SetParam(index, value) => {
+                    self.link.send(&set_param_request(index, value))?;
+                    served = true;
+                }
+                Request::AmpParams(idx) => latest_read = Some(idx),
+                other => rest.push_back(other),
+            }
+        }
+        self.queue = rest;
+        if let Some(idx) = latest_read {
+            let result = self.read_amp_params(idx)?;
+            (self.on_event)(Event::AmpParams { preset_idx: idx, result });
+            served = true;
+        }
+        Ok(served)
     }
-    if read < PRESET_COUNT {
-        eprintln!("TONEX: read {read}/{PRESET_COUNT} preset names");
+
+    /// Removes all queued names requests; true if there was one.
+    fn take_names_request(&mut self) -> bool {
+        let before = self.queue.len();
+        self.queue.retain(|r| !matches!(r, Request::Names));
+        self.queue.len() != before
     }
-    Ok(names)
+
+    /// Moves pending requests into the local queue; false once the handle
+    /// is gone (the session should end).
+    fn pull_requests(&mut self) -> bool {
+        loop {
+            match self.rx.try_recv() {
+                Ok(r) => self.queue.push_back(r),
+                Err(mpsc::TryRecvError::Empty) => return true,
+                Err(mpsc::TryRecvError::Disconnected) => return false,
+            }
+        }
+    }
+
+    /// Waits a short while for unsolicited frames.
+    fn idle(&mut self) -> Result<(), String> {
+        let far = Instant::now() + Duration::from_secs(3600);
+        if let Some(payload) = self.link.read_frame(IDLE_POLL, far)? {
+            self.dispatch(&payload, false);
+        }
+        Ok(())
+    }
+
+    /// Handles one incoming frame. Returns true when `awaiting` a details
+    /// response and this frame is it.
+    ///
+    /// While a request is pending, the first frame carrying a preset name is
+    /// taken as its response (the behaviour verified on hardware for the
+    /// name scan). Only while idle is a details frame with the preset-index
+    /// marker treated as a footswitch push, so a push that lands during a
+    /// request is missed (rare; the next preset change re-syncs).
+    fn dispatch(&mut self, payload: &[u8], awaiting: bool) -> bool {
+        let ty = frame_type(payload);
+        if ty == Some(TYPE_PARAM_CHANGED) {
+            match extract_param_change(payload) {
+                Some((index, value)) => (self.on_event)(Event::ParamChanged { index, value }),
+                None if self.debug => eprintln!("TONEX serial: unparsed 0x0207: {}", hex(payload)),
+                None => {}
+            }
+            return false;
+        }
+        if awaiting && find(payload, &NAME_MARKER).is_some() {
+            return true;
+        }
+        if !awaiting && ty == Some(TYPE_PRESET_DETAILS) {
+            if let Some(idx) = extract_current_preset(payload) {
+                let params = extract_amp_params(payload)
+                    .map_err(|e| eprintln!("TONEX: pushed preset {idx} params: {e}"))
+                    .ok();
+                (self.on_event)(Event::PresetChanged { preset_idx: idx, params });
+                return false;
+            }
+        }
+        if self.debug {
+            let shown = &payload[..payload.len().min(48)];
+            eprintln!("TONEX serial: unhandled frame type {ty:04X?} ({} B): {}", payload.len(), hex(shown));
+        }
+        false
+    }
+
+    /// Requests details of preset `idx` and returns the response payload
+    /// (None on timeout), dispatching unrelated frames meanwhile.
+    fn fetch_details(&mut self, idx: u8, timeout: Duration) -> Result<Option<Vec<u8>>, String> {
+        self.link.send(&preset_request(idx))?;
+        let until = Instant::now() + timeout;
+        while let Some(payload) = self.link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
+            if self.dispatch(&payload, true) {
+                return Ok(Some(payload));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Ok(result) for the event; Err only for link failures (session ends).
+    fn read_amp_params(&mut self, idx: u8) -> Result<Result<AmpParams, String>, String> {
+        if usize::from(idx) >= PRESET_COUNT {
+            return Ok(Err(format!("preset index {idx} out of range")));
+        }
+        Ok(match self.fetch_details(idx, PRESET_TIMEOUT)? {
+            Some(payload) => extract_amp_params(&payload),
+            None => Err("no preset details received".into()),
+        })
+    }
+
+    /// Reads all 150 names. Unreadable slots are empty strings; the inner
+    /// result fails only if no name at all could be read.
+    fn read_names(&mut self) -> Result<Result<Vec<String>, String>, String> {
+        let deadline = Instant::now() + OVERALL_DEADLINE;
+        let mut names = vec![String::new(); PRESET_COUNT];
+        let mut read = 0usize;
+        for i in 0..PRESET_COUNT {
+            if Instant::now() >= deadline {
+                break;
+            }
+            // Stay responsive during the ~10 s scan: knob writes and the
+            // current preset's params go in between names.
+            if !self.pull_requests() {
+                return Err("session closed".into());
+            }
+            self.serve_quick()?;
+            let timeout = PRESET_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
+            if let Some(name) = self.fetch_details(i as u8, timeout)?.as_deref().and_then(extract_name) {
+                names[i] = name;
+                read += 1;
+            }
+        }
+
+        if read == 0 {
+            return Ok(Err("pedal answered but no preset names were received".into()));
+        }
+        if read < PRESET_COUNT {
+            eprintln!("TONEX: read {read}/{PRESET_COUNT} preset names");
+        }
+        Ok(Ok(names))
+    }
 }
 
 #[cfg(test)]
@@ -564,8 +913,65 @@ mod tests {
         let a = extract_amp_params(&p).unwrap();
         assert_eq!(
             a,
-            AmpParams { gain: 6.9, volume: 5.2, presence: 5.0, depth: 10.0, bass: 5.4, mid: 4.8, treble: 6.2 }
+            AmpParams {
+                gain: 6.9,
+                volume: 5.2,
+                presence: 5.0,
+                depth: 10.0,
+                bass: 5.4,
+                mid: 4.8,
+                treble: 6.2,
+                amp_enabled: true
+            }
         );
+    }
+
+    #[test]
+    fn reads_amp_disabled() {
+        let p = payload_with_params(&[(P_AMP_ENABLE, 0.0)]);
+        assert!(!extract_amp_params(&p).unwrap().amp_enabled);
+    }
+
+    #[test]
+    fn set_param_matches_builty_bytes() {
+        let req = set_param_request(18, 1.0);
+        assert_eq!(
+            req,
+            [
+                0xB9, 0x03, 0x81, 0x07, 0x02, 0x82, 0x0A, 0x00, 0x80, 0x10, 0x03, // header, size 10
+                0xB9, 0x04, 0x02, 0x00, 18, 0x88, 0x00, 0x00, 0x80, 0x3F, // idx 18 = 1.0f
+            ]
+        );
+        // Size field equals the body length.
+        assert_eq!(req.len() - SET_PARAM_HEADER.len(), 0x0A);
+        assert_eq!(frame_type(&req), Some(TYPE_PARAM_CHANGED));
+    }
+
+    #[test]
+    fn parses_param_changed_frame() {
+        // Same layout as our write; the pedal reports changes this way.
+        let frame = set_param_request(P_MODEL_GAIN as u8, 7.5);
+        assert_eq!(extract_param_change(&frame), Some((P_MODEL_GAIN, 7.5)));
+        assert_eq!(AmpKnob::from_param_index(P_MODEL_GAIN), Some(AmpKnob::Gain));
+        assert_eq!(AmpKnob::from_param_index(P_AMP_ENABLE), None);
+    }
+
+    #[test]
+    fn frame_type_of_details_response() {
+        assert_eq!(frame_type(&[0xB9, 0x03, 0x81, 0x04, 0x02, 0x82, 0x00, 0x08]), Some(TYPE_PRESET_DETAILS));
+        assert_eq!(frame_type(&[0xB9, 0x03, 0x02]), Some(0x02));
+        assert_eq!(frame_type(&[0xB9, 0x04, 0x02]), None);
+    }
+
+    #[test]
+    fn extracts_pushed_preset_index() {
+        let mut p = vec![0xB9, 0x03, 0x81, 0x04, 0x02];
+        p.extend_from_slice(&[0xB9, 0x04, 0x00, 0x00, 42]);
+        assert_eq!(extract_current_preset(&p), Some(42));
+        let mut p = vec![0xB9, 0x03, 0x81, 0x04, 0x02];
+        p.extend_from_slice(&[0xB9, 0x04, 0x00, 0x00, 0x80, 140]);
+        assert_eq!(extract_current_preset(&p), Some(140));
+        assert_eq!(extract_current_preset(&[0xB9, 0x04, 0x00, 0x00, 0x80, 200]), None);
     }
 
     #[test]

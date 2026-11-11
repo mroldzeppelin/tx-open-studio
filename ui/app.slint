@@ -625,7 +625,8 @@ export component AppWindow inherits Window {
 
                     VerticalLayout {
                         padding: 18px;
-                        spacing: 12px;
+                        // Tight: top line, name and badge sit close together.
+                        spacing: 2px;
 
                         HorizontalLayout {
                             spacing: 10px;
@@ -701,6 +702,7 @@ export component AppWindow inherits Window {
 
                         HorizontalLayout {
                             spacing: 8px;
+                            padding-top: 12px;
 
                             // Pedal-wide (global) levels, not stored per preset.
                             Knob {

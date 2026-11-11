@@ -67,7 +67,7 @@ component SlotChip inherits Rectangle {
     in property <bool> active: false;
     callback clicked();
 
-    min-width: 90px;
+    min-width: 56px;
     preferred-width: 130px;
     horizontal-stretch: 0;
     height: 56px;
@@ -117,7 +117,7 @@ component NavButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
 
-    min-width: 100px;
+    min-width: 84px;
     preferred-width: 140px;
     horizontal-stretch: 0;
     height: 56px;
@@ -435,7 +435,7 @@ export component AppWindow inherits Window {
                         }
 
                         HorizontalLayout {
-                            spacing: 10px;
+                            spacing: 8px;
 
                             for slot[i] in ["A", "B", "C"]: SlotChip {
                                 letter: slot;
@@ -448,7 +448,7 @@ export component AppWindow inherits Window {
 
                             Rectangle {
                                 horizontal-stretch: 1;
-                                min-width: 8px;
+                                min-width: 0px;
                             }
 
                             NavButton {
@@ -467,14 +467,6 @@ export component AppWindow inherits Window {
                                     root.preset-changed(root.preset + 1);
                                 }
                             }
-                            // Stub: not wired to the pedal yet.
-                            StyledButton {
-                                width: 76px;
-                                height: 56px;
-                                text: "Global\nBypass";
-                                font-size: 12px;
-                                base-color: Theme.surface-alt;
-                            }
                         }
                     }
                 }
@@ -486,6 +478,7 @@ export component AppWindow inherits Window {
 
                     HorizontalLayout {
                         spacing: 12px;
+                        vertical-stretch: 1;
                         EffectTile {
                             horizontal-stretch: 1;
                             title: "Gate";
@@ -512,6 +505,7 @@ export component AppWindow inherits Window {
                     }
                     HorizontalLayout {
                         spacing: 12px;
+                        vertical-stretch: 1;
                         EffectTile {
                             horizontal-stretch: 1;
                             title: "Comp";
@@ -543,12 +537,6 @@ export component AppWindow inherits Window {
                             outline: #2869ad;
                         }
                     }
-                }
-
-                Text {
-                    text: "Select to edit · Double-tap to toggle";
-                    color: Theme.muted;
-                    font-size: 11px;
                 }
             }
         }

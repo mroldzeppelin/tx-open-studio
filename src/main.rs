@@ -88,10 +88,6 @@ fn bank_and_pc(preset_num: i32) -> (u8, u8) {
     ((idx / 128) as u8, (idx % 128) as u8)
 }
 
-fn bank_info(preset_num: i32) -> String {
-    let (bank, pc) = bank_and_pc(preset_num);
-    format!("BANK {} · PC {}", bank, pc)
-}
 
 /// Preset names read from the pedal over USB serial (index 0 = preset 1).
 #[derive(Clone, Default)]
@@ -154,7 +150,6 @@ fn main() -> Result<(), slint::PlatformError> {
     let names = PresetNames::default();
 
     ui.set_preset(DEFAULT_PRESET);
-    ui.set_bank_info(bank_info(DEFAULT_PRESET).into());
 
     match engine.try_connect() {
         Ok(name) => show_connected(&ui, &name),
@@ -174,7 +169,6 @@ fn main() -> Result<(), slint::PlatformError> {
             let preset = clamp_preset(requested);
 
             ui.set_preset(preset);
-            ui.set_bank_info(bank_info(preset).into());
             ui.set_preset_name(names.name_for(preset).into());
 
             if let Err(e) = engine.send_preset(preset) {

@@ -67,7 +67,6 @@ export component AppWindow inherits Window {
     background: Theme.bg;
 
     in-out property <int> preset: 43;
-    in property <string> bank-info: "BANK 0 · PC 42";
     in property <string> preset-name;
     in property <bool> connected: false;
     in property <string> status-text: "Педаль не подключена";
@@ -131,13 +130,6 @@ export component AppWindow inherits Window {
                         horizontal-alignment: center;
                         overflow: elide;
                         wrap: no-wrap;
-                    }
-                    Text {
-                        text: root.bank-info;
-                        color: Theme.secondary-ink;
-                        font-size: 13px;
-                        letter-spacing: 1px;
-                        horizontal-alignment: center;
                     }
                 }
             }

@@ -60,23 +60,194 @@ component StyledButton inherits Rectangle {
     }
 }
 
+// Slot chip for one preset of the current bank (A/B/C).
+component SlotChip inherits Rectangle {
+    in property <string> letter;
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked();
+
+    min-width: 90px;
+    preferred-width: 130px;
+    horizontal-stretch: 0;
+    height: 56px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: root.active ? Theme.selected-border : Theme.border;
+    background: root.active ? Theme.selected : (ta.has-hover ? Theme.hover : Theme.field);
+
+    animate background { duration: 90ms; }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 8px;
+
+        Text {
+            text: root.letter;
+            color: root.active ? Theme.ink : Theme.secondary-ink;
+            font-size: 16px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            color: root.active ? Theme.ink : Theme.secondary-ink;
+            font-size: 13px;
+            font-weight: root.active ? 600 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Two-line navigation button: title plus a small muted subtitle.
+component NavButton inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    min-width: 100px;
+    preferred-width: 140px;
+    horizontal-stretch: 0;
+    height: 56px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: !root.enabled ? Theme.surface-alt : (ta.pressed ? Theme.selected : (ta.has-hover ? Theme.hover : Theme.soft));
+    opacity: root.enabled ? 1.0 : 0.5;
+
+    animate background { duration: 90ms; }
+
+    VerticalLayout {
+        alignment: center;
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 2px;
+
+        Text {
+            text: root.title;
+            color: Theme.ink;
+            font-size: 14px;
+            font-weight: 700;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+        Text {
+            text: root.subtitle;
+            color: Theme.muted;
+            font-size: 12px;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Effect tile (stub): title, state line and a status dot.
+component EffectTile inherits Rectangle {
+    in property <string> title;
+    in property <string> state;
+    in property <bool> on: true;
+    in property <color> fill: Theme.surface;
+    in property <color> outline: Theme.border;
+    in property <length> outline-width: 1px;
+    in property <bool> show-dot: true;
+
+    border-radius: 12px;
+    background: ta.has-hover ? root.fill.brighter(0.12) : root.fill;
+    border-color: root.outline;
+    border-width: root.outline-width;
+    min-height: 80px;
+    // Same preferred width for every tile so equal stretch gives equal columns.
+    min-width: 60px;
+    preferred-width: 100px;
+
+    animate background { duration: 90ms; }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 4px;
+
+        Text {
+            text: root.title;
+            color: Theme.ink;
+            font-size: 16px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+        Text {
+            text: root.state;
+            color: root.on ? Theme.ink : Theme.muted;
+            font-size: 13px;
+            horizontal-alignment: center;
+        }
+    }
+
+    Rectangle {
+        x: parent.width - 22px;
+        y: 12px;
+        width: 10px;
+        height: 10px;
+        visible: root.show-dot;
+        border-radius: 5px;
+        background: root.on ? Theme.ok : Theme.muted.with-alpha(0.5);
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+    }
+}
+
 export component AppWindow inherits Window {
     title: "TX Open Studio";
-    preferred-width: 420px;
-    preferred-height: 560px;
-    min-width: 360px;
-    min-height: 420px;
+    preferred-width: 960px;
+    preferred-height: 600px;
+    min-width: 780px;
+    min-height: 520px;
     background: Theme.bg;
 
     in-out property <int> preset: 43;
     in property <string> preset-name;
-    // 150 display labels ("41.FULDRV"); a bare number or "" until names load.
+    // 150 display labels ("41 FULDRV"); a bare number or "" until names load.
     in property <[string]> preset-names;
     in property <bool> connected: false;
     in property <string> status-text: "Педаль не подключена";
 
     callback preset-changed(int);
     callback reconnect();
+
+    // Label of preset `p` (1-based) from the list model; "" when out of range,
+    // the bare number when the name is not loaded yet.
+    pure function label-for(p: int) -> string {
+        if (p < 1 || p > root.preset-names.length) {
+            return "";
+        }
+        let name = root.preset-names[p - 1];
+        return name == "" ? "\{p}" : name;
+    }
+
+    // First preset of the current bank of 3 (A slot).
+    property <int> bank-first: floor((root.preset - 1) / 3) * 3 + 1;
 
     changed preset => {
         list.ensure-selected-visible();
@@ -86,166 +257,298 @@ export component AppWindow inherits Window {
         padding: 0px;
         spacing: 0px;
 
-        // Main content
-        VerticalLayout {
+        HorizontalLayout {
             padding: 20px;
-            spacing: 16px;
+            spacing: 20px;
             vertical-stretch: 1;
 
-            // Header
-            HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: "TX Open Studio";
-                    color: Theme.ink;
-                    font-size: 20px;
-                    font-weight: 700;
-                    vertical-alignment: center;
+            // Left column: header + preset list
+            VerticalLayout {
+                width: 300px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "TX Open Studio";
+                        color: Theme.ink;
+                        font-size: 20px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: "PRESETS";
+                        color: Theme.muted;
+                        font-size: 11px;
+                        font-weight: 600;
+                        letter-spacing: 1.5px;
+                        vertical-alignment: center;
+                    }
                 }
+
+                // Preset list
                 Rectangle {
-                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    background: Theme.surface-alt;
+                    border-color: Theme.border;
+                    border-width: 1px;
+                    border-radius: 12px;
+                    clip: true;
+
+                    list := ListView {
+                        x: 4px;
+                        y: 4px;
+                        width: parent.width - 8px;
+                        height: parent.height - 8px;
+
+                        property <length> row-height: 34px;
+                        property <bool> initial-scroll-done: false;
+
+                        // Scrolls only when the selected row is (partly) out of
+                        // view, then centers it. Clicking a visible row never
+                        // moves the list.
+                        function ensure-selected-visible() {
+                            if (self.visible-height <= 0px) {
+                                return;
+                            }
+                            let top = (root.preset - 1) * self.row-height;
+                            let bottom = top + self.row-height;
+                            if (top >= -self.content-y && bottom <= -self.content-y + self.visible-height) {
+                                return;
+                            }
+                            let max-scroll = max(0px, self.content-height - self.visible-height);
+                            let target = top - (self.visible-height - self.row-height) / 2;
+                            self.content-y = -clamp(target, 0px, max-scroll);
+                        }
+
+                        changed visible-height => {
+                            // First real layout pass: bring the startup preset into view.
+                            if (!self.initial-scroll-done && self.visible-height > 0px) {
+                                self.initial-scroll-done = true;
+                                self.ensure-selected-visible();
+                            }
+                        }
+
+                        for name[index] in root.preset-names: Rectangle {
+                            height: list.row-height;
+
+                            property <bool> is-selected: root.preset == index + 1;
+                            property <string> number: index + 1;
+
+                            Rectangle {
+                                x: 0px;
+                                width: parent.width;
+                                height: parent.height;
+                                border-radius: 8px;
+                                background: is-selected ? Theme.selected : (row-ta.has-hover ? Theme.hover : transparent);
+
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 10px;
+
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        // Before names load the label is the bare number.
+                                        text: name == "" ? number : name;
+                                        color: is-selected ? Theme.ink : Theme.secondary-ink;
+                                        font-size: 14px;
+                                        font-weight: is-selected ? 600 : 400;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        wrap: no-wrap;
+                                    }
+                                }
+
+                                row-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.preset-changed(index + 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+
+            // Right column: current preset header + effect tiles
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 12px;
+
+                // Header card
+                Rectangle {
+                    vertical-stretch: 0;
+                    background: Theme.surface;
+                    border-color: Theme.border;
+                    border-width: 1px;
+                    border-radius: 12px;
+
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 12px;
+
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            Text {
+                                // Pedal terms: 0-based bank (0..49) plus slot letter, e.g. 43 → "14-A".
+                                text: "PRESET \{floor((root.preset - 1) / 3)}-\{["A", "B", "C"][mod(root.preset - 1, 3)]} / 49";
+                                color: Theme.muted;
+                                font-size: 11px;
+                                font-weight: 600;
+                                letter-spacing: 2px;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                background: Theme.soft;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-top: 3px;
+                                    padding-bottom: 3px;
+                                    Text {
+                                        text: "Active";
+                                        color: Theme.secondary-ink;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Name read over USB serial; falls back to the bare
+                        // preset number until names are loaded.
+                        Text {
+                            text: root.preset-name == "" ? root.preset : root.preset-name;
+                            color: Theme.ink;
+                            font-size: 30px;
+                            font-weight: 700;
+                            overflow: elide;
+                            wrap: no-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px;
+
+                            for slot[i] in ["A", "B", "C"]: SlotChip {
+                                letter: slot;
+                                label: root.label-for(root.bank-first + i);
+                                active: root.preset == root.bank-first + i;
+                                clicked => {
+                                    root.preset-changed(root.bank-first + i);
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                min-width: 8px;
+                            }
+
+                            NavButton {
+                                title: "← Previous";
+                                subtitle: root.label-for(root.preset - 1);
+                                enabled: root.preset > 1;
+                                clicked => {
+                                    root.preset-changed(root.preset - 1);
+                                }
+                            }
+                            NavButton {
+                                title: "Next →";
+                                subtitle: root.label-for(root.preset + 1);
+                                enabled: root.preset < 150;
+                                clicked => {
+                                    root.preset-changed(root.preset + 1);
+                                }
+                            }
+                            // Stub: not wired to the pedal yet.
+                            StyledButton {
+                                width: 76px;
+                                height: 56px;
+                                text: "Global\nBypass";
+                                font-size: 12px;
+                                base-color: Theme.surface-alt;
+                            }
+                        }
+                    }
+                }
+
+                // Placeholder grid until effect state reading is implemented.
+                VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: 12px;
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        EffectTile {
+                            horizontal-stretch: 1;
+                            title: "Gate";
+                            state: "On";
+                            fill: #7843a0;
+                            outline: #7843a0;
+                        }
+                        EffectTile {
+                            horizontal-stretch: 1;
+                            title: "Amp";
+                            state: "On";
+                        }
+                        EffectTile {
+                            horizontal-stretch: 1;
+                            title: "Cab";
+                            state: "On";
+                        }
+                        EffectTile {
+                            horizontal-stretch: 1;
+                            title: "Tempo";
+                            state: "120 BPM";
+                            show-dot: false;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        EffectTile {
+                            horizontal-stretch: 1;
+                            title: "Comp";
+                            state: "Off";
+                            on: false;
+                            outline: #b52f70;
+                            outline-width: 2px;
+                        }
+                        EffectTile {
+                            horizontal-stretch: 1;
+                            title: "Chorus";
+                            state: "Off";
+                            on: false;
+                            outline: #947000;
+                            outline-width: 2px;
+                        }
+                        EffectTile {
+                            horizontal-stretch: 1;
+                            title: "Digital";
+                            state: "On";
+                            fill: #287342;
+                            outline: #287342;
+                        }
+                        EffectTile {
+                            horizontal-stretch: 1;
+                            title: "Spring 1";
+                            state: "On";
+                            fill: #2869ad;
+                            outline: #2869ad;
+                        }
+                    }
+                }
+
                 Text {
-                    text: "PRESETS";
+                    text: "Select to edit · Double-tap to toggle";
                     color: Theme.muted;
                     font-size: 11px;
-                    font-weight: 600;
-                    letter-spacing: 1.5px;
-                    vertical-alignment: center;
-                }
-            }
-
-            // Preset card
-            Rectangle {
-                height: 96px;
-                background: Theme.surface;
-                border-color: Theme.border;
-                border-width: 1px;
-                border-radius: 12px;
-
-                VerticalLayout {
-                    alignment: center;
-                    padding: 16px;
-                    spacing: 8px;
-
-                    // Name read over USB serial; falls back to the bare
-                    // preset number until names are loaded.
-                    Text {
-                        text: root.preset-name == "" ? root.preset : root.preset-name;
-                        color: Theme.ink;
-                        font-size: 32px;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        overflow: elide;
-                        wrap: no-wrap;
-                    }
-                }
-            }
-
-            // Prev / Next
-            HorizontalLayout {
-                spacing: 12px;
-                StyledButton {
-                    horizontal-stretch: 1;
-                    height: 56px;
-                    text: "← PREV";
-                    font-size: 18px;
-                    clicked => {
-                        root.preset-changed(root.preset - 1);
-                    }
-                }
-                StyledButton {
-                    horizontal-stretch: 1;
-                    height: 56px;
-                    text: "NEXT →";
-                    font-size: 18px;
-                    clicked => {
-                        root.preset-changed(root.preset + 1);
-                    }
-                }
-            }
-
-            // Preset list
-            Rectangle {
-                vertical-stretch: 1;
-                background: Theme.surface-alt;
-                border-color: Theme.border;
-                border-width: 1px;
-                border-radius: 12px;
-                clip: true;
-
-                list := ListView {
-                    x: 4px;
-                    y: 4px;
-                    width: parent.width - 8px;
-                    height: parent.height - 8px;
-
-                    property <length> row-height: 34px;
-                    property <bool> initial-scroll-done: false;
-
-                    // Scrolls only when the selected row is (partly) out of
-                    // view, then centers it. Clicking a visible row never
-                    // moves the list.
-                    function ensure-selected-visible() {
-                        if (self.visible-height <= 0px) {
-                            return;
-                        }
-                        let top = (root.preset - 1) * self.row-height;
-                        let bottom = top + self.row-height;
-                        if (top >= -self.content-y && bottom <= -self.content-y + self.visible-height) {
-                            return;
-                        }
-                        let max-scroll = max(0px, self.content-height - self.visible-height);
-                        let target = top - (self.visible-height - self.row-height) / 2;
-                        self.content-y = -clamp(target, 0px, max-scroll);
-                    }
-
-                    changed visible-height => {
-                        // First real layout pass: bring the startup preset into view.
-                        if (!self.initial-scroll-done && self.visible-height > 0px) {
-                            self.initial-scroll-done = true;
-                            self.ensure-selected-visible();
-                        }
-                    }
-
-                    for name[index] in root.preset-names: Rectangle {
-                        height: list.row-height;
-
-                        property <bool> is-selected: root.preset == index + 1;
-                        property <string> number: index + 1;
-
-                        Rectangle {
-                            x: 0px;
-                            width: parent.width;
-                            height: parent.height;
-                            border-radius: 8px;
-                            background: is-selected ? Theme.selected : (row-ta.has-hover ? Theme.hover : transparent);
-
-                            HorizontalLayout {
-                                padding-left: 12px;
-                                padding-right: 10px;
-
-                                Text {
-                                    horizontal-stretch: 1;
-                                    // Before names load the label is the bare number.
-                                    text: name == "" ? number : name;
-                                    color: is-selected ? Theme.ink : Theme.secondary-ink;
-                                    font-size: 14px;
-                                    font-weight: is-selected ? 600 : 400;
-                                    vertical-alignment: center;
-                                    overflow: elide;
-                                    wrap: no-wrap;
-                                }
-                            }
-
-                            row-ta := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => {
-                                    root.preset-changed(index + 1);
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }

@@ -97,13 +97,13 @@ struct PresetNames {
 }
 
 /// Display label: the pedal groups presets in banks of 3 (A/B/C), so
-/// preset 125 with name "FULDRV" is shown as "41.FULDRV". With no name the
+/// preset 125 with name "FULDRV" is shown as "41 FULDRV". With no name the
 /// label is just the preset number ("43").
 fn display_label(preset_num: i32, name: &str) -> String {
     if name.is_empty() {
         preset_num.to_string()
     } else {
-        format!("{}.{}", (clamp_preset(preset_num) - 1) / 3, name)
+        format!("{} {}", (clamp_preset(preset_num) - 1) / 3, name)
     }
 }
 

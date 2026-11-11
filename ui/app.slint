@@ -1,5 +1,7 @@
 // TX Open Studio — preset switcher UI
 
+import { ListView } from "std-widgets.slint";
+
 export global Theme {
     out property <color> bg: #141b18;
     out property <color> surface: #1d2721;
@@ -61,18 +63,24 @@ component StyledButton inherits Rectangle {
 export component AppWindow inherits Window {
     title: "TX Open Studio";
     preferred-width: 420px;
-    preferred-height: 320px;
+    preferred-height: 560px;
     min-width: 360px;
-    min-height: 260px;
+    min-height: 420px;
     background: Theme.bg;
 
     in-out property <int> preset: 43;
     in property <string> preset-name;
+    // 150 display labels ("41.FULDRV"); a bare number or "" until names load.
+    in property <[string]> preset-names;
     in property <bool> connected: false;
     in property <string> status-text: "Педаль не подключена";
 
     callback preset-changed(int);
     callback reconnect();
+
+    changed preset => {
+        list.ensure-selected-visible();
+    }
 
     VerticalLayout {
         padding: 0px;
@@ -109,7 +117,7 @@ export component AppWindow inherits Window {
 
             // Preset card
             Rectangle {
-                vertical-stretch: 1;
+                height: 96px;
                 background: Theme.surface;
                 border-color: Theme.border;
                 border-width: 1px;
@@ -157,6 +165,99 @@ export component AppWindow inherits Window {
                 }
             }
 
+            // Preset list
+            Rectangle {
+                vertical-stretch: 1;
+                background: Theme.surface-alt;
+                border-color: Theme.border;
+                border-width: 1px;
+                border-radius: 12px;
+                clip: true;
+
+                list := ListView {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+
+                    property <length> row-height: 34px;
+                    property <bool> initial-scroll-done: false;
+
+                    // Scrolls only when the selected row is (partly) out of
+                    // view, then centers it. Clicking a visible row never
+                    // moves the list.
+                    function ensure-selected-visible() {
+                        if (self.visible-height <= 0px) {
+                            return;
+                        }
+                        let top = (root.preset - 1) * self.row-height;
+                        let bottom = top + self.row-height;
+                        if (top >= -self.content-y && bottom <= -self.content-y + self.visible-height) {
+                            return;
+                        }
+                        let max-scroll = max(0px, self.content-height - self.visible-height);
+                        let target = top - (self.visible-height - self.row-height) / 2;
+                        self.content-y = -clamp(target, 0px, max-scroll);
+                    }
+
+                    changed visible-height => {
+                        // First real layout pass: bring the startup preset into view.
+                        if (!self.initial-scroll-done && self.visible-height > 0px) {
+                            self.initial-scroll-done = true;
+                            self.ensure-selected-visible();
+                        }
+                    }
+
+                    for name[index] in root.preset-names: Rectangle {
+                        height: list.row-height;
+
+                        property <bool> is-selected: root.preset == index + 1;
+                        property <string> number: index + 1;
+
+                        Rectangle {
+                            x: 0px;
+                            width: parent.width;
+                            height: parent.height;
+                            border-radius: 8px;
+                            background: is-selected ? Theme.selected : (row-ta.has-hover ? Theme.hover : transparent);
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 10px;
+                                spacing: 12px;
+
+                                Text {
+                                    width: 34px;
+                                    text: number;
+                                    color: Theme.muted;
+                                    font-size: 12px;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    // Before names load the label is just the
+                                    // number, already shown in the left column.
+                                    text: (name == "" || name == number) ? "" : name;
+                                    color: is-selected ? Theme.ink : Theme.secondary-ink;
+                                    font-size: 14px;
+                                    font-weight: is-selected ? 600 : 400;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    wrap: no-wrap;
+                                }
+                            }
+
+                            row-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.preset-changed(index + 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Status bar

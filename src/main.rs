@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use midir::{MidiOutput, MidiOutputConnection};
+use slint::{ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
 
@@ -88,7 +89,6 @@ fn bank_and_pc(preset_num: i32) -> (u8, u8) {
     ((idx / 128) as u8, (idx % 128) as u8)
 }
 
-
 /// Preset names read from the pedal over USB serial (index 0 = preset 1).
 #[derive(Clone, Default)]
 struct PresetNames {
@@ -96,17 +96,44 @@ struct PresetNames {
     loading: Arc<AtomicBool>,
 }
 
+/// Display label: the pedal groups presets in banks of 3 (A/B/C), so
+/// preset 125 with name "FULDRV" is shown as "41.FULDRV". With no name the
+/// label is just the preset number ("43").
+fn display_label(preset_num: i32, name: &str) -> String {
+    if name.is_empty() {
+        preset_num.to_string()
+    } else {
+        format!("{}.{}", (clamp_preset(preset_num) - 1) / 3, name)
+    }
+}
+
 impl PresetNames {
-    /// Display label: the pedal groups presets in banks of 3 (A/B/C), so
-    /// preset 125 with name "FULDRV" is shown as "41.FULDRV".
+    fn lock(&self) -> MutexGuard<'_, Vec<String>> {
+        self.names.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Label for the current-preset card, or "" when the name is unknown
+    /// (the UI then falls back to the bare number).
     fn name_for(&self, preset_num: i32) -> String {
-        let names = self.names.lock().unwrap_or_else(|e| e.into_inner());
+        let names = self.lock();
         usize::try_from(preset_num - 1)
             .ok()
             .and_then(|i| names.get(i))
             .filter(|n| !n.is_empty())
-            .map(|n| format!("{}.{}", (clamp_preset(preset_num) - 1) / 3, n))
+            .map(|n| display_label(preset_num, n))
             .unwrap_or_default()
+    }
+
+    /// Labels for all presets, for the list view.
+    fn list_model(&self) -> ModelRc<SharedString> {
+        let names = self.lock();
+        let labels: Vec<SharedString> = (MIN_PRESET..=MAX_PRESET)
+            .map(|p| {
+                let name = names.get((p - 1) as usize).map(String::as_str).unwrap_or("");
+                display_label(p, name).into()
+            })
+            .collect();
+        ModelRc::new(VecModel::from(labels))
     }
 
     /// Reads names in a background thread and pushes the current preset's
@@ -126,9 +153,10 @@ impl PresetNames {
                     Vec::new()
                 }
             };
-            *this.names.lock().unwrap_or_else(|e| e.into_inner()) = names;
+            *this.lock() = names;
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_preset_name(this.name_for(ui.get_preset()).into());
+                ui.set_preset_names(this.list_model());
             });
         });
     }
@@ -150,6 +178,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let names = PresetNames::default();
 
     ui.set_preset(DEFAULT_PRESET);
+    ui.set_preset_names(names.list_model());
 
     match engine.try_connect() {
         Ok(name) => show_connected(&ui, &name),

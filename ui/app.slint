@@ -100,28 +100,18 @@ component GlowText inherits Rectangle {
     in property <string> font-family;
     in property <length> letter-spacing: 0px;
 
-    // Two rings of offset copies fake a blur: a tight bright ring and a
-    // wider faint one.
-    for o in [
-        { dx: -1.5px, dy: 0px, a: 1.0 }, { dx: 1.5px, dy: 0px, a: 1.0 },
-        { dx: 0px, dy: -1.5px, a: 1.0 }, { dx: 0px, dy: 1.5px, a: 1.0 },
-        { dx: -2.5px, dy: -2px, a: 0.5 }, { dx: 2.5px, dy: -2px, a: 0.5 },
-        { dx: -2.5px, dy: 2px, a: 0.5 }, { dx: 2.5px, dy: 2px, a: 0.5 },
-        { dx: -4px, dy: 0px, a: 0.35 }, { dx: 4px, dy: 0px, a: 0.35 },
-    ]: Text {
+    // Soft halo wash behind the crisp glyphs: a radial gradient stretched
+    // over the line (the user's preferred look).
+    halo := Rectangle {
         visible: root.glow-alpha > 0;
-        x: label.x + o.dx;
-        y: label.y + o.dy;
-        width: label.width;
-        height: label.height;
-        text: root.text;
-        color: root.glow.with-alpha(root.glow-alpha * o.a);
-        font-size: root.font-size;
-        font-weight: root.font-weight;
-        font-family: root.font-family;
-        letter-spacing: root.letter-spacing;
-        overflow: elide;
-        wrap: no-wrap;
+        x: label.x - label.height;
+        y: label.y + label.height / 2 - self.height / 2;
+        width: label.width + label.height * 2;
+        height: label.height * 2.4;
+        background: @radial-gradient(circle,
+            root.glow.with-alpha(root.glow-alpha) 0%,
+            root.glow.with-alpha(root.glow-alpha * 0.45) 35%,
+            root.glow.with-alpha(0.0) 72%);
     }
 
     HorizontalLayout {
@@ -1045,7 +1035,7 @@ export component AppWindow inherits Window {
                                 text: "BANK \{oled.bank < 10 ? "0" : ""}\{oled.bank} • SLOT \{oled.slot}";
                                 ink: Theme.accent;
                                 glow: Theme.accent;
-                                glow-alpha: 0.42;
+                                glow-alpha: 0.20;
                                 font-size: 15px;
                                 font-weight: 600;
                                 font-family: Theme.mono-font;
@@ -1058,7 +1048,7 @@ export component AppWindow inherits Window {
                                 text: root.preset-name == "" ? "Preset \{root.preset}" : root.preset-name;
                                 ink: root.preset-name == "" ? Theme.muted : Theme.oled-ink;
                                 glow: Theme.oled-glow;
-                                glow-alpha: root.preset-name == "" ? 0 : 0.34;
+                                glow-alpha: root.preset-name == "" ? 0 : 0.10;
                                 font-size: 17px;
                                 font-weight: root.preset-name == "" ? 400 : 600;
                             }

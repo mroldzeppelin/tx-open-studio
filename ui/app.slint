@@ -626,7 +626,6 @@ export component AppWindow inherits Window {
 
                         HorizontalLayout {
                             spacing: 10px;
-                            alignment: start;
                             Text {
                                 // Pedal terms: 0-based bank (0..49) plus slot letter, e.g. 43 → "14-A".
                                 text: "PRESET \{floor((root.preset - 1) / 3)}-\{["A", "B", "C"][mod(root.preset - 1, 3)]} / 49";
@@ -679,12 +678,14 @@ export component AppWindow inherits Window {
                             }
                             // Tuner on/off (MIDI CC9). The pedal reports no
                             // tuner state, so this shows what the app set.
+                            // Square icon button, flush right.
                             StateButton {
                                 horizontal-stretch: 0;
-                                width: 84px;
+                                width: 32px;
+                                height: 32px;
                                 on <=> root.tuner-active;
-                                on-text: "Tuner On";
-                                off-text: "Tuner";
+                                on-text: "♯";
+                                off-text: "♯";
                                 toggled(on) => { root.tuner-toggled(on); }
                             }
                         }

@@ -5,6 +5,7 @@ An unofficial Linux desktop editor for the IK Multimedia TONEX Pedal: browse and
 [![CI](https://github.com/mroldzeppelin/tx-open-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/mroldzeppelin/tx-open-studio/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mroldzeppelin/tx-open-studio)](https://github.com/mroldzeppelin/tx-open-studio/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/github/license/mroldzeppelin/tx-open-studio)](LICENSE)
+[![Packages](https://img.shields.io/badge/packages-rpm%20%7C%20deb-blue)](https://github.com/mroldzeppelin/tx-open-studio/releases/latest)
 
 ![TX Open Studio](docs/screenshot-main.png)
 

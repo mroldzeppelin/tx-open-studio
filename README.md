@@ -51,6 +51,19 @@ The pedal needs a firmware with IK editor support. The MIDI CC map assumes the p
 
 ## Install
 
+### Prebuilt packages (no toolchain needed)
+
+Grab the `.rpm` or `.deb` from the [latest release](https://github.com/mroldzeppelin/tx-open-studio/releases/latest) and install it:
+
+```sh
+# Fedora
+sudo dnf install ./tx-open-studio-*.x86_64.rpm
+# Debian / Ubuntu
+sudo apt install ./tx-open-studio_*_amd64.deb
+```
+
+The package installs the app, the desktop entry, the icons and the udev rule, and reloads udev — plug in the pedal and launch.
+
 ### Build from source
 
 You need a Rust toolchain ([rustup](https://rustup.rs)) plus a C compiler, `pkg-config`, and the ALSA and fontconfig development headers (for `midir` and Slint's font handling).

@@ -74,6 +74,12 @@ Then build:
 ```sh
 git clone https://github.com/mroldzeppelin/tx-open-studio.git
 cd tx-open-studio
+./install.sh
+```
+
+`install.sh` builds the release binary and installs it to `~/.local` together with the desktop entry and icons, and installs the udev rule (the one step that asks for sudo). To just build and run without installing:
+
+```sh
 cargo build --release
 ./target/release/tx-open-studio
 ```
@@ -92,7 +98,7 @@ The packages install the binary, the udev rule (to `/usr/lib/udev/rules.d/`), th
 
 ### udev rule (required for editing)
 
-The serial port (`/dev/ttyACM*`) is not accessible to normal users by default. Without access, preset names, live editing and two-way sync do not work, and the app stays in **RECONNECTING**. The packages install the rule automatically. When building from source, install it yourself:
+The serial port (`/dev/ttyACM*`) is not accessible to normal users by default. Without access, preset names, live editing and two-way sync do not work, and the status bar shows **NO ACCESS TO /dev/ttyACM0 — INSTALL THE UDEV RULE**. The packages and `install.sh` install the rule automatically. To install it by hand:
 
 ```sh
 sudo cp packaging/70-tonex-pedal.rules /etc/udev/rules.d/
@@ -102,6 +108,8 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 Then unplug and replug the pedal. The rule grants the logged-in user access to the pedal's serial port (`TAG+="uaccess"`). No group membership is needed.
 
 ### Desktop integration (from source)
+
+`./install.sh` does this for you; by hand:
 
 ```sh
 install -Dm644 packaging/tx-open-studio.desktop ~/.local/share/applications/tx-open-studio.desktop

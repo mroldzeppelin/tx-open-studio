@@ -39,6 +39,11 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// rate limit) just means no chip; the UI thread never waits for it.
 /// Disabled by setting TX_NO_UPDATE_CHECK.
 fn start_update_check(ui: slint::Weak<AppWindow>) {
+    // Dev hook: TX_FAKE_UPDATE=0.2.0 shows the chip without any network.
+    if let Ok(fake) = std::env::var("TX_FAKE_UPDATE") {
+        let _ = ui.upgrade_in_event_loop(move |ui| ui.set_update_version(format!("v{fake}").into()));
+        return;
+    }
     if std::env::var_os("TX_NO_UPDATE_CHECK").is_some() {
         return;
     }

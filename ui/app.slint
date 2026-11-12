@@ -649,6 +649,10 @@ export component AppWindow inherits Window {
     // The pedal's serial port may not be opened (udev rule missing):
     // steady red LED, the status text explains.
     in property <bool> no-access: false;
+    // Newer release found ("v1.2.3"; "" = none): amber chip in the status
+    // bar that opens the releases page.
+    in property <string> update-version;
+    callback open-releases();
     in property <string> status-text: "RECONNECTING…";
     // Step blink of the amber LED (0.5 s), only while reconnecting.
     property <bool> led-dim: false;
@@ -2284,6 +2288,36 @@ export component AppWindow inherits Window {
                         overflow: elide;
                     }
 
+                    if root.update-version != "": VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            height: 18px;
+                            border-radius: 3px;
+                            border-width: 1px;
+                            border-color: update-ta.has-hover ? Theme.accent : Theme.accent.with-alpha(0.6);
+                            background: update-ta.has-hover ? Theme.accent.with-alpha(0.12) : transparent;
+                            HorizontalLayout {
+                                padding-left: 6px;
+                                padding-right: 6px;
+                                Text {
+                                    text: "UPDATE " + root.update-version;
+                                    color: Theme.accent;
+                                    font-size: 9px;
+                                    font-weight: 600;
+                                    font-family: Theme.mono-font;
+                                    letter-spacing: 0.8px;
+                                    vertical-alignment: center;
+                                    wrap: no-wrap;
+                                }
+                            }
+                            update-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.open-releases();
+                                }
+                            }
+                        }
+                    }
 
                     VerticalLayout {
                         alignment: center;

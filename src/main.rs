@@ -27,6 +27,48 @@ fn status_text(status: &LinkStatus) -> String {
     }
 }
 
+/// GitHub repo checked for newer releases, and where the update chip leads.
+const UPDATE_REPO: &str = "mroldzeppelin/tx-open-studio";
+const RELEASES_URL: &str = "https://github.com/mroldzeppelin/tx-open-studio/releases/latest";
+/// update-informer caches the answer on disk and asks GitHub at most this
+/// often (the first run only creates the cache).
+const UPDATE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Looks for a newer GitHub release in a background thread and, if there
+/// is one, shows the update chip. Any failure (offline, no release yet,
+/// rate limit) just means no chip; the UI thread never waits for it.
+/// Disabled by setting TX_NO_UPDATE_CHECK.
+fn start_update_check(ui: slint::Weak<AppWindow>) {
+    if std::env::var_os("TX_NO_UPDATE_CHECK").is_some() {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("update-check".into()).spawn(move || {
+        use update_informer::{registry, Check};
+        let informer = update_informer::new(registry::GitHub, UPDATE_REPO, env!("CARGO_PKG_VERSION"))
+            .interval(UPDATE_INTERVAL);
+        if let Ok(Some(version)) = informer.check_version() {
+            let label = version.to_string(); // "v1.2.3"
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_update_version(label.into()));
+        }
+    });
+    if let Err(e) = spawned {
+        eprintln!("update check not started: {e}");
+    }
+}
+
+/// Opens the latest release page in the default browser.
+fn open_releases_page() {
+    match std::process::Command::new("xdg-open").arg(RELEASES_URL).spawn() {
+        // Reap it in the background so it doesn't linger as a zombie.
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => eprintln!("xdg-open {RELEASES_URL} failed: {e}"),
+    }
+}
+
 /// How often the reconnect poll looks for the pedal while a link is down.
 const RECONNECT_POLL: Duration = Duration::from_secs(2);
 
@@ -908,6 +950,9 @@ fn main() -> Result<(), slint::PlatformError> {
             show_list(&ui, &ctx.names);
         });
     }
+
+    ui.on_open_releases(open_releases_page);
+    start_update_check(ui.as_weak());
 
     // Connect now (pedal present: same as a normal start), then keep
     // polling while any link is down (no pedal: sits in RECONNECTING).

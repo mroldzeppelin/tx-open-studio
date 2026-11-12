@@ -463,6 +463,9 @@ export component AppWindow inherits Window {
     in property <bool> preset-level-known: false;
     callback preset-level-changed(float);
     in-out property <float> global-volume: 0;
+    // Tuner on/off as last set by the app (the pedal doesn't report it).
+    in-out property <bool> tuner-active: false;
+    callback tuner-toggled(bool);
     callback global-changed(int, float);
 
     changed preset => {
@@ -670,26 +673,76 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                            }
+                            // Tuner on/off (MIDI CC9). The pedal reports no
+                            // tuner state, so this shows what the app set.
+                            StateButton {
+                                horizontal-stretch: 0;
+                                width: 84px;
+                                on <=> root.tuner-active;
+                                on-text: "Tuner On";
+                                off-text: "Tuner";
+                                toggled(on) => { root.tuner-toggled(on); }
+                            }
                         }
 
-                        // Name read over USB serial; falls back to the bare
-                        // preset number until names are loaded.
-                        Text {
-                            text: root.preset-name == "" ? root.preset : root.preset-name;
-                            color: Theme.ink;
-                            font-size: 30px;
-                            font-weight: 700;
-                            overflow: elide;
-                            wrap: no-wrap;
-                        }
-                        // Character from the preset's metadata; gray TONE
-                        // when the preset doesn't name one.
-                        if root.preset-name != "": HorizontalLayout {
-                            alignment: start;
-                            CharacterBadge {
-                                text: root.preset-character-kind > 0 ? root.preset-character : "TONE";
-                                kind: root.preset-character-kind;
-                                font-size: 11px;
+                        // Preset name + character badge; replaced by the tuner
+                        // display while the tuner is on (the knob row below
+                        // stays). The name/badge stay in the layout, just
+                        // hidden, so the card keeps its height.
+                        Rectangle {
+                            VerticalLayout {
+                                spacing: 2px;
+                                visible: !root.tuner-active;
+
+                                // Name read over USB serial; falls back to the bare
+                                // preset number until names are loaded.
+                                Text {
+                                    text: root.preset-name == "" ? root.preset : root.preset-name;
+                                    color: Theme.ink;
+                                    font-size: 30px;
+                                    font-weight: 700;
+                                    overflow: elide;
+                                    wrap: no-wrap;
+                                }
+                                // Character from the preset's metadata; gray TONE
+                                // when the preset doesn't name one.
+                                if root.preset-name != "": HorizontalLayout {
+                                    alignment: start;
+                                    CharacterBadge {
+                                        text: root.preset-character-kind > 0 ? root.preset-character : "TONE";
+                                        kind: root.preset-character-kind;
+                                        font-size: 11px;
+                                    }
+                                }
+                            }
+
+                            // Tuner mode. The pedal streams no pitch data, so the
+                            // app can only point to the pedal's own display.
+                            if root.tuner-active: VerticalLayout {
+                                x: 0px;
+                                y: 0px;
+                                width: parent.width;
+                                height: parent.height;
+                                alignment: center;
+                                spacing: 4px;
+                                Text {
+                                    text: "TUNER";
+                                    color: Theme.ok;
+                                    font-size: 30px;
+                                    font-weight: 700;
+                                    letter-spacing: 4px;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "Tune on the pedal display";
+                                    color: Theme.muted;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                }
                             }
                         }
 

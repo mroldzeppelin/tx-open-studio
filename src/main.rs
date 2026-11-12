@@ -94,6 +94,19 @@ impl MidiEngine {
     }
 }
 
+/// Tuner on/off: CC9 on channel 1, 127 = on, 0 = off (verified on the
+/// pedal). The pedal sends no tuner pitch data and doesn't report tuner
+/// toggles made on the pedal itself, so the UI shows the state we set.
+const TUNER_CC: u8 = 9;
+
+fn tuner_cc_value(on: bool) -> u8 {
+    if on {
+        127
+    } else {
+        0
+    }
+}
+
 /// MIDI CC number of each amp knob on the TONEX Pedal (big floor unit).
 ///
 /// Source: ThibaultDucray/TonexPedal-TouchOSC-Template v4.3
@@ -664,6 +677,19 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ui_weak = ui.as_weak();
+        let engine = engine.clone();
+        ui.on_tuner_toggled(move |on| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if let Err(e) = engine.send_cc(TUNER_CC, tuner_cc_value(on)) {
+                eprintln!("MIDI send failed: {e}");
+                ui.set_tuner_active(!on);
+                show_disconnected(&ui);
+            }
+        });
+    }
+
+    {
+        let ui_weak = ui.as_weak();
         let ctx = ctx.clone();
         ui.on_amp_enable_changed(move |on| {
             let Some(ui) = ui_weak.upgrade() else { return };
@@ -758,6 +784,13 @@ fn main() -> Result<(), slint::PlatformError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tuner_cc_values() {
+        assert_eq!(TUNER_CC, 9);
+        assert_eq!(tuner_cc_value(true), 127);
+        assert_eq!(tuner_cc_value(false), 0);
+    }
 
     #[test]
     fn character_kinds() {

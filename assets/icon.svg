@@ -1,26 +1,33 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <!-- TX Open Studio icon: TX / OPEN over a knob background -->
+  <!-- TX Open Studio icon: the app's Knob (same geometry/colors as ui/app.slint,
+       viewbox scaled 2x: ring r=44->88, width 8->16, cap 72%->r72, pointer 14..31->28..62)
+       set to ~70% with TX / OPEN lettering on the cap -->
   <defs>
-    <radialGradient id="dial" cx="0.42" cy="0.38" r="0.75">
-      <stop offset="0" stop-color="#2b3a2f"/>
-      <stop offset="1" stop-color="#1d2721"/>
-    </radialGradient>
+    <linearGradient id="cap" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d4149"/>
+      <stop offset="0.75" stop-color="#1c1e22"/>
+    </linearGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1d21"/>
+      <stop offset="0.4" stop-color="#141518"/>
+      <stop offset="1" stop-color="#101114"/>
+    </linearGradient>
   </defs>
   <!-- background tile -->
-  <rect x="8" y="8" width="240" height="240" rx="52" fill="#141b18"/>
-  <rect x="8" y="8" width="240" height="240" rx="52" fill="none" stroke="#3a4b3e" stroke-width="6"/>
-  <!-- knob as a subdued background -->
-  <circle cx="128" cy="128" r="86" fill="url(#dial)" stroke="#3e7750" stroke-width="7" opacity="0.9"/>
-  <g stroke="#53644f" stroke-width="5" stroke-linecap="round" opacity="0.8">
-    <line x1="128" y1="22" x2="128" y2="34"/>
-    <line x1="50" y1="206" x2="60" y2="196"/>
-    <line x1="206" y1="206" x2="196" y2="196"/>
-    <line x1="22" y1="128" x2="34" y2="128"/>
-    <line x1="234" y1="128" x2="222" y2="128"/>
-  </g>
-  <!-- indicator dot -->
-  <circle cx="162" cy="72" r="11" fill="#86b778"/>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#tile)"/>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="none" stroke="#2c2f36" stroke-width="6"/>
+  <!-- track arc: -135° -> +135° -->
+  <path d="M 65.77 190.23 A 88 88 0 1 1 190.23 190.23"
+        fill="none" stroke="#2a2d33" stroke-width="16"/>
+  <!-- value arc: -135° -> +135° (full, cranked to max) -->
+  <path d="M 65.77 190.23 A 88 88 0 1 1 190.23 190.23"
+        fill="none" stroke="#f59e0b" stroke-width="16"/>
+  <!-- cap -->
+  <circle cx="128" cy="128" r="72" fill="url(#cap)" stroke="#08090a" stroke-width="2"/>
+  <!-- pointer at +135° -->
+  <line x1="161.94" y1="161.94" x2="176.08" y2="176.08"
+        stroke="#f2f3f5" stroke-width="9" stroke-linecap="round"/>
   <!-- lettering -->
-  <text x="128" y="148" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-weight="bold" font-size="84" fill="#edf3e9">TX</text>
-  <text x="128" y="186" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-weight="bold" font-size="26" letter-spacing="10" fill="#86b778">OPEN</text>
+  <text x="128" y="146" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-weight="bold" font-size="72" fill="#ece2cf">TX</text>
+  <text x="128" y="180" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-weight="bold" font-size="23" letter-spacing="9" fill="#f59e0b">OPEN</text>
 </svg>

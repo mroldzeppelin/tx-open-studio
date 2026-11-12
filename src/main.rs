@@ -107,10 +107,19 @@ struct LinkState {
     session: u64,
     /// Last reported poll failure, to avoid logging it every 2 s.
     last_failure: String,
-    /// Serial device node the last open attempt was not allowed to open
-    /// (udev rule missing). Cleared on connect or when the node is gone.
+    /// Serial device node we may not open (udev rule missing), once the
+    /// refusal persisted; cleared on connect or when the node is gone.
     no_access: Option<String>,
+    /// Consecutive sessions refused access (see `serial_denied`), and the
+    /// last refused session.
+    denied_streak: u32,
+    denied_session: u64,
 }
+
+/// Refused opens in a row before the "no access" hint shows (~4-6 s of
+/// polling): a single refusal can be transient, e.g. right after another
+/// instance released the port.
+const NO_ACCESS_STREAK: u32 = 3;
 
 /// What the status bar shows.
 #[derive(Debug, PartialEq, Eq)]
@@ -150,8 +159,25 @@ impl LinkState {
             return false;
         }
         self.serial = SerialLink::Up;
-        self.no_access = None;
+        self.clear_denied();
         true
+    }
+
+    /// Session `id` was refused access to `path`.
+    fn serial_denied(&mut self, id: u64, path: String) {
+        if id != self.session {
+            return;
+        }
+        self.denied_session = id;
+        self.denied_streak += 1;
+        if self.denied_streak >= NO_ACCESS_STREAK {
+            self.no_access = Some(path);
+        }
+    }
+
+    fn clear_denied(&mut self) {
+        self.no_access = None;
+        self.denied_streak = 0;
     }
 
     fn serial_ended(&mut self, id: u64) -> SerialEnd {
@@ -160,6 +186,10 @@ impl LinkState {
         }
         let was_up = self.serial == SerialLink::Up;
         self.serial = SerialLink::Down;
+        if self.denied_session != id {
+            // Failed for another reason: the refusals were not persistent.
+            self.clear_denied();
+        }
         if was_up {
             SerialEnd::Lost
         } else {
@@ -665,7 +695,7 @@ impl SyncCtx {
                 self.start_serial(ui.as_weak(), ui.get_preset());
             } else {
                 // Node gone (unplugged): the access problem is moot.
-                self.link().no_access = None;
+                self.link().clear_denied();
             }
         }
         self.show_link(ui);
@@ -707,13 +737,12 @@ impl SyncCtx {
                 if self.link().serial_connected(id) {
                     eprintln!("TONEX serial session on {port}");
                     self.link().last_failure.clear();
+                    // Starting already counted as connected, but a no-access
+                    // hint (or RECONNECTING) may still be on screen.
+                    self.show_link(ui);
                 }
             }
-            Event::NoAccess(path) => {
-                if id == self.link().session {
-                    self.link().no_access = Some(path);
-                }
-            }
+            Event::NoAccess(path) => self.link().serial_denied(id, path),
             Event::Disconnected(reason) => {
                 let end = self.link().serial_ended(id);
                 match end {
@@ -1236,22 +1265,56 @@ mod tests {
     #[test]
     fn link_status_prioritizes_missing_access() {
         let mut l = LinkState { midi: true, ..Default::default() };
-        let id = l.serial_starting();
-        assert_eq!(l.status(), LinkStatus::Connected);
-        l.no_access = Some("/dev/ttyACM0".into());
-        assert_eq!(l.serial_ended(id), SerialEnd::OpenFailed);
-        assert_eq!(l.status(), LinkStatus::NoAccess("/dev/ttyACM0".into()));
+        let path = || "/dev/ttyACM0".to_string();
+        // Refused NO_ACCESS_STREAK times in a row: the hint shows.
+        for _ in 0..NO_ACCESS_STREAK {
+            let id = l.serial_starting();
+            l.serial_denied(id, path());
+            assert_eq!(l.serial_ended(id), SerialEnd::OpenFailed);
+        }
+        assert_eq!(l.status(), LinkStatus::NoAccess(path()));
         assert_eq!(
             status_text(&l.status()),
             "NO ACCESS TO /dev/ttyACM0 — INSTALL THE UDEV RULE (SEE README)"
         );
         // Retrying keeps the hint (no flicker); once the rule is installed
-        // the next session connects and the hint goes away.
+        // the next session connects and the hint goes away for good.
         let id = l.serial_starting();
-        assert_eq!(l.status(), LinkStatus::NoAccess("/dev/ttyACM0".into()));
+        assert_eq!(l.status(), LinkStatus::NoAccess(path()));
         assert!(l.serial_connected(id));
         assert_eq!(l.status(), LinkStatus::Connected);
+        assert_eq!(l.no_access, None);
         l.drop_all();
+        assert_eq!(l.status(), LinkStatus::Reconnecting);
+    }
+
+    #[test]
+    fn transient_access_refusal_never_shows_hint() {
+        let mut l = LinkState { midi: true, ..Default::default() };
+        // E.g. relaunch while the old instance still releases the port.
+        for _ in 0..NO_ACCESS_STREAK - 1 {
+            let id = l.serial_starting();
+            l.serial_denied(id, "/dev/ttyACM0".into());
+            assert_eq!(l.serial_ended(id), SerialEnd::OpenFailed);
+            assert_eq!(l.status(), LinkStatus::Reconnecting);
+        }
+        let id = l.serial_starting();
+        assert!(l.serial_connected(id));
+        assert_eq!(l.status(), LinkStatus::Connected);
+
+        // A different failure in between also restarts the count.
+        l.drop_all();
+        l.midi = true;
+        for _ in 0..NO_ACCESS_STREAK - 1 {
+            let id = l.serial_starting();
+            l.serial_denied(id, "/dev/ttyACM0".into());
+            l.serial_ended(id);
+        }
+        let id = l.serial_starting();
+        assert_eq!(l.serial_ended(id), SerialEnd::OpenFailed); // e.g. no hello reply
+        let id = l.serial_starting();
+        l.serial_denied(id, "/dev/ttyACM0".into());
+        l.serial_ended(id);
         assert_eq!(l.status(), LinkStatus::Reconnecting);
     }
 }

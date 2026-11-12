@@ -711,7 +711,9 @@ struct Link {
 impl Link {
     fn open(path: &Path) -> Result<Self, OpenFailure> {
         let mut port = SerialPort::open(path, BAUD_RATE).map_err(|e| {
-            if e.kind() == ErrorKind::PermissionDenied {
+            // Only a real EACCES (no rights on the node), not EPERM, which
+            // Rust also files under PermissionDenied.
+            if e.raw_os_error() == Some(EACCES) {
                 OpenFailure::NoAccess(path.to_path_buf())
             } else {
                 OpenFailure::Other(format!("open {}: {e}", path.display()))
@@ -1066,6 +1068,9 @@ impl Pedal {
         self.send(Request::SetGlobal(index, value))
     }
 }
+
+/// Linux errno for "permission denied" on open (no libc dependency).
+const EACCES: i32 = 13;
 
 /// Why no session could be opened.
 #[derive(Debug, PartialEq, Eq)]

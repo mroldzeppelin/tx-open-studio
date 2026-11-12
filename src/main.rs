@@ -614,6 +614,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let ctx = SyncCtx::default();
 
     ui.set_preset(DEFAULT_PRESET);
+    let cab_names: Vec<slint::SharedString> = (1..=fx::CAB_MODELS).map(|n| format!("Cab {n}").into()).collect();
+    ui.set_cab_model_names(ModelRc::new(VecModel::from(cab_names)));
     ui.set_preset_names(ctx.names.list_model());
 
     match engine.try_connect() {

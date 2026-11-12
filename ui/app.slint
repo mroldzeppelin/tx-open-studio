@@ -474,6 +474,8 @@ export component AppWindow inherits Window {
     // 0 Tone Model, 1 VIR, 2 Off.
     in-out property <int> cab-type: 0;
     in-out property <int> cab-model: 0;
+    // "Cab 1".."Cab N" labels for the VIR cab model (set from Rust).
+    in property <[string]> cab-model-names;
     in-out property <int> cab-mic1: 0;
     in-out property <int> cab-mic2: 0;
     in-out property <float> cab-reso: 0;
@@ -990,7 +992,7 @@ export component AppWindow inherits Window {
                                 }
                                 Stepper {
                                     enabled: vir;
-                                    options: ["Cab 1", "Cab 2", "Cab 3", "Cab 4", "Cab 5", "Cab 6", "Cab 7", "Cab 8", "Cab 9", "Cab 10", "Cab 11"];
+                                    options: root.cab-model-names;
                                     index <=> root.cab-model;
                                     picked(i) => { root.fx-changed(51, i); }
                                 }

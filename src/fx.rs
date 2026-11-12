@@ -56,9 +56,12 @@ const P_GATE_DEPTH: usize = 4;
 /// brunothesatellite, reading a different index) claim the reverse.
 const P_CAB_TYPE: usize = 24;
 const CAB_TYPES: usize = 3;
-/// VIR cabinet model, 0..=10 (select; names unknown, shown as 1..11).
+/// VIR cabinet model (select; names unknown, shown as "Cab N"). Builty
+/// declares 0..=10, but the user's pedal reported 25.0 here (preset 148
+/// dump), so the list is longer: accepted as any whole number below
+/// `CAB_MODELS`.
 const P_CAB_MODEL: usize = 25;
-const CAB_MODELS: usize = 11;
+pub const CAB_MODELS: usize = 64;
 /// VIR resonance 0..10.
 const P_CAB_RESO: usize = 26;
 /// Mic 1 type: 0 Condenser, 1 Dynamic, 2 Ribbon (Builty MIDI map).
@@ -716,7 +719,7 @@ mod tests {
         raw[MOD_BLOCKS[4].0 + 1] = 17.0;
         raw[P_GATE_ENABLE] = 1.0;
         raw[P_CAB_TYPE] = 1.0;
-        raw[P_CAB_MODEL] = 10.0;
+        raw[P_CAB_MODEL] = 25.0; // seen on hardware
         raw[P_CAB_MIC2] = 2.0;
         raw
     }
@@ -738,10 +741,32 @@ mod tests {
         raw[P_DELAY_MODEL] = 2.5;
         let mut m = FxMirror::default();
         raw[MOD_BLOCKS[2].0] = 0.5;
-        raw[P_CAB_MODEL] = 11.0; // out of 0..=10
+        raw[P_CAB_MODEL] = 2.5; // not a whole number
         assert_eq!(m.load(&raw), [Card::Reverb, Card::Comp, Card::Gate]);
         assert_eq!(m.load(&raw[..80]), [Card::Reverb, Card::Comp, Card::Gate]);
         assert!(m.load(&[]).is_empty());
+    }
+
+    /// params[0..40] of preset 148 dumped from the user's pedal.
+    #[test]
+    fn accepts_hardware_dump_preset_148() {
+        let dump = [
+            0.0, 0.0, -100.0, 20.0, -60.0, 1.0, 0.0, 0.0, -8.0, 5.0, 1.0, 4.3, 300.0, 8.1, 0.7, 750.0, 2.6, 2000.0,
+            1.0, 0.0, 5.5, 4.2, 100.0, 1.0, 0.0, 25.0, 5.0, 0.0, 1.5, 0.0, 1.0, 1.5, 0.0, 0.0, 0.0, 8.4, 1.0, 1.0,
+            5.0, 5.0,
+        ];
+        let mut raw = plausible_raw();
+        raw[..dump.len()].copy_from_slice(&dump);
+        let mut m = FxMirror::default();
+        let cards = m.load(&raw);
+        assert!(cards.contains(&Card::Gate) && cards.contains(&Card::Cab) && cards.contains(&Card::Comp));
+        let at = |c: FxControl| m.get(c.param_index(Models::default()).unwrap());
+        assert_eq!(at(FxControl::CabModel), Some(25.0));
+        assert_eq!(at(FxControl::GateThreshold), Some(-100.0));
+        // Comp: 7 threshold, 8 gain, 9 attack.
+        assert_eq!(at(FxControl::CompThreshold), Some(0.0));
+        assert_eq!(at(FxControl::CompGain), Some(-8.0));
+        assert_eq!(at(FxControl::CompAttack), Some(5.0));
     }
 
     #[test]

@@ -65,6 +65,8 @@ sudo apt install ./tx-open-studio-latest_amd64.deb
 
 The package installs the app, the desktop entry, the icons and the udev rule, and reloads udev — plug in the pedal and launch.
 
+**Updating:** run the same command again — it upgrades in place. The app shows an amber UPDATE chip in the status bar when a newer release is out (checked at most once a day; set `TX_NO_UPDATE_CHECK=1` to disable).
+
 ### Build from source
 
 You need a Rust toolchain ([rustup](https://rustup.rs)) plus a C compiler, `pkg-config`, and the ALSA and fontconfig development headers (for `midir` and Slint's font handling).

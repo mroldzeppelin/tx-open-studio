@@ -144,7 +144,7 @@ The full list of open questions is in [PROTOCOL.md §9](PROTOCOL.md#9-known-limi
 
 ## Protocol
 
-[PROTOCOL.md](PROTOCOL.md) documents the USB serial and MIDI protocol as implemented here: framing, value encoding, message types, the 109-entry parameter table and the MIDI CC map, with notes on what has been verified on hardware. This is a protocol documentation effort for interoperability, based on observing the pedal's USB traffic and on earlier community work, which it corrects where hardware disagreed. Thanks to:
+[PROTOCOL.md](PROTOCOL.md) documents the USB serial and MIDI protocol as implemented here: framing, value encoding, message types, the 109-entry parameter table and the MIDI CC map, with notes on what has been verified on hardware. The protocol was documented for interoperability by observing the pedal's USB traffic, building on earlier community work and correcting it where hardware disagreed. Thanks to:
 
 - **Builty** — [TonexOneController](https://github.com/Builty/TonexOneController) (big-pedal driver, parameter order and ranges)
 - **vit3k** — [tonex_controller](https://github.com/vit3k/tonex_controller) (framing, CRC, value encoding)

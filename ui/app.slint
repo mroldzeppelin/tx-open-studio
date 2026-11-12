@@ -678,15 +678,33 @@ export component AppWindow inherits Window {
                             }
                             // Tuner on/off (MIDI CC9). The pedal reports no
                             // tuner state, so this shows what the app set.
-                            // Square icon button, flush right.
-                            StateButton {
+                            // Square icon button (tuning fork), flush right.
+                            Rectangle {
                                 horizontal-stretch: 0;
                                 width: 32px;
                                 height: 32px;
-                                on <=> root.tuner-active;
-                                on-text: "♯";
-                                off-text: "♯";
-                                toggled(on) => { root.tuner-toggled(on); }
+                                border-radius: 7px;
+                                border-width: 1px;
+                                border-color: root.tuner-active ? Theme.selected-border : Theme.border;
+                                background: tuner-ta.pressed ? Theme.selected : (tuner-ta.has-hover ? Theme.hover : Theme.field);
+                                animate background { duration: 90ms; }
+
+                                Image {
+                                    source: @image-url("../assets/tuner.png");
+                                    width: 18px;
+                                    height: 18px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    colorize: root.tuner-active ? Theme.ok : Theme.secondary-ink;
+                                }
+
+                                tuner-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.tuner-active = !root.tuner-active;
+                                        root.tuner-toggled(root.tuner-active);
+                                    }
+                                }
                             }
                         }
 

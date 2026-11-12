@@ -61,17 +61,18 @@ export global Theme {
     out property <string> mono-font: "Noto Sans Mono";
 }
 
-// One row of the preset list. `number` is the bank number once the name is
-// known (bare preset number before), `kind` the character colour group
-// (0 = no badge; see character_kind in main.rs).
+// One row of the (filtered) preset list: preset number (1..150), short id
+// ("41B": 0-based bank + slot), name ("" until loaded), character and its
+// colour group `kind` (0 = none; see character_kind in main.rs).
 export struct PresetRow {
-    number: string,
+    preset: int,
+    id: string,
     name: string,
     character: string,
     kind: int,
 }
 
-// Muted colours per preset character group, shared by list and header.
+// Muted colours per preset character group, shared by list and OLED.
 export global CharacterColors {
     pure public function of(kind: int) -> color {
         if (kind == 1) { return #4a8a6a; } // clean
@@ -82,35 +83,6 @@ export global CharacterColors {
         if (kind == 6) { return #3d78b8; } // bass
         if (kind == 7) { return #8a7a50; } // acoustic
         return Theme.muted;
-    }
-}
-
-// Small badge showing a preset's character ("CLEAN", "DRIVE", ...).
-component CharacterBadge inherits Rectangle {
-    in property <string> text;
-    in property <int> kind;
-    in property <length> font-size: 10px;
-    property <color> tint: CharacterColors.of(root.kind);
-
-    horizontal-stretch: 0;
-    background: root.tint.with-alpha(0.14);
-    border-radius: 5px;
-    border-width: 1px;
-    border-color: root.tint.with-alpha(0.8);
-
-    HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
-        padding-top: 1px;
-        padding-bottom: 1px;
-        Text {
-            text: root.text;
-            color: root.tint.brighter(0.35);
-            font-size: root.font-size;
-            font-weight: 600;
-            vertical-alignment: center;
-            wrap: no-wrap;
-        }
     }
 }
 
@@ -737,8 +709,63 @@ export component AppWindow inherits Window {
     callback tuner-toggled(bool);
     callback global-changed(int, float);
 
+    // Preset list search: Rust filters `preset-names` and reports the match
+    // count and the current preset's row (-1 = filtered out).
+    callback search-changed(string);
+    in property <int> preset-count: 150;
+    in property <int> selected-row: -1;
+    // Keyboard-highlighted list row (-1 = none).
+    property <int> cursor-row: -1;
+    // Brief pressed look on PREV (-1) / NEXT (1) after an arrow key.
+    property <int> flash: 0;
+
     changed preset => {
         list.ensure-selected-visible();
+    }
+    changed selected-row => {
+        list.ensure-selected-visible();
+    }
+
+    // Previous/next preset with wrap-around (1 <-> 150).
+    function step-preset(dir: int) {
+        root.preset-changed(dir < 0
+            ? (root.preset <= 1 ? 150 : root.preset - 1)
+            : (root.preset >= 150 ? 1 : root.preset + 1));
+    }
+    // Left/Right arrow keys: like PREV/NEXT, with a short press flash.
+    function key-step(dir: int) {
+        root.flash = dir;
+        root.step-preset(dir);
+    }
+    function select-tab(n: int) {
+        root.tab = n;
+        main-keys.focus();
+    }
+
+    Timer {
+        interval: 110ms;
+        running: root.flash != 0;
+        triggered => {
+            root.flash = 0;
+        }
+    }
+
+    // Window-wide keys while neither the search field nor the list has
+    // focus (it gets focus at start, on Escape, and when clicking empty
+    // space or tabs/stage buttons).
+    forward-focus: main-keys;
+    main-keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow) {
+                root.key-step(-1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                root.key-step(1);
+                return accept;
+            }
+            reject
+        }
     }
 
     // Chassis: rounded body with near-black edge and an inner bevel ring
@@ -808,8 +835,10 @@ export component AppWindow inherits Window {
 
                 prev-btn := HwButton {
                     width: 56px;
+                    checked: root.flash == -1;
                     clicked => {
-                        root.preset-changed(root.preset <= 1 ? 150 : root.preset - 1);
+                        root.step-preset(-1);
+                        main-keys.focus();
                     }
                     VerticalLayout {
                         alignment: center;
@@ -990,8 +1019,10 @@ export component AppWindow inherits Window {
 
                 next-btn := HwButton {
                     width: 56px;
+                    checked: root.flash == 1;
                     clicked => {
-                        root.preset-changed(root.preset >= 150 ? 1 : root.preset + 1);
+                        root.step-preset(1);
+                        main-keys.focus();
                     }
                     VerticalLayout {
                         alignment: center;
@@ -1020,15 +1051,15 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 vertical-stretch: 0;
                 spacing: 3px;
-                TabButton { label: "PRESETS"; selected: root.tab == 0; clicked => { root.tab = 0; } }
-                TabButton { label: "GLOBAL"; selected: root.tab == 1; clicked => { root.tab = 1; } }
-                TabButton { label: "GATE"; has-led: true; led-on: root.gate-enabled; selected: root.tab == 2; clicked => { root.tab = 2; } }
-                TabButton { label: "COMP"; has-led: true; led-on: root.comp-enabled; selected: root.tab == 3; clicked => { root.tab = 3; } }
-                TabButton { label: "AMP"; has-led: true; led-on: root.amp-enabled; selected: root.tab == 4; clicked => { root.tab = 4; } }
-                TabButton { label: "CAB"; has-led: true; led-on: root.cab-on; selected: root.tab == 5; clicked => { root.tab = 5; } }
-                TabButton { label: "MOD"; has-led: true; led-on: root.mod-enabled; selected: root.tab == 6; clicked => { root.tab = 6; } }
-                TabButton { label: "DELAY"; has-led: true; led-on: root.dly-enabled; selected: root.tab == 7; clicked => { root.tab = 7; } }
-                TabButton { label: "REVERB"; has-led: true; led-on: root.rvb-enabled; selected: root.tab == 8; clicked => { root.tab = 8; } }
+                TabButton { label: "PRESETS"; selected: root.tab == 0; clicked => { root.select-tab(0); } }
+                TabButton { label: "GLOBAL"; selected: root.tab == 1; clicked => { root.select-tab(1); } }
+                TabButton { label: "GATE"; has-led: true; led-on: root.gate-enabled; selected: root.tab == 2; clicked => { root.select-tab(2); } }
+                TabButton { label: "COMP"; has-led: true; led-on: root.comp-enabled; selected: root.tab == 3; clicked => { root.select-tab(3); } }
+                TabButton { label: "AMP"; has-led: true; led-on: root.amp-enabled; selected: root.tab == 4; clicked => { root.select-tab(4); } }
+                TabButton { label: "CAB"; has-led: true; led-on: root.cab-on; selected: root.tab == 5; clicked => { root.select-tab(5); } }
+                TabButton { label: "MOD"; has-led: true; led-on: root.mod-enabled; selected: root.tab == 6; clicked => { root.select-tab(6); } }
+                TabButton { label: "DELAY"; has-led: true; led-on: root.dly-enabled; selected: root.tab == 7; clicked => { root.select-tab(7); } }
+                TabButton { label: "REVERB"; has-led: true; led-on: root.rvb-enabled; selected: root.tab == 8; clicked => { root.select-tab(8); } }
             }
 
             // Tray: one inset panel showing the selected tab's page. All
@@ -1055,7 +1086,7 @@ export component AppWindow inherits Window {
                     background: @linear-gradient(180deg, #000000b3 0%, #00000000 100%);
                 }
 
-                // PRESETS
+                // PRESETS: search field above the (filtered) preset list.
                 Rectangle {
                     x: tray.pad;
                     y: tray.pad;
@@ -1063,98 +1094,272 @@ export component AppWindow inherits Window {
                     height: parent.height - 2 * tray.pad;
                     visible: root.tab == 0;
 
-                    list := ListView {
-                        x: 4px;
-                        y: 4px;
-                        width: parent.width - 8px;
-                        height: parent.height - 8px;
+                    VerticalLayout {
+                        spacing: 6px;
 
-                        property <length> row-height: 34px;
-                        property <bool> initial-scroll-done: false;
+                        // Search: filtering happens in Rust (search-changed).
+                        Rectangle {
+                            height: 26px;
+                            background: Theme.oled;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: search-input.has-focus ? Theme.accent.with-alpha(0.6) : Theme.border;
 
-                        // Scrolls only when the selected row is (partly) out of
-                        // view, then centers it. Clicking a visible row never
-                        // moves the list.
-                        function ensure-selected-visible() {
-                            if (self.visible-height <= 0px) {
-                                return;
-                            }
-                            let top = (root.preset - 1) * self.row-height;
-                            let bottom = top + self.row-height;
-                            if (top >= -self.content-y && bottom <= -self.content-y + self.visible-height) {
-                                return;
-                            }
-                            let max-scroll = max(0px, self.content-height - self.visible-height);
-                            let target = top - (self.visible-height - self.row-height) / 2;
-                            self.content-y = -clamp(target, 0px, max-scroll);
-                        }
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 8px;
 
-                        changed visible-height => {
-                            // First real layout pass: bring the startup preset into view.
-                            if (!self.initial-scroll-done && self.visible-height > 0px) {
-                                self.initial-scroll-done = true;
-                                self.ensure-selected-visible();
-                            }
-                        }
-
-                        for row[index] in root.preset-names: Rectangle {
-                            height: list.row-height;
-
-                            property <bool> is-selected: root.preset == index + 1;
-                            property <string> number: index + 1;
-
-                            Rectangle {
-                                x: 0px;
-                                width: parent.width;
-                                height: parent.height;
-                                border-radius: 6px;
-                                border-width: 1px;
-                                border-color: is-selected ? Theme.bevel : transparent;
-                                background: is-selected ? Theme.selected : (row-ta.has-hover ? Theme.soft : transparent);
-
-                                // number · [CHARACTER] · name; before names
-                                // load only the bare preset number.
-                                HorizontalLayout {
-                                    padding-left: 12px;
-                                    padding-right: 10px;
-                                    spacing: 8px;
-
-                                    Text {
-                                        horizontal-stretch: 0;
-                                        min-width: 20px;
-                                        text: row.number == "" ? number : row.number;
-                                        color: is-selected ? Theme.accent : Theme.muted;
-                                        font-size: 12px;
-                                        font-weight: 600;
-                                        font-family: Theme.mono-font;
-                                        vertical-alignment: center;
+                                // Magnifier glyph.
+                                VerticalLayout {
+                                    alignment: center;
+                                    Path {
+                                        width: 12px;
+                                        height: 12px;
+                                        viewbox-width: 24;
+                                        viewbox-height: 24;
+                                        stroke: Theme.muted;
+                                        stroke-width: 1.6px;
+                                        commands: "M 18 11 A 7 7 0 1 1 4 11 A 7 7 0 1 1 18 11 M 20 20 L 16 16";
                                     }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    min-width: 0px;
+                                    clip: true;
+
+                                    // Placeholder (TextInput has none).
                                     Text {
-                                        horizontal-stretch: 1;
-                                        text: row.name;
-                                        color: is-selected ? Theme.ink : Theme.secondary-ink;
-                                        font-size: 14px;
-                                        font-weight: is-selected ? 600 : 400;
+                                        visible: search-input.text == "";
+                                        text: "Search name, bank or tag";
+                                        color: Theme.muted;
+                                        font-size: 11px;
+                                        font-weight: 500;
+                                        font-family: Theme.mono-font;
+                                        letter-spacing: 0.4px;
                                         vertical-alignment: center;
                                         overflow: elide;
                                         wrap: no-wrap;
                                     }
-                                    // Right-aligned badge; gray TONE when the
-                                    // preset has no character in its metadata.
-                                    if row.name != "": VerticalLayout {
-                                        alignment: center;
-                                        CharacterBadge {
-                                            text: row.kind > 0 ? row.character : "TONE";
-                                            kind: row.kind;
-                                            font-size: 9px;
+                                    // Enter: pick the first match; Down: into
+                                    // the list; Escape: clear (when already
+                                    // empty, hand keys back to the window).
+                                    // Left/Right move the text cursor and never
+                                    // reach the window's preset keys.
+                                    search-input := TextInput {
+                                        color: Theme.ink;
+                                        font-size: 11px;
+                                        font-weight: 500;
+                                        font-family: Theme.mono-font;
+                                        letter-spacing: 0.4px;
+                                        vertical-alignment: center;
+                                        single-line: true;
+                                        selection-background-color: Theme.amber-glow;
+                                        edited => {
+                                            root.cursor-row = -1;
+                                            root.search-changed(self.text);
+                                        }
+                                        accepted => {
+                                            if (root.preset-names.length > 0) {
+                                                root.preset-changed(root.preset-names[0].preset);
+                                            }
+                                        }
+                                        key-pressed(event) => {
+                                            if (event.text == Key.DownArrow) {
+                                                if (root.preset-names.length > 0) {
+                                                    root.cursor-row = 0;
+                                                    list.ensure-row-visible(0);
+                                                    list-keys.focus();
+                                                }
+                                                return accept;
+                                            }
+                                            if (event.text == Key.Escape) {
+                                                if (self.text == "") {
+                                                    main-keys.focus();
+                                                } else {
+                                                    self.text = "";
+                                                    root.cursor-row = -1;
+                                                    root.search-changed("");
+                                                }
+                                                return accept;
+                                            }
+                                            reject
                                         }
                                     }
                                 }
 
-                                row-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        root.preset-changed(index + 1);
+                                Text {
+                                    text: "\{root.preset-count} / 150";
+                                    color: Theme.muted;
+                                    font-size: 9px;
+                                    font-weight: 500;
+                                    font-family: Theme.mono-font;
+                                    letter-spacing: 1px;
+                                    vertical-alignment: center;
+                                    wrap: no-wrap;
+                                }
+                            }
+                        }
+
+                        // List keys: Up/Down move the highlighted row (Up past
+                        // the first row returns to the search field), Enter
+                        // selects it, Left/Right switch presets as elsewhere.
+                        list-keys := FocusScope {
+                            vertical-stretch: 1;
+                            key-pressed(event) => {
+                                let n = root.preset-names.length;
+                                let at = root.cursor-row >= 0 ? root.cursor-row : root.selected-row;
+                                if (event.text == Key.DownArrow) {
+                                    if (n > 0) {
+                                        root.cursor-row = at < 0 ? 0 : min(at + 1, n - 1);
+                                        list.ensure-row-visible(root.cursor-row);
+                                    }
+                                    return accept;
+                                }
+                                if (event.text == Key.UpArrow) {
+                                    if (at <= 0) {
+                                        root.cursor-row = -1;
+                                        search-input.focus();
+                                    } else {
+                                        root.cursor-row = at - 1;
+                                        list.ensure-row-visible(root.cursor-row);
+                                    }
+                                    return accept;
+                                }
+                                if (event.text == Key.Return) {
+                                    if (root.cursor-row >= 0 && root.cursor-row < n) {
+                                        root.preset-changed(root.preset-names[root.cursor-row].preset);
+                                    }
+                                    return accept;
+                                }
+                                if (event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                                    root.key-step(event.text == Key.LeftArrow ? -1 : 1);
+                                    return accept;
+                                }
+                                if (event.text == Key.Escape) {
+                                    root.cursor-row = -1;
+                                    main-keys.focus();
+                                    return accept;
+                                }
+                                reject
+                            }
+
+                            list := ListView {
+                                width: parent.width;
+                                height: parent.height;
+
+                                property <length> row-height: 26px;
+                                property <bool> initial-scroll-done: false;
+
+                                // Scrolls only when `row` is (partly) out of
+                                // view, then centers it. Clicking a visible row
+                                // never moves the list.
+                                function ensure-row-visible(row: int) {
+                                    if (self.visible-height <= 0px || row < 0) {
+                                        return;
+                                    }
+                                    let top = row * self.row-height;
+                                    let bottom = top + self.row-height;
+                                    if (top >= -self.content-y && bottom <= -self.content-y + self.visible-height) {
+                                        return;
+                                    }
+                                    let max-scroll = max(0px, self.content-height - self.visible-height);
+                                    let target = top - (self.visible-height - self.row-height) / 2;
+                                    self.content-y = -clamp(target, 0px, max-scroll);
+                                }
+
+                                // Current preset's row; nothing when it is
+                                // filtered out (selected-row -1).
+                                function ensure-selected-visible() {
+                                    self.ensure-row-visible(root.selected-row);
+                                }
+
+                                changed visible-height => {
+                                    // First real layout pass: bring the startup preset into view.
+                                    if (!self.initial-scroll-done && self.visible-height > 0px) {
+                                        self.initial-scroll-done = true;
+                                        self.ensure-selected-visible();
+                                    }
+                                }
+
+                                // id · name · character tag · LED. Selection is
+                                // by preset number (rows are filtered).
+                                for row[index] in root.preset-names: Rectangle {
+                                    height: list.row-height;
+
+                                    property <bool> is-selected: root.preset == row.preset;
+                                    property <bool> is-cursor: list-keys.has-focus && root.cursor-row == index;
+
+                                    Rectangle {
+                                        y: 1px;
+                                        width: parent.width;
+                                        height: 24px;
+                                        border-radius: 5px;
+                                        border-width: 1px;
+                                        border-color: is-cursor ? Theme.accent.with-alpha(0.5) : (is-selected ? Theme.bevel : transparent);
+                                        background: is-selected ? Theme.selected : (row-ta.has-hover || is-cursor ? Theme.soft : transparent);
+
+                                        HorizontalLayout {
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            spacing: 10px;
+
+                                            Text {
+                                                width: 26px;
+                                                text: row.id;
+                                                color: is-selected ? Theme.accent : Theme.muted;
+                                                font-size: 11px;
+                                                font-weight: 600;
+                                                font-family: Theme.mono-font;
+                                                vertical-alignment: center;
+                                                wrap: no-wrap;
+                                            }
+                                            // Muted placeholder until names load.
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                min-width: 0px;
+                                                text: row.name == "" ? "Preset \{row.preset}" : row.name;
+                                                color: row.name == "" ? Theme.muted : Theme.secondary-ink;
+                                                font-size: 12px;
+                                                font-weight: row.name == "" ? 400 : 500;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                                wrap: no-wrap;
+                                            }
+                                            // Character tag in its colour; gray
+                                            // TONE when the metadata names none.
+                                            if row.name != "": Text {
+                                                text: row.kind > 0 ? row.character : "TONE";
+                                                color: row.kind > 0 ? CharacterColors.of(row.kind).brighter(0.35) : Theme.muted;
+                                                font-size: 9px;
+                                                font-weight: 500;
+                                                font-family: Theme.mono-font;
+                                                letter-spacing: 0.4px;
+                                                vertical-alignment: center;
+                                                wrap: no-wrap;
+                                            }
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Rectangle {
+                                                    width: 5px;
+                                                    height: 5px;
+                                                    border-radius: 2.5px;
+                                                    background: is-selected ? Theme.accent : Theme.led-off;
+                                                    drop-shadow-blur: is-selected ? 6px : 0px;
+                                                    drop-shadow-color: is-selected ? Theme.accent.with-alpha(0.9) : transparent;
+                                                }
+                                            }
+                                        }
+
+                                        row-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.cursor-row = index;
+                                                list-keys.focus();
+                                                root.preset-changed(row.preset);
+                                            }
+                                        }
                                     }
                                 }
                             }

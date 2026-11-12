@@ -201,10 +201,38 @@ fn bank_and_pc(preset_num: i32) -> (u8, u8) {
 #[derive(Clone, Default)]
 struct PresetNames {
     names: Arc<Mutex<Vec<PresetMeta>>>,
+    /// Current preset-list search query (as typed).
+    query: Arc<Mutex<String>>,
 }
 
 fn bank_number(preset_num: i32) -> i32 {
     (clamp_preset(preset_num) - 1) / 3
+}
+
+fn slot_letter(preset_num: i32) -> char {
+    ['A', 'B', 'C'][((clamp_preset(preset_num) - 1) % 3) as usize]
+}
+
+/// Short preset id as on the OLED: 0-based bank, zero-padded, plus slot
+/// letter (preset 125 → "41B").
+fn preset_id(preset_num: i32) -> String {
+    format!("{:02}{}", bank_number(preset_num), slot_letter(preset_num))
+}
+
+/// Search: every whitespace-separated token of `query` (case-insensitive)
+/// must occur in "id bank slot name character" (e.g. "46c", "dg solo",
+/// "clean", "bank 14"). An empty query matches everything.
+fn preset_matches(preset_num: i32, meta: &PresetMeta, query: &str) -> bool {
+    let bank = bank_number(preset_num);
+    let hay = format!(
+        "{} bank {bank:02} {bank} slot {} {} {}",
+        preset_id(preset_num),
+        slot_letter(preset_num),
+        meta.name,
+        meta.character
+    )
+    .to_lowercase();
+    query.to_lowercase().split_whitespace().all(|t| hay.contains(t))
 }
 
 /// Colour group of a preset character (`character-color` in app.slint):
@@ -249,26 +277,36 @@ impl PresetNames {
     }
 
     fn row(preset_num: i32, meta: &PresetMeta) -> PresetRow {
-        let number = if meta.name.is_empty() { preset_num } else { bank_number(preset_num) };
         PresetRow {
-            number: number.to_string().into(),
+            preset: preset_num,
+            id: preset_id(preset_num).into(),
             name: meta.name.clone().into(),
             character: meta.character.clone().into(),
             kind: character_kind(&meta.character),
         }
     }
 
-    /// Rows for all presets, for the list view.
+    fn set_query(&self, query: &str) {
+        *self.query.lock().unwrap_or_else(|e| e.into_inner()) = query.to_string();
+    }
+
+    /// Rows of the presets matching the current search query.
     fn list_model(&self) -> ModelRc<PresetRow> {
+        let query = self.query.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let names = self.lock();
+        let empty = PresetMeta::default();
         let rows: Vec<PresetRow> = (MIN_PRESET..=MAX_PRESET)
-            .map(|p| Self::row(p, names.get((p - 1) as usize).unwrap_or(&PresetMeta::default())))
+            .filter_map(|p| {
+                let meta = names.get((p - 1) as usize).unwrap_or(&empty);
+                preset_matches(p, meta, &query).then(|| Self::row(p, meta))
+            })
             .collect();
         ModelRc::new(VecModel::from(rows))
     }
 
     /// Stores a preset's character (from a details read) and updates its
-    /// list row in place. Returns false if nothing changed.
+    /// list row in place if it is shown (the filter itself is re-applied
+    /// on the next query change). Returns false if nothing changed.
     fn set_character(&self, ui: &AppWindow, preset_idx: u8, character: String) -> bool {
         let i = usize::from(preset_idx);
         let meta = {
@@ -283,8 +321,9 @@ impl PresetNames {
             names[i].clone()
         };
         let model = ui.get_preset_names();
-        if i < model.row_count() {
-            model.set_row_data(i, Self::row(i as i32 + 1, &meta));
+        let preset = i as i32 + 1;
+        if let Some(row) = model.iter().position(|r| r.preset == preset) {
+            model.set_row_data(row, Self::row(preset, &meta));
         }
         true
     }
@@ -300,9 +339,28 @@ fn show_preset_meta(ui: &AppWindow, names: &PresetNames, preset: i32) {
     ui.set_preset_character(character.into());
 }
 
+/// Row of `preset` in the (filtered) list, -1 when filtered out.
+fn list_row_of(ui: &AppWindow, preset: i32) -> i32 {
+    ui.get_preset_names()
+        .iter()
+        .position(|r| r.preset == preset)
+        .map_or(-1, |i| i as i32)
+}
+
+/// (Re)builds the preset list for the current query: rows, match count and
+/// the current preset's row.
+fn show_list(ui: &AppWindow, names: &PresetNames) {
+    let model = names.list_model();
+    ui.set_preset_count(model.row_count() as i32);
+    ui.set_preset_names(model);
+    ui.set_selected_row(list_row_of(ui, ui.get_preset()));
+}
+
 /// Shows `preset` as current in the UI. Does NOT send MIDI (used both by the
 /// UI path, which sends separately, and for footswitch changes on the pedal).
 fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
+    // Row first: the list scrolls to it when `preset` changes.
+    ui.set_selected_row(list_row_of(ui, preset));
     ui.set_preset(preset);
     // Until the new preset's details arrive.
     ui.set_preset_level_known(false);
@@ -407,7 +465,7 @@ impl SyncCtx {
             }
             Event::Names(Ok(names)) => {
                 *self.names.lock() = names;
-                ui.set_preset_names(self.names.list_model());
+                show_list(ui, &self.names);
                 show_preset_meta(ui, &self.names, ui.get_preset());
             }
             Event::Names(Err(e)) => eprintln!("TONEX preset names read failed: {e}"),
@@ -599,7 +657,17 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_preset(DEFAULT_PRESET);
     let cab_names: Vec<slint::SharedString> = (1..=fx::CAB_MODELS).map(|n| format!("Cab {n}").into()).collect();
     ui.set_cab_model_names(ModelRc::new(VecModel::from(cab_names)));
-    ui.set_preset_names(ctx.names.list_model());
+    show_list(&ui, &ctx.names);
+
+    {
+        let ui_weak = ui.as_weak();
+        let ctx = ctx.clone();
+        ui.on_search_changed(move |query| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            ctx.names.set_query(&query);
+            show_list(&ui, &ctx.names);
+        });
+    }
 
     match engine.try_connect() {
         Ok(name) => show_connected(&ui, &name),
@@ -806,5 +874,24 @@ mod tests {
         assert_eq!(ccs, [102, 103, 106, 107, 23, 25, 28]);
         assert_eq!(knob_from_id(7), None);
         assert_eq!(knob_from_id(-1), None);
+    }
+
+    #[test]
+    fn preset_id_uses_zero_based_bank_and_slot() {
+        assert_eq!(preset_id(1), "00A");
+        assert_eq!(preset_id(125), "41B");
+        assert_eq!(preset_id(150), "49C");
+    }
+
+    #[test]
+    fn search_matches_all_tokens_case_insensitively() {
+        let meta = PresetMeta { name: "DG Comfortably solo LPR".into(), character: "DRIVE".into() };
+        // Preset 141 = bank 46, slot C.
+        assert!(preset_matches(141, &meta, ""));
+        assert!(preset_matches(141, &meta, "46c"));
+        assert!(preset_matches(141, &meta, "dg SOLO"));
+        assert!(preset_matches(141, &meta, "  drive  bank 46 "));
+        assert!(!preset_matches(141, &meta, "dg clean"));
+        assert!(!preset_matches(141, &meta, "45c"));
     }
 }

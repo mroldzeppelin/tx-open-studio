@@ -2,7 +2,9 @@
 
 An unofficial Linux desktop editor for the IK Multimedia TONEX Pedal: browse and switch presets, and edit the active preset live over USB.
 
-<!-- Badges (CI, license) will go here. -->
+[![CI](https://github.com/mroldzeppelin/tx-open-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/mroldzeppelin/tx-open-studio/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/mroldzeppelin/tx-open-studio)](https://github.com/mroldzeppelin/tx-open-studio/releases/latest)
+[![License: GPL-3.0](https://img.shields.io/github/license/mroldzeppelin/tx-open-studio)](LICENSE)
 
 ![TX Open Studio](docs/screenshot-main.png)
 

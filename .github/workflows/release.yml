@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deb:
+    # Built on Ubuntu so cargo-deb can compute real Depends via dpkg-shlibdeps.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libasound2-dev libfontconfig-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Build .deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: target/debian/*.deb
+
+  rpm:
+    # Built inside a Fedora container so auto-requires match Fedora libraries.
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: dnf install -y gcc rust cargo pkgconf-pkg-config alsa-lib-devel fontconfig-devel
+      - name: Build .rpm
+        run: |
+          cargo install cargo-generate-rpm --locked
+          cargo build --release
+          cargo generate-rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: target/generate-rpm/*.rpm
+
+  release:
+    needs: [deb, rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --draft \
+            --title "TX Open Studio $GITHUB_REF_NAME" \
+            --generate-notes

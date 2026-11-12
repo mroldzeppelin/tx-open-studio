@@ -807,6 +807,12 @@ fn candidate_ports() -> Vec<PathBuf> {
     ik
 }
 
+/// Cheap presence check for the reconnect poll: is there a port a session
+/// could try (same discovery as `Pedal::start`)? Opens nothing.
+pub fn port_available() -> bool {
+    !candidate_ports().is_empty()
+}
+
 // ---------------------------------------------------------------- frame classification
 
 /// Reads one value at `*pos` in the `B9/BA/80/81/82/literal` encoding,

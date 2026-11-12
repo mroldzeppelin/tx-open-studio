@@ -16,8 +16,95 @@ const MAX_PRESET: i32 = 150;
 /// Shown only until the pedal's state reply tells us its current preset.
 const DEFAULT_PRESET: i32 = 43;
 const CLIENT_NAME: &str = "tx-open-studio";
-const STATUS_DOWN: &str = "PEDAL NOT CONNECTED";
 const STATUS_UP: &str = "TONEX PEDAL CONNECTED";
+const STATUS_RECONNECTING: &str = "RECONNECTING…";
+/// How often the reconnect poll looks for the pedal while a link is down.
+const RECONNECT_POLL: Duration = Duration::from_secs(2);
+
+/// Serial session as seen by the UI thread.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SerialLink {
+    #[default]
+    Down,
+    /// Session thread started, handshake not done yet.
+    Starting,
+    Up,
+}
+
+/// What a serial session's `Disconnected` event means.
+#[derive(Debug, PartialEq, Eq)]
+enum SerialEnd {
+    /// From a session that was already replaced or torn down: ignore.
+    Stale,
+    /// Open/handshake failed: serial stays down, MIDI is left alone.
+    OpenFailed,
+    /// A live session died (cable pulled, I/O error): the pedal is gone.
+    Lost,
+}
+
+/// Both links to the pedal (one USB cable: MIDI + CDC serial). Serial
+/// sessions are numbered so events of a replaced session are ignored.
+#[derive(Debug, Default)]
+struct LinkState {
+    midi: bool,
+    serial: SerialLink,
+    session: u64,
+    /// Last reported poll failure, to avoid logging it every 2 s.
+    last_failure: String,
+}
+
+impl LinkState {
+    /// Fully connected (or the serial handshake is still running).
+    fn healthy(&self) -> bool {
+        self.midi && self.serial != SerialLink::Down
+    }
+
+    /// A new serial session starts; returns its id.
+    fn serial_starting(&mut self) -> u64 {
+        self.session += 1;
+        self.serial = SerialLink::Starting;
+        self.session
+    }
+
+    /// Handshake of session `id` done; false if that session is stale.
+    fn serial_connected(&mut self, id: u64) -> bool {
+        if id != self.session || self.serial == SerialLink::Down {
+            return false;
+        }
+        self.serial = SerialLink::Up;
+        true
+    }
+
+    fn serial_ended(&mut self, id: u64) -> SerialEnd {
+        if id != self.session || self.serial == SerialLink::Down {
+            return SerialEnd::Stale;
+        }
+        let was_up = self.serial == SerialLink::Up;
+        self.serial = SerialLink::Down;
+        if was_up {
+            SerialEnd::Lost
+        } else {
+            SerialEnd::OpenFailed
+        }
+    }
+
+    /// Both links dropped (pedal gone, or manual reconnect). The running
+    /// session, if any, becomes stale.
+    fn drop_all(&mut self) {
+        self.midi = false;
+        self.serial = SerialLink::Down;
+        self.session += 1;
+    }
+
+    /// True when `failure` differs from the last one (worth logging).
+    fn note_failure(&mut self, failure: &str) -> bool {
+        if self.last_failure == failure {
+            return false;
+        }
+        self.last_failure = failure.to_string();
+        true
+    }
+}
 
 /// Thread-safe holder for the MIDI output connection to the pedal.
 #[derive(Clone, Default)]
@@ -81,6 +168,13 @@ impl MidiEngine {
             }
         }
         result
+    }
+
+    /// Drops the connection (pedal gone or reconnecting).
+    fn close(&self) {
+        if let Some(conn) = self.lock().take() {
+            conn.close();
+        }
     }
 
     /// Sends Bank Select (CC0) + Program Change on MIDI channel 1.
@@ -286,6 +380,11 @@ impl PresetNames {
         }
     }
 
+    /// True once any preset name has been read (names survive reconnects).
+    fn loaded(&self) -> bool {
+        self.lock().iter().any(|m| !m.name.is_empty())
+    }
+
     fn set_query(&self, query: &str) {
         *self.query.lock().unwrap_or_else(|e| e.into_inner()) = query.to_string();
     }
@@ -388,6 +487,10 @@ fn record_value(ui: &AppWindow, amp: &mut AmpSync, index: usize, value: f32) {
 /// (which runs in the UI thread, but must be `Send` to get there).
 #[derive(Clone, Default)]
 struct SyncCtx {
+    /// MIDI output (program changes, amp CCs, tuner).
+    midi: MidiEngine,
+    /// State of both links; see `poll` / `handle_session_event`.
+    link: Arc<Mutex<LinkState>>,
     names: PresetNames,
     amp: Arc<Mutex<AmpSync>>,
     /// The live serial session; replaced on reconnect.
@@ -419,20 +522,128 @@ impl SyncCtx {
         }
     }
 
+    fn link(&self) -> MutexGuard<'_, LinkState> {
+        self.link.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// (Re)starts the serial session; the previous one ends when its handle
     /// is dropped and releases the port before the new one opens it. Then
-    /// reads the current preset's amp params and all names.
+    /// reads the current preset's amp params, the globals and (once per app
+    /// run: names can't change) all names.
     fn start_serial(&self, ui: slint::Weak<AppWindow>, preset: i32) {
+        let id = self.link().serial_starting();
         let ctx = self.clone();
         let pedal = tonex_serial::Pedal::start(move |event| {
             let ctx = ctx.clone();
-            let _ = ui.upgrade_in_event_loop(move |ui| ctx.handle_event(&ui, event));
+            let _ = ui.upgrade_in_event_loop(move |ui| ctx.handle_session_event(&ui, id, event));
         });
         // Params first: the knobs shouldn't wait for the ~10 s name scan.
         let _ = pedal.request_amp_params((clamp_preset(preset) - 1) as u8);
         let _ = pedal.request_globals();
-        let _ = pedal.request_names();
+        if !self.names.loaded() {
+            let _ = pedal.request_names();
+        }
         *self.serial.lock().unwrap_or_else(|e| e.into_inner()) = Some(pedal);
+    }
+
+    /// Forgets everything learned from the pedal except the preset names,
+    /// so the next session reads it all again from scratch: the pedal may
+    /// be changed while unplugged. Echo guards, dirty baseline, fx mirror
+    /// and global guards are reset; the tuner is off after a power cycle.
+    fn reset_pedal_state(&self, ui: &AppWindow) {
+        self.amp().clear();
+        *self.global_touched.lock().unwrap_or_else(|e| e.into_inner()) = [None; 2];
+        ui.set_preset_dirty(false);
+        ui.set_preset_level_known(false);
+        ui.set_tuner_active(false);
+    }
+
+    /// Reconnect step (startup, every `RECONNECT_POLL` while not healthy,
+    /// and the manual button): connects MIDI if it is down, and starts a
+    /// serial session if serial is down and a candidate port exists.
+    fn poll(&self, ui: &AppWindow) {
+        let (midi, serial) = {
+            let l = self.link();
+            (l.midi, l.serial)
+        };
+        if !midi {
+            match self.midi.try_connect() {
+                Ok(name) => {
+                    eprintln!("MIDI connected: {name}");
+                    let mut l = self.link();
+                    l.midi = true;
+                    l.last_failure.clear();
+                }
+                Err(e) => {
+                    if self.link().note_failure(&e) {
+                        eprintln!("MIDI connect failed: {e} (retrying)");
+                    }
+                }
+            }
+        }
+        if serial == SerialLink::Down && tonex_serial::port_available() {
+            self.start_serial(ui.as_weak(), ui.get_preset());
+        }
+        self.show_link(ui);
+    }
+
+    /// The pedal is gone (or a manual reconnect): drops both links; the
+    /// poll brings them back.
+    fn lose_pedal(&self, ui: &AppWindow, why: &str) {
+        let was_up = {
+            let mut l = self.link();
+            let was_up = l.midi || l.serial != SerialLink::Down;
+            l.drop_all();
+            was_up
+        };
+        if was_up {
+            eprintln!("TONEX link lost: {why}; reconnecting");
+        }
+        self.midi.close();
+        // Dropping the handle ends the old session thread (its events are
+        // stale now) and frees the port for the next one.
+        *self.serial.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.reset_pedal_state(ui);
+        self.show_link(ui);
+    }
+
+    fn show_link(&self, ui: &AppWindow) {
+        let healthy = self.link().healthy();
+        ui.set_connected(healthy);
+        ui.set_reconnecting(!healthy);
+        ui.set_status_text(if healthy { STATUS_UP } else { STATUS_RECONNECTING }.into());
+    }
+
+    /// Events of serial session `id`: connection changes update the link
+    /// state; events of a stale session are dropped.
+    fn handle_session_event(&self, ui: &AppWindow, id: u64, event: Event) {
+        match event {
+            Event::Connected(port) => {
+                if self.link().serial_connected(id) {
+                    eprintln!("TONEX serial session on {port}");
+                    self.link().last_failure.clear();
+                }
+            }
+            Event::Disconnected(reason) => {
+                let end = self.link().serial_ended(id);
+                match end {
+                    SerialEnd::Stale => {}
+                    SerialEnd::OpenFailed => {
+                        *self.serial.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        if self.link().note_failure(&reason) {
+                            eprintln!("TONEX serial open failed: {reason} (retrying)");
+                        }
+                        self.show_link(ui);
+                    }
+                    SerialEnd::Lost => self.lose_pedal(ui, &format!("serial session ended: {reason}")),
+                }
+            }
+            other => {
+                if id == self.link().session {
+                    self.handle_event(ui, other);
+                }
+            }
+        }
     }
 
     fn request_amp_params(&self, preset: i32) {
@@ -459,10 +670,8 @@ impl SyncCtx {
     /// Runs in the UI thread for every event from the serial session.
     fn handle_event(&self, ui: &AppWindow, event: Event) {
         match event {
-            Event::Connected(port) => eprintln!("TONEX serial session on {port}"),
-            Event::Disconnected(reason) => {
-                eprintln!("TONEX serial session ended: {reason} (press Reconnect to retry)")
-            }
+            // Link changes are handled in `handle_session_event`.
+            Event::Connected(_) | Event::Disconnected(_) => {}
             Event::Names(Ok(names)) => {
                 *self.names.lock() = names;
                 show_list(ui, &self.names);
@@ -615,16 +824,6 @@ impl SyncCtx {
     }
 }
 
-fn show_connected(ui: &AppWindow, _port_name: &str) {
-    ui.set_connected(true);
-    ui.set_status_text(STATUS_UP.into());
-}
-
-fn show_disconnected(ui: &AppWindow) {
-    ui.set_connected(false);
-    ui.set_status_text(STATUS_DOWN.into());
-}
-
 /// Desktop-entry id (`tx-open-studio.desktop`). GNOME on Wayland matches the
 /// window's app_id against .desktop basenames to pick the dock/taskbar icon;
 /// X11 shells use WM_CLASS the same way.
@@ -649,8 +848,8 @@ fn select_backend() -> Result<(), slint::PlatformError> {
 fn main() -> Result<(), slint::PlatformError> {
     select_backend()?;
     let ui = AppWindow::new()?;
-    let engine = MidiEngine::default();
     let ctx = SyncCtx::default();
+    let engine = ctx.midi.clone();
 
     ui.set_preset(DEFAULT_PRESET);
     let cab_names: Vec<slint::SharedString> = (1..=fx::CAB_MODELS).map(|n| format!("Cab {n}").into()).collect();
@@ -667,14 +866,20 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    match engine.try_connect() {
-        Ok(name) => show_connected(&ui, &name),
-        Err(e) => {
-            eprintln!("MIDI connect failed: {e}");
-            show_disconnected(&ui);
-        }
+    // Connect now (pedal present: same as a normal start), then keep
+    // polling while any link is down (no pedal: sits in RECONNECTING).
+    ctx.poll(&ui);
+    let reconnect_timer = slint::Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        let ctx = ctx.clone();
+        reconnect_timer.start(slint::TimerMode::Repeated, RECONNECT_POLL, move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if !ctx.link().healthy() {
+                ctx.poll(&ui);
+            }
+        });
     }
-    ctx.start_serial(ui.as_weak(), ui.get_preset());
 
     {
         let ui_weak = ui.as_weak();
@@ -689,8 +894,7 @@ fn main() -> Result<(), slint::PlatformError> {
             // The pedal loads the preset's own amp settings.
             ctx.amp().clear();
             if let Err(e) = engine.send_preset(preset) {
-                eprintln!("MIDI send failed: {e}");
-                show_disconnected(&ui);
+                ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
             }
             ctx.request_amp_params(preset);
         });
@@ -719,8 +923,8 @@ fn main() -> Result<(), slint::PlatformError> {
                     record_value(&ui, &mut amp, knob.param_index(), v);
                 }
                 Err(e) => {
-                    eprintln!("MIDI send failed: {e}");
-                    show_disconnected(&ui);
+                    drop(amp);
+                    ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
                 }
             }
         });
@@ -729,12 +933,12 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let engine = engine.clone();
+        let ctx = ctx.clone();
         ui.on_tuner_toggled(move |on| {
             let Some(ui) = ui_weak.upgrade() else { return };
             if let Err(e) = engine.send_cc(TUNER_CC, tuner_cc_value(on)) {
-                eprintln!("MIDI send failed: {e}");
                 ui.set_tuner_active(!on);
-                show_disconnected(&ui);
+                ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
             }
         });
     }
@@ -810,22 +1014,14 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ui_weak = ui.as_weak();
-        let engine = engine.clone();
         let ctx = ctx.clone();
+        // Manual reconnect: drop both links and poll right away. No program
+        // change: the pedal's current preset wins and arrives from the
+        // serial state reply (CurrentPreset).
         ui.on_reconnect(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            ctx.amp().clear();
-            ui.set_preset_dirty(false);
-            ctx.start_serial(ui_weak.clone(), ui.get_preset());
-            match engine.try_connect() {
-                // No program change here: the pedal's current preset wins
-                // and arrives from the serial state reply (CurrentPreset).
-                Ok(name) => show_connected(&ui, &name),
-                Err(e) => {
-                    eprintln!("MIDI connect failed: {e}");
-                    show_disconnected(&ui);
-                }
-            }
+            ctx.lose_pedal(&ui, "reconnect requested");
+            ctx.poll(&ui);
         });
     }
 
@@ -891,5 +1087,56 @@ mod tests {
         assert!(preset_matches(141, &meta, "  drive  bank 46 "));
         assert!(!preset_matches(141, &meta, "dg clean"));
         assert!(!preset_matches(141, &meta, "45c"));
+    }
+
+    #[test]
+    fn link_state_normal_start() {
+        let mut l = LinkState::default();
+        assert!(!l.healthy());
+        l.midi = true;
+        let id = l.serial_starting();
+        assert!(l.healthy(), "handshake running counts as connected");
+        assert!(l.serial_connected(id));
+        assert_eq!(l.serial, SerialLink::Up);
+    }
+
+    #[test]
+    fn link_state_open_failure_keeps_midi() {
+        let mut l = LinkState { midi: true, ..Default::default() };
+        let id = l.serial_starting();
+        assert_eq!(l.serial_ended(id), SerialEnd::OpenFailed);
+        assert!(l.midi);
+        assert!(!l.healthy());
+    }
+
+    #[test]
+    fn link_state_lost_session_and_stale_events() {
+        let mut l = LinkState { midi: true, ..Default::default() };
+        let id = l.serial_starting();
+        assert!(l.serial_connected(id));
+        assert_eq!(l.serial_ended(id), SerialEnd::Lost);
+        // A second end of the same session is not reported twice.
+        assert_eq!(l.serial_ended(id), SerialEnd::Stale);
+
+        // Torn down (or manual reconnect): the old session's events are stale.
+        let old = l.serial_starting();
+        l.drop_all();
+        assert!(!l.midi);
+        assert!(!l.serial_connected(old));
+        assert_eq!(l.serial_ended(old), SerialEnd::Stale);
+
+        // A replaced session can't take over the new one.
+        let a = l.serial_starting();
+        let b = l.serial_starting();
+        assert_eq!(l.serial_ended(a), SerialEnd::Stale);
+        assert!(l.serial_connected(b));
+    }
+
+    #[test]
+    fn link_state_logs_each_failure_once() {
+        let mut l = LinkState::default();
+        assert!(l.note_failure("TONEX MIDI port not found"));
+        assert!(!l.note_failure("TONEX MIDI port not found"));
+        assert!(l.note_failure("other"));
     }
 }

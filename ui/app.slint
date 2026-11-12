@@ -644,7 +644,11 @@ export component AppWindow inherits Window {
     // 150 list rows: bank number, character badge, name (empty until names load).
     in property <[PresetRow]> preset-names;
     in property <bool> connected: false;
-    in property <string> status-text: "MIDI: PEDAL NOT CONNECTED";
+    // A link is down and the app is polling for the pedal (amber LED).
+    in property <bool> reconnecting: false;
+    in property <string> status-text: "RECONNECTING…";
+    // Step blink of the amber LED (0.5 s), only while reconnecting.
+    property <bool> led-dim: false;
     // Connected MIDI output port ("" when disconnected), shown in the status bar.
     // Current preset modified since it was loaded (set/cleared from Rust).
     in property <bool> preset-dirty: false;
@@ -796,6 +800,14 @@ export component AppWindow inherits Window {
     function select-tab(n: int) {
         root.tab = n;
         main-keys.focus();
+    }
+
+    Timer {
+        interval: 500ms;
+        running: root.reconnecting && !root.connected;
+        triggered => {
+            root.led-dim = !root.led-dim;
+        }
     }
 
     Timer {
@@ -2239,14 +2251,18 @@ export component AppWindow inherits Window {
 
                     VerticalLayout {
                         alignment: center;
-                        // Green when connected, dark gray otherwise.
+                        // Green when connected, blinking amber while
+                        // reconnecting, dark gray otherwise.
                         Rectangle {
+                            property <bool> amber: !root.connected && root.reconnecting;
                             width: 6px;
                             height: 6px;
                             border-radius: 3px;
-                            background: root.connected ? Theme.ok : Theme.led-off;
-                            drop-shadow-blur: root.connected ? 6px : 0px;
-                            drop-shadow-color: root.connected ? Theme.ok.with-alpha(0.9) : transparent;
+                            background: root.connected ? Theme.ok : (self.amber ? Theme.accent : Theme.led-off);
+                            opacity: self.amber && root.led-dim ? 0.25 : 1;
+                            drop-shadow-blur: root.connected || self.amber ? 6px : 0px;
+                            drop-shadow-color: root.connected ? Theme.ok.with-alpha(0.9)
+                                : (self.amber ? Theme.accent.with-alpha(0.9) : transparent);
                         }
                     }
 

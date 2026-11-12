@@ -103,8 +103,8 @@
 //!   (-15..15 dB), 10 = main volume (-40..+3 dB); both default 0 dB.
 //! - Write: there is no single-global message; Builty resends the whole
 //!   config blob (type 0x0206 header + received body with values patched).
-//!   Implemented in `global_write_request`, unverified on hardware, and
-//!   opt-in in main.rs.
+//!   Implemented in `global_write_request`; verified on hardware (no side
+//!   effects observed) and enabled unconditionally in main.rs.
 //!
 //! A `Pedal` session thread owns the port for as long as the app is
 //! connected: it answers our requests (names, params, writes) over the same
@@ -1046,8 +1046,8 @@ impl Pedal {
     }
 
     /// Writes one global (`G_INPUT_TRIM` / `G_MAIN_VOLUME`) by sending the
-    /// last global config read back with that value changed. See the
-    /// module docs: unverified on hardware.
+    /// last global config read back with that value changed. Verified on
+    /// hardware.
     pub fn set_global(&self, index: usize, value: f32) -> Result<(), String> {
         if index >= GLOBALS_COUNT {
             return Err(format!("global index {index} out of range"));

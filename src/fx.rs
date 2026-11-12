@@ -38,6 +38,43 @@ const P_COMP_GAIN: usize = 8;
 /// Attack, 1..51 ms (default 14).
 const P_COMP_ATTACK: usize = 9;
 
+// Noise gate (Builty enum 0..=4).
+/// 0 pre / 1 post amp (Builty "NG POST", default 0).
+const P_GATE_POST: usize = 0;
+const P_GATE_ENABLE: usize = 1;
+/// Threshold, -100..0 dB (default -64).
+const P_GATE_THRESHOLD: usize = 2;
+/// Release, 5..500 ms (default 20).
+const P_GATE_RELEASE: usize = 3;
+/// Depth, -100..-20 dB (default -60).
+const P_GATE_DEPTH: usize = 4;
+
+// Cabinet (inside the amp block; Builty enum 24..=33; 23 "CABINET_UNKNOWN"
+// is left alone).
+/// Cab type: 0 Tone Model (captured cab), 1 VIR, 2 Off. Order from Builty's
+/// `TonexCabinetTypes` enum and its web UI; its own header comment (and
+/// brunothesatellite, reading a different index) claim the reverse.
+const P_CAB_TYPE: usize = 24;
+const CAB_TYPES: usize = 3;
+/// VIR cabinet model, 0..=10 (select; names unknown, shown as 1..11).
+const P_CAB_MODEL: usize = 25;
+const CAB_MODELS: usize = 11;
+/// VIR resonance 0..10.
+const P_CAB_RESO: usize = 26;
+/// Mic 1 type: 0 Condenser, 1 Dynamic, 2 Ribbon (Builty MIDI map).
+const P_CAB_MIC1: usize = 27;
+/// Mic 1 position X / Z, 0..10.
+const P_CAB_MIC1_X: usize = 28;
+const P_CAB_MIC1_Z: usize = 29;
+const P_CAB_MIC2: usize = 30;
+/// Mic 2 X: Builty lists 0..2 (likely a copy slip; mic 1 X is 0..10), 0..10
+/// used here.
+const P_CAB_MIC2_X: usize = 31;
+const P_CAB_MIC2_Z: usize = 32;
+/// Mic blend, -100..100.
+const P_CAB_BLEND: usize = 33;
+const MIC_TYPES: usize = 3;
+
 // Modulation (Builty enum 63..=93).
 const P_MOD_POST: usize = 63;
 const P_MOD_ENABLE: usize = 64;
@@ -99,6 +136,21 @@ pub enum FxControl {
     ModDivision,
     /// n-th knob (0..=3) of the selected modulation model.
     ModKnob(u8),
+    GateEnable,
+    GatePost,
+    GateThreshold,
+    GateRelease,
+    GateDepth,
+    CabType,
+    CabModel,
+    CabReso,
+    CabMic1,
+    CabMic1X,
+    CabMic1Z,
+    CabMic2,
+    CabMic2X,
+    CabMic2Z,
+    CabBlend,
 }
 
 /// Which card a parameter belongs to.
@@ -108,6 +160,8 @@ pub enum Card {
     Reverb,
     Comp,
     Mod,
+    Gate,
+    Cab,
 }
 
 /// Selected (0-based) model per card, for per-model parameter indices.
@@ -149,6 +203,21 @@ impl FxControl {
             33 => ModSync,
             34 => ModDivision,
             35..=38 => ModKnob((id - 35) as u8),
+            40 => GateEnable,
+            41 => GatePost,
+            42 => GateThreshold,
+            43 => GateRelease,
+            44 => GateDepth,
+            50 => CabType,
+            51 => CabModel,
+            52 => CabReso,
+            53 => CabMic1,
+            54 => CabMic1X,
+            55 => CabMic1Z,
+            56 => CabMic2,
+            57 => CabMic2X,
+            58 => CabMic2Z,
+            59 => CabBlend,
             _ => return None,
         })
     }
@@ -194,6 +263,21 @@ impl FxControl {
                 }
                 i
             }
+            GatePost => P_GATE_POST,
+            GateEnable => P_GATE_ENABLE,
+            GateThreshold => P_GATE_THRESHOLD,
+            GateRelease => P_GATE_RELEASE,
+            GateDepth => P_GATE_DEPTH,
+            CabType => P_CAB_TYPE,
+            CabModel => P_CAB_MODEL,
+            CabReso => P_CAB_RESO,
+            CabMic1 => P_CAB_MIC1,
+            CabMic1X => P_CAB_MIC1_X,
+            CabMic1Z => P_CAB_MIC1_Z,
+            CabMic2 => P_CAB_MIC2,
+            CabMic2X => P_CAB_MIC2_X,
+            CabMic2Z => P_CAB_MIC2_Z,
+            CabBlend => P_CAB_BLEND,
         })
     }
 
@@ -207,6 +291,9 @@ impl FxControl {
             }
             CompEnable | CompPost | CompThreshold | CompGain | CompAttack => Card::Comp,
             ModEnable | ModPost | ModModel | ModSync | ModDivision | ModKnob(_) => Card::Mod,
+            GateEnable | GatePost | GateThreshold | GateRelease | GateDepth => Card::Gate,
+            CabType | CabModel | CabReso | CabMic1 | CabMic1X | CabMic1Z | CabMic2 | CabMic2X | CabMic2Z
+            | CabBlend => Card::Cab,
         }
     }
 
@@ -228,14 +315,29 @@ fn comp_range() -> std::ops::Range<usize> {
     P_COMP_POST..P_COMP_ATTACK + 1
 }
 
+fn gate_range() -> std::ops::Range<usize> {
+    P_GATE_POST..P_GATE_DEPTH + 1
+}
+
+fn cab_range() -> std::ops::Range<usize> {
+    P_CAB_TYPE..P_CAB_BLEND + 1
+}
+
 fn mod_range() -> std::ops::Range<usize> {
     P_MOD_POST..MOD_END
 }
 
 /// Card owning parameter `index`, if any.
 pub fn card_of(index: usize) -> Option<Card> {
-    [(Card::Delay, delay_range()), (Card::Reverb, reverb_range()), (Card::Comp, comp_range()), (Card::Mod, mod_range())]
-        .into_iter()
+    [
+        (Card::Delay, delay_range()),
+        (Card::Reverb, reverb_range()),
+        (Card::Comp, comp_range()),
+        (Card::Mod, mod_range()),
+        (Card::Gate, gate_range()),
+        (Card::Cab, cab_range()),
+    ]
+    .into_iter()
         .find(|(_, r)| r.contains(&index))
         .map(|(c, _)| c)
 }
@@ -273,6 +375,18 @@ fn reverb_section_ok(raw: &[f32]) -> bool {
 
 fn comp_section_ok(raw: &[f32]) -> bool {
     raw.len() >= comp_range().end && is_switch(raw[P_COMP_POST]) && is_switch(raw[P_COMP_ENABLE])
+}
+
+fn gate_section_ok(raw: &[f32]) -> bool {
+    raw.len() >= gate_range().end && is_switch(raw[P_GATE_POST]) && is_switch(raw[P_GATE_ENABLE])
+}
+
+fn cab_section_ok(raw: &[f32]) -> bool {
+    raw.len() >= cab_range().end
+        && is_index(raw[P_CAB_TYPE], CAB_TYPES)
+        && is_index(raw[P_CAB_MODEL], CAB_MODELS)
+        && is_index(raw[P_CAB_MIC1], MIC_TYPES)
+        && is_index(raw[P_CAB_MIC2], MIC_TYPES)
 }
 
 fn mod_section_ok(raw: &[f32]) -> bool {
@@ -315,6 +429,8 @@ impl FxMirror {
             (Card::Reverb, reverb_section_ok(raw), reverb_range()),
             (Card::Comp, comp_section_ok(raw), comp_range()),
             (Card::Mod, mod_section_ok(raw), mod_range()),
+            (Card::Gate, gate_section_ok(raw), gate_range()),
+            (Card::Cab, cab_section_ok(raw), cab_range()),
         ];
         for (card, ok, range) in sections {
             if !ok {
@@ -473,6 +589,47 @@ pub fn refresh(ui: &AppWindow, m: &FxMirror, card: Card) {
                 }
             }
         }
+        Card::Gate => {
+            if let Some(v) = on(P_GATE_ENABLE) {
+                ui.set_gate_enabled(v);
+            }
+            if let Some(v) = on(P_GATE_POST) {
+                ui.set_gate_post(v);
+            }
+            if let Some(v) = m.get(P_GATE_THRESHOLD) {
+                ui.set_gate_threshold(snap(v, (-100.0, 0.0, 1.0)));
+            }
+            if let Some(v) = m.get(P_GATE_RELEASE) {
+                ui.set_gate_release(snap(v, (5.0, 500.0, 1.0)));
+            }
+            if let Some(v) = m.get(P_GATE_DEPTH) {
+                ui.set_gate_depth(snap(v, (-100.0, -20.0, 1.0)));
+            }
+        }
+        Card::Cab => {
+            let pick = |i: usize, n: usize, set: fn(&AppWindow, i32)| {
+                if let Some(x) = model_of(m.get(i), n) {
+                    set(ui, x as i32);
+                }
+            };
+            pick(P_CAB_TYPE, CAB_TYPES, AppWindow::set_cab_type);
+            pick(P_CAB_MODEL, CAB_MODELS, AppWindow::set_cab_model);
+            pick(P_CAB_MIC1, MIC_TYPES, AppWindow::set_cab_mic1);
+            pick(P_CAB_MIC2, MIC_TYPES, AppWindow::set_cab_mic2);
+            let knobs: [(usize, (f32, f32, f32), fn(&AppWindow, f32)); 6] = [
+                (P_CAB_RESO, TEN, AppWindow::set_cab_reso),
+                (P_CAB_MIC1_X, TEN, AppWindow::set_cab_mic1_x),
+                (P_CAB_MIC1_Z, TEN, AppWindow::set_cab_mic1_z),
+                (P_CAB_MIC2_X, TEN, AppWindow::set_cab_mic2_x),
+                (P_CAB_MIC2_Z, TEN, AppWindow::set_cab_mic2_z),
+                (P_CAB_BLEND, (-100.0, 100.0, 1.0), AppWindow::set_cab_blend),
+            ];
+            for (i, spec, set) in knobs {
+                if let Some(v) = m.get(i) {
+                    set(ui, snap(v, spec));
+                }
+            }
+        }
     }
 }
 
@@ -516,21 +673,34 @@ mod tests {
         assert_eq!(card_of(5), Some(Card::Comp));
         assert_eq!(card_of(10), None);
         assert_eq!(card_of(20), None);
+        // Gate 0..=4, cabinet 24..=33; amp knobs/enable stay outside.
+        assert_eq!(GateThreshold.param_index(m(0, 0, 0)), Some(2));
+        assert_eq!(CabType.param_index(m(0, 0, 0)), Some(24));
+        assert_eq!(CabBlend.param_index(m(0, 0, 0)), Some(33));
+        assert_eq!(card_of(0), Some(Card::Gate));
+        assert_eq!(card_of(4), Some(Card::Gate));
+        assert_eq!(card_of(24), Some(Card::Cab));
+        assert_eq!(card_of(33), Some(Card::Cab));
+        for amp in [11, 13, 16, 18, 20, 21, 23, 34, 35] {
+            assert_eq!(card_of(amp), None, "index {amp}");
+        }
     }
 
     #[test]
     fn ids_roundtrip_and_cards() {
-        for id in (0..=8).chain(10..=16).chain(20..=24).chain(30..=38) {
+        for id in (0..=8).chain(10..=16).chain(20..=24).chain(30..=38).chain(40..=44).chain(50..=59) {
             let c = FxControl::from_id(id).unwrap();
             let card = match id {
                 0..=8 => Card::Delay,
                 10..=16 => Card::Reverb,
                 20..=24 => Card::Comp,
-                _ => Card::Mod,
+                30..=38 => Card::Mod,
+                40..=44 => Card::Gate,
+                _ => Card::Cab,
             };
             assert_eq!(c.card(), card);
         }
-        for id in [9, 17, 25, 39] {
+        for id in [9, 17, 25, 39, 45, 60] {
             assert_eq!(FxControl::from_id(id), None);
         }
     }
@@ -544,13 +714,20 @@ mod tests {
         raw[P_COMP_POST] = 1.0;
         raw[P_MOD_MODEL] = 4.0;
         raw[MOD_BLOCKS[4].0 + 1] = 17.0;
+        raw[P_GATE_ENABLE] = 1.0;
+        raw[P_CAB_TYPE] = 1.0;
+        raw[P_CAB_MODEL] = 10.0;
+        raw[P_CAB_MIC2] = 2.0;
         raw
     }
 
     #[test]
     fn loads_plausible_sections() {
         let mut m = FxMirror::default();
-        assert_eq!(m.load(&plausible_raw()), [Card::Delay, Card::Reverb, Card::Comp, Card::Mod]);
+        assert_eq!(
+            m.load(&plausible_raw()),
+            [Card::Delay, Card::Reverb, Card::Comp, Card::Mod, Card::Gate, Card::Cab]
+        );
         let idx = FxControl::DelayTime.param_index(Models { delay: 1, ..Models::default() }).unwrap();
         assert_eq!(m.get(idx), Some(320.0));
     }
@@ -561,8 +738,9 @@ mod tests {
         raw[P_DELAY_MODEL] = 2.5;
         let mut m = FxMirror::default();
         raw[MOD_BLOCKS[2].0] = 0.5;
-        assert_eq!(m.load(&raw), [Card::Reverb, Card::Comp]);
-        assert_eq!(m.load(&raw[..80]), [Card::Reverb, Card::Comp]);
+        raw[P_CAB_MODEL] = 11.0; // out of 0..=10
+        assert_eq!(m.load(&raw), [Card::Reverb, Card::Comp, Card::Gate]);
+        assert_eq!(m.load(&raw[..80]), [Card::Reverb, Card::Comp, Card::Gate]);
         assert!(m.load(&[]).is_empty());
     }
 

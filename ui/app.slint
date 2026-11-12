@@ -301,7 +301,11 @@ component StateButton inherits Rectangle {
 component Stepper inherits Rectangle {
     in property <[string]> options;
     in-out property <int> index;
+    // false: shown dimmed, arrows inactive.
+    in property <bool> enabled: true;
     callback picked(int);
+
+    opacity: root.enabled ? 1 : 0.45;
 
     height: 26px;
     min-width: 60px;
@@ -324,6 +328,7 @@ component Stepper inherits Rectangle {
                 vertical-alignment: center;
             }
             prev-ta := TouchArea {
+                enabled: root.enabled;
                 mouse-cursor: root.index > 0 ? pointer : default;
                 clicked => {
                     if (root.index > 0) {
@@ -354,6 +359,7 @@ component Stepper inherits Rectangle {
                 vertical-alignment: center;
             }
             next-ta := TouchArea {
+                enabled: root.enabled;
                 mouse-cursor: root.index < root.options.length - 1 ? pointer : default;
                 clicked => {
                     if (root.index < root.options.length - 1) {
@@ -370,7 +376,7 @@ export component AppWindow inherits Window {
     title: "TX Open Studio";
     icon: @image-url("../assets/icon.png");
     preferred-width: 960px;
-    preferred-height: 1020px;
+    preferred-height: 1180px;
     min-width: 780px;
     min-height: 600px;
     background: Theme.bg;
@@ -455,6 +461,37 @@ export component AppWindow inherits Window {
     in-out property <float> mod-k2: 0;
     in-out property <float> mod-k3: 5;
     in-out property <float> mod-k4: 5;
+
+    // Noise Gate / Cabinet (pedal units; see fx.rs). fx-changed ids:
+    // 40 gate on, 41 gate post, 42 threshold, 43 release, 44 depth,
+    // 50 cab type, 51 VIR cab model, 52 reso, 53 mic 1, 54 mic 1 X,
+    // 55 mic 1 Z, 56 mic 2, 57 mic 2 X, 58 mic 2 Z, 59 blend.
+    in-out property <bool> gate-enabled: true;
+    in-out property <bool> gate-post: false;
+    in-out property <float> gate-threshold: -64;
+    in-out property <float> gate-release: 20;
+    in-out property <float> gate-depth: -60;
+    // 0 Tone Model, 1 VIR, 2 Off.
+    in-out property <int> cab-type: 0;
+    in-out property <int> cab-model: 0;
+    in-out property <int> cab-mic1: 0;
+    in-out property <int> cab-mic2: 0;
+    in-out property <float> cab-reso: 0;
+    in-out property <float> cab-mic1-x: 0;
+    in-out property <float> cab-mic1-z: 0;
+    in-out property <float> cab-mic2-x: 0;
+    in-out property <float> cab-mic2-z: 0;
+    in-out property <float> cab-blend: 0;
+    // Chip state derived from cab-type, and the type to restore when the
+    // chip turns the cabinet back on.
+    property <bool> cab-on: true;
+    property <int> cab-last-on: 0;
+    changed cab-type => {
+        root.cab-on = root.cab-type != 2;
+        if (root.cab-type != 2) {
+            root.cab-last-on = root.cab-type;
+        }
+    }
 
     // Global (pedal-wide) levels in dB. id 0 input trim, 1 master volume.
     in-out property <float> global-trim: 0;
@@ -814,6 +851,216 @@ export component AppWindow inherits Window {
                                 unit: " dB";
                                 value <=> root.global-volume;
                                 edited(v) => { root.global-changed(1, v); }
+                            }
+                        }
+                    }
+                }
+
+                // Noise Gate + Cabinet, side by side (same FX card layout as
+                // below; written and read over USB serial, see fx.rs).
+                HorizontalLayout {
+                    vertical-stretch: 0;
+                    spacing: 14px;
+
+                    // Noise Gate card
+                    Rectangle {
+                        // Hard 50/50, as for the other FX rows.
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        preferred-width: 0px;
+                        clip: true;
+                        background: Theme.surface;
+                        border-color: Theme.border;
+                        border-width: 1px;
+                        border-radius: 12px;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+                            alignment: start;
+
+                            HorizontalLayout {
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Noise Gate";
+                                    color: Theme.ink;
+                                    font-size: 15px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                OnOffChip {
+                                    on <=> root.gate-enabled;
+                                    toggled(on) => { root.fx-changed(40, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                StateButton {
+                                    on <=> root.gate-post;
+                                    on-text: "Post amp";
+                                    off-text: "Pre amp";
+                                    toggled(on) => { root.fx-changed(41, on ? 1 : 0); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Knob {
+                                    label: "Threshold";
+                                    size: 40px;
+                                    min-value: -100;
+                                    max-value: 0;
+                                    step: 1;
+                                    decimals: 0;
+                                    default-value: -64;
+                                    unit: " dB";
+                                    value <=> root.gate-threshold;
+                                    edited(v) => { root.fx-changed(42, v); }
+                                }
+                                Knob {
+                                    label: "Release";
+                                    size: 40px;
+                                    min-value: 5;
+                                    max-value: 500;
+                                    step: 1;
+                                    decimals: 0;
+                                    default-value: 20;
+                                    unit: " ms";
+                                    value <=> root.gate-release;
+                                    edited(v) => { root.fx-changed(43, v); }
+                                }
+                                Knob {
+                                    label: "Depth";
+                                    size: 40px;
+                                    min-value: -100;
+                                    max-value: -20;
+                                    step: 1;
+                                    decimals: 0;
+                                    default-value: -60;
+                                    unit: " dB";
+                                    value <=> root.gate-depth;
+                                    edited(v) => { root.fx-changed(44, v); }
+                                }
+                            }
+                        }
+                    }
+
+                    // Cabinet card. The chip switches the cab off (type 2) or
+                    // back to the last non-off type; VIR controls are active
+                    // only in VIR mode (dimmed otherwise, layout unchanged).
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        preferred-width: 0px;
+                        clip: true;
+                        background: Theme.surface;
+                        border-color: Theme.border;
+                        border-width: 1px;
+                        border-radius: 12px;
+
+                        property <bool> vir: root.cab-type == 1;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+                            alignment: start;
+
+                            HorizontalLayout {
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "Cabinet";
+                                    color: Theme.ink;
+                                    font-size: 15px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                                OnOffChip {
+                                    on <=> root.cab-on;
+                                    toggled(on) => {
+                                        root.cab-type = on ? root.cab-last-on : 2;
+                                        root.fx-changed(50, root.cab-type);
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                Stepper {
+                                    horizontal-stretch: 2;
+                                    options: ["Tone Model", "VIR", "Off"];
+                                    index <=> root.cab-type;
+                                    picked(i) => { root.fx-changed(50, i); }
+                                }
+                                Stepper {
+                                    enabled: vir;
+                                    options: ["Cab 1", "Cab 2", "Cab 3", "Cab 4", "Cab 5", "Cab 6", "Cab 7", "Cab 8", "Cab 9", "Cab 10", "Cab 11"];
+                                    index <=> root.cab-model;
+                                    picked(i) => { root.fx-changed(51, i); }
+                                }
+                                Stepper {
+                                    enabled: vir;
+                                    options: ["M1 Cond", "M1 Dyn", "M1 Rbn"];
+                                    index <=> root.cab-mic1;
+                                    picked(i) => { root.fx-changed(53, i); }
+                                }
+                                Stepper {
+                                    enabled: vir;
+                                    options: ["M2 Cond", "M2 Dyn", "M2 Rbn"];
+                                    index <=> root.cab-mic2;
+                                    picked(i) => { root.fx-changed(56, i); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 2px;
+                                Knob {
+                                    label: "Reso";
+                                    size: 34px;
+                                    enabled: vir;
+                                    default-value: 0;
+                                    value <=> root.cab-reso;
+                                    edited(v) => { root.fx-changed(52, v); }
+                                }
+                                Knob {
+                                    label: "M1 X";
+                                    size: 34px;
+                                    enabled: vir;
+                                    default-value: 0;
+                                    value <=> root.cab-mic1-x;
+                                    edited(v) => { root.fx-changed(54, v); }
+                                }
+                                Knob {
+                                    label: "M1 Z";
+                                    size: 34px;
+                                    enabled: vir;
+                                    default-value: 0;
+                                    value <=> root.cab-mic1-z;
+                                    edited(v) => { root.fx-changed(55, v); }
+                                }
+                                Knob {
+                                    label: "M2 X";
+                                    size: 34px;
+                                    enabled: vir;
+                                    default-value: 0;
+                                    value <=> root.cab-mic2-x;
+                                    edited(v) => { root.fx-changed(57, v); }
+                                }
+                                Knob {
+                                    label: "M2 Z";
+                                    size: 34px;
+                                    enabled: vir;
+                                    default-value: 0;
+                                    value <=> root.cab-mic2-z;
+                                    edited(v) => { root.fx-changed(58, v); }
+                                }
+                                Knob {
+                                    label: "Blend";
+                                    size: 34px;
+                                    enabled: vir;
+                                    min-value: -100;
+                                    max-value: 100;
+                                    step: 1;
+                                    decimals: 0;
+                                    default-value: 0;
+                                    value <=> root.cab-blend;
+                                    edited(v) => { root.fx-changed(59, v); }
+                                }
                             }
                         }
                     }

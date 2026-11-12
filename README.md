@@ -53,13 +53,14 @@ The pedal needs a firmware with IK editor support. The MIDI CC map assumes the p
 
 ### Prebuilt packages (no toolchain needed)
 
-Grab the `.rpm` or `.deb` from the [latest release](https://github.com/mroldzeppelin/tx-open-studio/releases/latest) and install it:
+One command, straight from the [latest release](https://github.com/mroldzeppelin/tx-open-studio/releases/latest):
 
 ```sh
 # Fedora
-sudo dnf install ./tx-open-studio-*.x86_64.rpm
+sudo dnf install https://github.com/mroldzeppelin/tx-open-studio/releases/latest/download/tx-open-studio-latest.x86_64.rpm
 # Debian / Ubuntu
-sudo apt install ./tx-open-studio_*_amd64.deb
+curl -LO https://github.com/mroldzeppelin/tx-open-studio/releases/latest/download/tx-open-studio-latest_amd64.deb
+sudo apt install ./tx-open-studio-latest_amd64.deb
 ```
 
 The package installs the app, the desktop entry, the icons and the udev rule, and reloads udev — plug in the pedal and launch.

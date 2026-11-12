@@ -646,6 +646,9 @@ export component AppWindow inherits Window {
     in property <bool> connected: false;
     // A link is down and the app is polling for the pedal (amber LED).
     in property <bool> reconnecting: false;
+    // The pedal's serial port may not be opened (udev rule missing):
+    // steady red LED, the status text explains.
+    in property <bool> no-access: false;
     in property <string> status-text: "RECONNECTING…";
     // Step blink of the amber LED (0.5 s), only while reconnecting.
     property <bool> led-dim: false;
@@ -2252,17 +2255,20 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         alignment: center;
                         // Green when connected, blinking amber while
-                        // reconnecting, dark gray otherwise.
+                        // reconnecting, steady red without port access,
+                        // dark gray otherwise.
                         Rectangle {
                             property <bool> amber: !root.connected && root.reconnecting;
+                            property <bool> red: root.no-access;
+                            property <color> lit: root.connected ? Theme.ok
+                                : (self.red ? Theme.error : (self.amber ? Theme.accent : Theme.led-off));
                             width: 6px;
                             height: 6px;
                             border-radius: 3px;
-                            background: root.connected ? Theme.ok : (self.amber ? Theme.accent : Theme.led-off);
+                            background: self.lit;
                             opacity: self.amber && root.led-dim ? 0.25 : 1;
-                            drop-shadow-blur: root.connected || self.amber ? 6px : 0px;
-                            drop-shadow-color: root.connected ? Theme.ok.with-alpha(0.9)
-                                : (self.amber ? Theme.accent.with-alpha(0.9) : transparent);
+                            drop-shadow-blur: root.connected || self.amber || self.red ? 6px : 0px;
+                            drop-shadow-color: root.connected || self.amber || self.red ? self.lit.with-alpha(0.9) : transparent;
                         }
                     }
 

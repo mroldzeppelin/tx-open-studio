@@ -709,9 +709,14 @@ struct Link {
 }
 
 impl Link {
-    fn open(path: &Path) -> Result<Self, String> {
-        let mut port = SerialPort::open(path, BAUD_RATE)
-            .map_err(|e| format!("open {}: {e}", path.display()))?;
+    fn open(path: &Path) -> Result<Self, OpenFailure> {
+        let mut port = SerialPort::open(path, BAUD_RATE).map_err(|e| {
+            if e.kind() == ErrorKind::PermissionDenied {
+                OpenFailure::NoAccess(path.to_path_buf())
+            } else {
+                OpenFailure::Other(format!("open {}: {e}", path.display()))
+            }
+        })?;
         port.set_read_timeout(READ_POLL)
             .and_then(|_| port.set_write_timeout(Duration::from_secs(1)))
             .map_err(|e| format!("configure {}: {e}", path.display()))?;
@@ -893,6 +898,9 @@ pub enum Event {
     Connected(String),
     /// The session ended (open failed, unplugged, I/O error).
     Disconnected(String),
+    /// Opening the port (path) failed with "permission denied"; always
+    /// followed by `Disconnected`.
+    NoAccess(String),
     /// Result of `Pedal::request_names`.
     Names(Result<Vec<PresetMeta>, String>),
     /// The lone per-preset float after the name (`BA 01 88 <f32>`), assumed
@@ -998,8 +1006,11 @@ impl Pedal {
                     report_state(state.as_deref(), &on_event, debug_enabled());
                     link
                 }
-                Err(e) => {
-                    on_event(Event::Disconnected(e));
+                Err(failure) => {
+                    if let OpenFailure::NoAccess(path) = &failure {
+                        on_event(Event::NoAccess(path.display().to_string()));
+                    }
+                    on_event(Event::Disconnected(failure.message()));
                     return;
                 }
             };
@@ -1056,25 +1067,59 @@ impl Pedal {
     }
 }
 
-/// Opens the first candidate port that answers the handshake.
+/// Why no session could be opened.
+#[derive(Debug, PartialEq, Eq)]
+enum OpenFailure {
+    /// The device node exists but may not be opened (EACCES): typically
+    /// the udev rule granting access is not installed.
+    NoAccess(PathBuf),
+    Other(String),
+}
+
+impl From<String> for OpenFailure {
+    fn from(e: String) -> Self {
+        OpenFailure::Other(e)
+    }
+}
+
+impl OpenFailure {
+    fn message(&self) -> String {
+        match self {
+            OpenFailure::NoAccess(path) => format!("open {}: permission denied", path.display()),
+            OpenFailure::Other(e) => e.clone(),
+        }
+    }
+}
+
+/// Combines the per-port failures of one open attempt: if none of the
+/// ports could be used and one of them refused access, that is the
+/// actionable problem to report; otherwise all messages.
+fn combine_failures(failures: Vec<OpenFailure>) -> OpenFailure {
+    if let Some(i) = failures.iter().position(|f| matches!(f, OpenFailure::NoAccess(_))) {
+        return failures.into_iter().nth(i).expect("index from position");
+    }
+    OpenFailure::Other(failures.iter().map(OpenFailure::message).collect::<Vec<_>>().join("; "))
+}
+
 /// Opens the first candidate port that answers the handshake. Also returns
 /// the state reply (if one arrived) for the current preset.
-fn open_any() -> Result<(Link, PathBuf, Option<Vec<u8>>), String> {
+fn open_any() -> Result<(Link, PathBuf, Option<Vec<u8>>), OpenFailure> {
     let ports = candidate_ports();
     if ports.is_empty() {
-        return Err("no /dev/ttyACM* port found".into());
+        return Err(OpenFailure::Other("no /dev/ttyACM* port found".into()));
     }
-    let mut errors = Vec::new();
+    let mut failures = Vec::new();
     for path in ports {
         match open_pedal(&path, Instant::now() + HANDSHAKE_TIMEOUT * 2) {
             Ok((link, state)) => return Ok((link, path, state)),
-            Err(e) => errors.push(format!("{}: {e}", path.display())),
+            Err(OpenFailure::Other(e)) => failures.push(OpenFailure::Other(format!("{}: {e}", path.display()))),
+            Err(denied) => failures.push(denied),
         }
     }
-    Err(errors.join("; "))
+    Err(combine_failures(failures))
 }
 
-fn open_pedal(path: &Path, deadline: Instant) -> Result<(Link, Option<Vec<u8>>), String> {
+fn open_pedal(path: &Path, deadline: Instant) -> Result<(Link, Option<Vec<u8>>), OpenFailure> {
     let mut link = Link::open(path)?;
 
     // Handshake. Replies are not strictly required, but the pedal expects
@@ -1082,7 +1127,7 @@ fn open_pedal(path: &Path, deadline: Instant) -> Result<(Link, Option<Vec<u8>>),
     link.send(&HELLO_CMD)?;
     let hello = link.read_frame(HANDSHAKE_TIMEOUT, deadline)?;
     if hello.is_none() {
-        return Err("no reply to hello (not a TONEX Pedal?)".into());
+        return Err(OpenFailure::Other("no reply to hello (not a TONEX Pedal?)".into()));
     }
     link.send(&REQUEST_STATE_CMD)?;
     // Keep the state reply (type 0x0201): it carries the current preset.
@@ -1383,6 +1428,20 @@ impl<F: Fn(Event)> Session<'_, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_failures_report_permission_problem_first() {
+        let denied = PathBuf::from("/dev/ttyACM1");
+        let f = combine_failures(vec![
+            OpenFailure::Other("/dev/ttyACM0: no reply to hello".into()),
+            OpenFailure::NoAccess(denied.clone()),
+        ]);
+        assert_eq!(f, OpenFailure::NoAccess(denied));
+        assert_eq!(f.message(), "open /dev/ttyACM1: permission denied");
+
+        let f = combine_failures(vec![OpenFailure::Other("a".into()), OpenFailure::Other("b".into())]);
+        assert_eq!(f, OpenFailure::Other("a; b".into()));
+    }
 
     #[test]
     fn crc_matches_protocol_md_hello() {

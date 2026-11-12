@@ -18,6 +18,15 @@ const DEFAULT_PRESET: i32 = 43;
 const CLIENT_NAME: &str = "tx-open-studio";
 const STATUS_UP: &str = "TONEX PEDAL CONNECTED";
 const STATUS_RECONNECTING: &str = "RECONNECTING…";
+/// Status bar text for `status`.
+fn status_text(status: &LinkStatus) -> String {
+    match status {
+        LinkStatus::Connected => STATUS_UP.into(),
+        LinkStatus::NoAccess(path) => format!("NO ACCESS TO {path} — INSTALL THE UDEV RULE (SEE README)"),
+        LinkStatus::Reconnecting => STATUS_RECONNECTING.into(),
+    }
+}
+
 /// How often the reconnect poll looks for the pedal while a link is down.
 const RECONNECT_POLL: Duration = Duration::from_secs(2);
 
@@ -51,12 +60,34 @@ struct LinkState {
     session: u64,
     /// Last reported poll failure, to avoid logging it every 2 s.
     last_failure: String,
+    /// Serial device node the last open attempt was not allowed to open
+    /// (udev rule missing). Cleared on connect or when the node is gone.
+    no_access: Option<String>,
+}
+
+/// What the status bar shows.
+#[derive(Debug, PartialEq, Eq)]
+enum LinkStatus {
+    Connected,
+    /// The pedal's serial port exists but we may not open it: the most
+    /// actionable problem, shown even when MIDI works.
+    NoAccess(String),
+    Reconnecting,
 }
 
 impl LinkState {
     /// Fully connected (or the serial handshake is still running).
     fn healthy(&self) -> bool {
         self.midi && self.serial != SerialLink::Down
+    }
+
+    fn status(&self) -> LinkStatus {
+        match &self.no_access {
+            // Kept while a retry runs, so the 2 s polls don't flicker.
+            Some(path) if self.serial != SerialLink::Up => LinkStatus::NoAccess(path.clone()),
+            _ if self.healthy() => LinkStatus::Connected,
+            _ => LinkStatus::Reconnecting,
+        }
     }
 
     /// A new serial session starts; returns its id.
@@ -72,6 +103,7 @@ impl LinkState {
             return false;
         }
         self.serial = SerialLink::Up;
+        self.no_access = None;
         true
     }
 
@@ -581,8 +613,13 @@ impl SyncCtx {
                 }
             }
         }
-        if serial == SerialLink::Down && tonex_serial::port_available() {
-            self.start_serial(ui.as_weak(), ui.get_preset());
+        if serial == SerialLink::Down {
+            if tonex_serial::port_available() {
+                self.start_serial(ui.as_weak(), ui.get_preset());
+            } else {
+                // Node gone (unplugged): the access problem is moot.
+                self.link().no_access = None;
+            }
         }
         self.show_link(ui);
     }
@@ -608,10 +645,11 @@ impl SyncCtx {
     }
 
     fn show_link(&self, ui: &AppWindow) {
-        let healthy = self.link().healthy();
-        ui.set_connected(healthy);
-        ui.set_reconnecting(!healthy);
-        ui.set_status_text(if healthy { STATUS_UP } else { STATUS_RECONNECTING }.into());
+        let status = self.link().status();
+        ui.set_connected(status == LinkStatus::Connected);
+        ui.set_reconnecting(status == LinkStatus::Reconnecting);
+        ui.set_no_access(matches!(status, LinkStatus::NoAccess(_)));
+        ui.set_status_text(status_text(&status).into());
     }
 
     /// Events of serial session `id`: connection changes update the link
@@ -622,6 +660,11 @@ impl SyncCtx {
                 if self.link().serial_connected(id) {
                     eprintln!("TONEX serial session on {port}");
                     self.link().last_failure.clear();
+                }
+            }
+            Event::NoAccess(path) => {
+                if id == self.link().session {
+                    self.link().no_access = Some(path);
                 }
             }
             Event::Disconnected(reason) => {
@@ -671,7 +714,7 @@ impl SyncCtx {
     fn handle_event(&self, ui: &AppWindow, event: Event) {
         match event {
             // Link changes are handled in `handle_session_event`.
-            Event::Connected(_) | Event::Disconnected(_) => {}
+            Event::Connected(_) | Event::Disconnected(_) | Event::NoAccess(_) => {}
             Event::Names(Ok(names)) => {
                 *self.names.lock() = names;
                 show_list(ui, &self.names);
@@ -1138,5 +1181,27 @@ mod tests {
         assert!(l.note_failure("TONEX MIDI port not found"));
         assert!(!l.note_failure("TONEX MIDI port not found"));
         assert!(l.note_failure("other"));
+    }
+
+    #[test]
+    fn link_status_prioritizes_missing_access() {
+        let mut l = LinkState { midi: true, ..Default::default() };
+        let id = l.serial_starting();
+        assert_eq!(l.status(), LinkStatus::Connected);
+        l.no_access = Some("/dev/ttyACM0".into());
+        assert_eq!(l.serial_ended(id), SerialEnd::OpenFailed);
+        assert_eq!(l.status(), LinkStatus::NoAccess("/dev/ttyACM0".into()));
+        assert_eq!(
+            status_text(&l.status()),
+            "NO ACCESS TO /dev/ttyACM0 — INSTALL THE UDEV RULE (SEE README)"
+        );
+        // Retrying keeps the hint (no flicker); once the rule is installed
+        // the next session connects and the hint goes away.
+        let id = l.serial_starting();
+        assert_eq!(l.status(), LinkStatus::NoAccess("/dev/ttyACM0".into()));
+        assert!(l.serial_connected(id));
+        assert_eq!(l.status(), LinkStatus::Connected);
+        l.drop_all();
+        assert_eq!(l.status(), LinkStatus::Reconnecting);
     }
 }

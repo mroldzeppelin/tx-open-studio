@@ -40,6 +40,8 @@ export global Theme {
     // OLED display: preset name ink and the display's black edge.
     out property <color> oled-ink: #ece2cf;
     out property <color> oled-edge: #000000;
+    // Soft warm glow behind the OLED preset name.
+    out property <color> oled-glow: #ffcf8a;
     // Knob ring track, cap gradient and pointer.
     out property <color> knob-track: #2a2d33;
     out property <color> knob-cap-top: #3d4149;
@@ -83,6 +85,49 @@ export global CharacterColors {
         if (kind == 6) { return #3d78b8; } // bass
         if (kind == 7) { return #8a7a50; } // acoustic
         return Theme.muted;
+    }
+}
+
+// OLED text with a faked glow: four faint copies offset by 1.5px behind
+// the real text (Slint Text has no shadow). Elides like the real text.
+component GlowText inherits Rectangle {
+    in property <string> text;
+    in property <color> ink;
+    in property <color> glow;
+    in property <float> glow-alpha: 0.15;
+    in property <length> font-size: 12px;
+    in property <int> font-weight: 400;
+    in property <string> font-family;
+    in property <length> letter-spacing: 0px;
+
+    for o in [{ dx: -1.5px, dy: 0px }, { dx: 1.5px, dy: 0px }, { dx: 0px, dy: -1.5px }, { dx: 0px, dy: 1.5px }]: Text {
+        visible: root.glow-alpha > 0;
+        x: label.x + o.dx;
+        y: label.y + o.dy;
+        width: label.width;
+        height: label.height;
+        text: root.text;
+        color: root.glow.with-alpha(root.glow-alpha);
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        font-family: root.font-family;
+        letter-spacing: root.letter-spacing;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+
+    HorizontalLayout {
+        label := Text {
+            min-width: 0px;
+            text: root.text;
+            color: root.ink;
+            font-size: root.font-size;
+            font-weight: root.font-weight;
+            font-family: root.font-family;
+            letter-spacing: root.letter-spacing;
+            overflow: elide;
+            wrap: no-wrap;
+        }
     }
 }
 
@@ -221,7 +266,10 @@ component TabButton inherits HwButton {
                 drop-shadow-color: root.led-on ? Theme.ok.with-alpha(0.9) : transparent;
             }
         }
+        // Elides instead of widening the tab, so nine tabs always share
+        // the row equally.
         Text {
+            min-width: 0px;
             text: root.label;
             color: root.selected ? Theme.accent : (root.hover ? Theme.hw-ink-hover : Theme.status-ink);
             font-size: 9px;
@@ -229,6 +277,7 @@ component TabButton inherits HwButton {
             font-family: Theme.mono-font;
             letter-spacing: 0.4px;
             vertical-alignment: center;
+            overflow: elide;
             wrap: no-wrap;
         }
     }
@@ -496,18 +545,23 @@ component StateButton inherits HwButton {
 }
 
 // Compact selector: ‹ label › cycling through `options` (no wrap-around).
+// The value slot has a fixed width (`value-width`, sized per instance to the
+// longest option; mono 10px = 6px per character), so the stepper never
+// changes width with its value.
 component Stepper inherits Rectangle {
     in property <[string]> options;
     in-out property <int> index;
     // false: shown dimmed, arrows inactive.
     in property <bool> enabled: true;
+    in property <length> value-width: 56px;
     callback picked(int);
 
     opacity: root.enabled ? 1 : 0.45;
 
     height: 26px;
-    min-width: 60px;
-    horizontal-stretch: 1;
+    min-width: 44px + root.value-width;
+    max-width: 44px + root.value-width;
+    horizontal-stretch: 0;
     border-radius: 7px;
     border-width: 1px;
     border-color: Theme.border;
@@ -537,10 +591,11 @@ component Stepper inherits Rectangle {
             }
         }
         Text {
-            horizontal-stretch: 1;
+            width: root.value-width;
             text: root.index >= 0 && root.index < root.options.length ? root.options[root.index] : "?";
             color: Theme.ink;
-            font-size: 11px;
+            font-size: 10px;
+            font-family: Theme.mono-font;
             horizontal-alignment: center;
             vertical-alignment: center;
             overflow: elide;
@@ -804,17 +859,76 @@ export component AppWindow inherits Window {
         padding: root.margin + 1px;
         spacing: 0px;
 
-        // App header.
+        // Brand row: amber mark + name left; model label and the tuner
+        // button right.
         HorizontalLayout {
             padding-left: 16px;
             padding-right: 16px;
-            padding-top: 16px;
+            padding-top: 12px;
+            spacing: 8px;
+
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 2px;
+                    background: Theme.accent;
+                    drop-shadow-blur: 8px;
+                    drop-shadow-color: Theme.accent.with-alpha(0.6);
+                }
+            }
             Text {
-                text: "TX Open Studio";
-                color: Theme.ink;
-                font-size: 20px;
-                font-weight: 700;
+                horizontal-stretch: 1;
+                text: "TX OPEN STUDIO";
+                color: Theme.hw-ink;
+                font-size: 11px;
+                font-weight: 600;
+                letter-spacing: 2px;
                 vertical-alignment: center;
+            }
+            Text {
+                text: "USB-MIDI CONTROLLER";
+                color: Theme.muted;
+                font-size: 9px;
+                font-weight: 500;
+                font-family: Theme.mono-font;
+                letter-spacing: 1.3px;
+                vertical-alignment: center;
+            }
+
+            // Tuner on/off (MIDI CC9). The pedal reports no tuner state, so
+            // this shows what the app set; the OLED label reads TUNER ON.
+            tuner-btn := HwButton {
+                width: 26px;
+                height: 26px;
+                radius: 5px;
+                checked: root.tuner-active;
+                clicked => {
+                    root.tuner-active = !root.tuner-active;
+                    root.tuner-toggled(root.tuner-active);
+                }
+
+                Image {
+                    source: @image-url("../assets/tuner.png");
+                    width: 14px;
+                    height: 14px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    colorize: root.tuner-active ? Theme.accent
+                        : (tuner-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink);
+                }
+                // Amber LED, top-right, while the tuner is on.
+                if root.tuner-active: Rectangle {
+                    x: parent.width - 7px;
+                    y: 3px;
+                    width: 4px;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.accent;
+                    drop-shadow-blur: 5px;
+                    drop-shadow-color: Theme.accent.with-alpha(0.9);
+                }
             }
         }
 
@@ -919,25 +1033,26 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Text {
+                            GlowText {
                                 text: "BANK \{oled.bank < 10 ? "0" : ""}\{oled.bank} • SLOT \{oled.slot}";
-                                color: Theme.accent;
+                                ink: Theme.accent;
+                                glow: Theme.accent;
+                                glow-alpha: 0.16;
                                 font-size: 15px;
                                 font-weight: 600;
                                 font-family: Theme.mono-font;
                                 letter-spacing: 1.8px;
-                                wrap: no-wrap;
                             }
 
                             // Name read over USB serial; muted placeholder
-                            // until names are loaded.
-                            Text {
+                            // (no glow) until names are loaded.
+                            GlowText {
                                 text: root.preset-name == "" ? "Preset \{root.preset}" : root.preset-name;
-                                color: root.preset-name == "" ? Theme.muted : Theme.oled-ink;
+                                ink: root.preset-name == "" ? Theme.muted : Theme.oled-ink;
+                                glow: Theme.oled-glow;
+                                glow-alpha: root.preset-name == "" ? 0 : 0.13;
                                 font-size: 17px;
                                 font-weight: root.preset-name == "" ? 400 : 600;
-                                overflow: elide;
-                                wrap: no-wrap;
                             }
 
                             // Character (gray TONE when the preset names
@@ -955,57 +1070,6 @@ export component AppWindow inherits Window {
                                     text: "EDITED";
                                     tint: Theme.changed;
                                     solid: true;
-                                }
-                            }
-                        }
-
-                        // Tuner on/off (MIDI CC9). The pedal reports no
-                        // tuner state, so this shows what the app set.
-                        VerticalLayout {
-                            alignment: center;
-                            tuner-btn := HwButton {
-                                width: 56px;
-                                height: 56px;
-                                checked: root.tuner-active;
-                                clicked => {
-                                    root.tuner-active = !root.tuner-active;
-                                    root.tuner-toggled(root.tuner-active);
-                                }
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 5px;
-                                    HorizontalLayout {
-                                        alignment: center;
-                                        Image {
-                                            source: @image-url("../assets/tuner.png");
-                                            width: 18px;
-                                            height: 18px;
-                                            colorize: root.tuner-active ? Theme.accent
-                                                : (tuner-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink);
-                                        }
-                                    }
-                                    Text {
-                                        text: "TUNER";
-                                        color: root.tuner-active ? Theme.accent
-                                            : (tuner-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink);
-                                        font-size: 8px;
-                                        font-weight: 600;
-                                        font-family: Theme.mono-font;
-                                        letter-spacing: 1.2px;
-                                        horizontal-alignment: center;
-                                    }
-                                }
-                                // Amber LED, top-right, while the tuner is on.
-                                if root.tuner-active: Rectangle {
-                                    x: parent.width - 10px;
-                                    y: 5px;
-                                    width: 5px;
-                                    height: 5px;
-                                    border-radius: 2.5px;
-                                    background: Theme.accent;
-                                    drop-shadow-blur: 6px;
-                                    drop-shadow-color: Theme.accent.with-alpha(0.9);
                                 }
                             }
                         }
@@ -1131,6 +1195,10 @@ export component AppWindow inherits Window {
 
                                     // Placeholder (TextInput has none).
                                     Text {
+                                        x: 0px;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: left;
                                         visible: search-input.text == "";
                                         text: "Search name, bank or tag";
                                         color: Theme.muted;
@@ -1148,6 +1216,10 @@ export component AppWindow inherits Window {
                                     // Left/Right move the text cursor and never
                                     // reach the window's preset keys.
                                     search-input := TextInput {
+                                        x: 0px;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: left;
                                         color: Theme.ink;
                                         font-size: 11px;
                                         font-weight: 500;
@@ -1686,8 +1758,7 @@ export component AppWindow inherits Window {
                             spacing: 6px;
                             ModuleTitle { text: "CABINET"; }
                             Stepper {
-                                horizontal-stretch: 0;
-                                width: 112px;
+                                value-width: 66px; // "Tone Model"
                                 height: 24px;
                                 options: ["Tone Model", "VIR", "Off"];
                                 index <=> root.cab-type;
@@ -1705,8 +1776,10 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             height: 24px;
                             spacing: 6px;
+                            alignment: start;
                             Stepper {
                                 enabled: vir;
+                                value-width: 42px; // "Cab 63"
                                 height: 24px;
                                 options: root.cab-model-names;
                                 index <=> root.cab-model;
@@ -1714,6 +1787,7 @@ export component AppWindow inherits Window {
                             }
                             Stepper {
                                 enabled: vir;
+                                value-width: 48px; // "M1 Cond"
                                 height: 24px;
                                 options: ["M1 Cond", "M1 Dyn", "M1 Rbn"];
                                 index <=> root.cab-mic1;
@@ -1721,6 +1795,7 @@ export component AppWindow inherits Window {
                             }
                             Stepper {
                                 enabled: vir;
+                                value-width: 48px; // "M2 Cond"
                                 height: 24px;
                                 options: ["M2 Cond", "M2 Dyn", "M2 Rbn"];
                                 index <=> root.cab-mic2;
@@ -1820,8 +1895,7 @@ export component AppWindow inherits Window {
                             spacing: 6px;
                             ModuleTitle { text: "MODULATION"; }
                             Stepper {
-                                horizontal-stretch: 0;
-                                width: 96px;
+                                value-width: 48px; // "Tremolo"
                                 height: 24px;
                                 options: ["Chorus", "Tremolo", "Phaser", "Flanger", "Rotary"];
                                 index <=> root.mod-model;
@@ -1866,10 +1940,14 @@ export component AppWindow inherits Window {
                                         font-size: 12px;
                                         horizontal-alignment: center;
                                     }
-                                    Stepper {
-                                        options: root.delay-divisions;
-                                        index <=> root.mod-division;
-                                        picked(i) => { root.fx-changed(34, i); }
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        Stepper {
+                                            value-width: 42px; // "1/32 D"
+                                            options: root.delay-divisions;
+                                            index <=> root.mod-division;
+                                            picked(i) => { root.fx-changed(34, i); }
+                                        }
                                     }
                                 }
                                 if !root.mod-sync: Knob {
@@ -1942,8 +2020,7 @@ export component AppWindow inherits Window {
                             spacing: 6px;
                             ModuleTitle { text: "DELAY"; }
                             Stepper {
-                                horizontal-stretch: 0;
-                                width: 88px;
+                                value-width: 48px; // "Digital"
                                 height: 24px;
                                 options: ["Digital", "Tape"];
                                 index <=> root.dly-model;
@@ -1997,10 +2074,14 @@ export component AppWindow inherits Window {
                                         font-size: 12px;
                                         horizontal-alignment: center;
                                     }
-                                    Stepper {
-                                        options: root.delay-divisions;
-                                        index <=> root.dly-division;
-                                        picked(i) => { root.fx-changed(4, i); }
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        Stepper {
+                                            value-width: 42px; // "1/32 D"
+                                            options: root.delay-divisions;
+                                            index <=> root.dly-division;
+                                            picked(i) => { root.fx-changed(4, i); }
+                                        }
                                     }
                                 }
                                 if !root.dly-sync: Knob {
@@ -2062,8 +2143,7 @@ export component AppWindow inherits Window {
                             spacing: 6px;
                             ModuleTitle { text: "REVERB"; }
                             Stepper {
-                                horizontal-stretch: 0;
-                                width: 100px;
+                                value-width: 54px; // "Spring 1"
                                 height: 24px;
                                 options: ["Spring 1", "Spring 2", "Spring 3", "Spring 4", "Room", "Plate"];
                                 index <=> root.rvb-model;

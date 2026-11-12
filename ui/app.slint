@@ -642,7 +642,6 @@ export component AppWindow inherits Window {
     in property <bool> connected: false;
     in property <string> status-text: "MIDI: PEDAL NOT CONNECTED";
     // Connected MIDI output port ("" when disconnected), shown in the status bar.
-    in property <string> port-name;
     // Current preset modified since it was loaded (set/cleared from Rust).
     in property <bool> preset-dirty: false;
 
@@ -885,16 +884,6 @@ export component AppWindow inherits Window {
                 letter-spacing: 2px;
                 vertical-alignment: center;
             }
-            Text {
-                text: "USB-MIDI CONTROLLER";
-                color: Theme.muted;
-                font-size: 9px;
-                font-weight: 500;
-                font-family: Theme.mono-font;
-                letter-spacing: 1.3px;
-                vertical-alignment: center;
-            }
-
             // Tuner on/off (MIDI CC9). The pedal reports no tuner state, so
             // this shows what the app set; the OLED label reads TUNER ON.
             tuner-btn := HwButton {
@@ -2269,17 +2258,6 @@ export component AppWindow inherits Window {
                         overflow: elide;
                     }
 
-                    Text {
-                        horizontal-stretch: 0;
-                        text: root.port-name;
-                        color: Theme.muted;
-                        font-size: 10px;
-                        font-weight: 500;
-                        font-family: Theme.mono-font;
-                        letter-spacing: 1px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
 
                     VerticalLayout {
                         alignment: center;

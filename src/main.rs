@@ -16,7 +16,8 @@ const MAX_PRESET: i32 = 150;
 /// Shown only until the pedal's state reply tells us its current preset.
 const DEFAULT_PRESET: i32 = 43;
 const CLIENT_NAME: &str = "tx-open-studio";
-const STATUS_DOWN: &str = "Pedal not connected";
+const STATUS_DOWN: &str = "MIDI: PEDAL NOT CONNECTED";
+const STATUS_UP: &str = "MIDI: TONEX PEDAL CONNECTED";
 
 /// Thread-safe holder for the MIDI output connection to the pedal.
 #[derive(Clone, Default)]
@@ -578,12 +579,14 @@ impl SyncCtx {
 
 fn show_connected(ui: &AppWindow, port_name: &str) {
     ui.set_connected(true);
-    ui.set_status_text(format!("Connected: {}", port_name).into());
+    ui.set_status_text(STATUS_UP.into());
+    ui.set_port_name(port_name.into());
 }
 
 fn show_disconnected(ui: &AppWindow) {
     ui.set_connected(false);
     ui.set_status_text(STATUS_DOWN.into());
+    ui.set_port_name("".into());
 }
 
 /// Desktop-entry id (`tx-open-studio.desktop`). GNOME on Wayland matches the

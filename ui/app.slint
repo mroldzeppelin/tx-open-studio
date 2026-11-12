@@ -2,25 +2,55 @@
 
 import { ListView } from "std-widgets.slint";
 
+// "Hardware controller" palette: dark chassis, OLED insets, amber accent.
 export global Theme {
-    out property <color> bg: #141b18;
-    out property <color> surface: #1d2721;
-    out property <color> surface-alt: #18211c;
-    out property <color> soft: #28352c;
-    out property <color> field: #202e25;
-    out property <color> hover: #2b3a2f;
-    out property <color> selected: #304934;
-    out property <color> border: #3a4b3e;
-    out property <color> selected-border: #86b778;
-    out property <color> muted: #a6b6a3;
-    out property <color> ink: #edf3e9;
-    out property <color> secondary-ink: #bed4b2;
-    out property <color> accent: #3e7750;
-    out property <color> accent-hover: #4b8b5e;
-    out property <color> ok: #86b778;
-    out property <color> error: #c05b4d;
-    // Muted warm yellow for "modified" markers.
-    out property <color> changed: #d4a72c;
+    // Page around the chassis (radial: lighter centre, near-black edges).
+    out property <brush> page: @radial-gradient(circle, #17181c 0%, #0a0b0d 70%);
+    out property <color> bg: #0a0b0d;
+    // Chassis body and its vertical sheen.
+    out property <color> body: #141518;
+    out property <color> body-top: #1b1d21;
+    out property <color> body-bottom: #101114;
+    // OLED / inset panels.
+    out property <color> oled: #090a0c;
+    // Bevel highlight line and near-black outer edge.
+    out property <color> bevel: #2c2f36;
+    out property <color> edge: #08090a;
+    // Raised "hw" button gradient, and its pressed (inverted) version.
+    out property <color> hw-top: #2b2e35;
+    out property <color> hw-bottom: #1b1d21;
+    out property <color> hw-pressed-top: #17191c;
+    out property <color> hw-pressed-bottom: #202329;
+    out property <color> hw-ink: #c9ccd3;
+    out property <color> hw-ink-hover: #ffffff;
+    out property <color> surface: #101114;
+    out property <color> surface-alt: #0e0f12;
+    out property <color> soft: #17191c;
+    out property <color> field: #17191c;
+    out property <color> hover: #22252a;
+    out property <color> selected: #1c1e22;
+    out property <color> border: #2a2d33;
+    out property <color> selected-border: #f59e0b;
+    out property <color> muted: #8d929c;
+    out property <color> ink: #d7dae0;
+    out property <color> secondary-ink: #c9ccd3;
+    out property <color> accent: #f59e0b;
+    out property <color> accent-hover: #fbbf24;
+    out property <color> amber-glow: #f59e0b80;
+    // Dark text on solid amber.
+    out property <color> on-accent: #111111;
+    out property <color> ok: #22c55e;
+    out property <color> led-off: #2a2d33;
+    out property <color> error: #ef4444;
+    // "Modified" markers: solid amber.
+    out property <color> changed: #f59e0b;
+    // Status bar strip.
+    out property <color> status-bg: #0c0d0f;
+    out property <color> status-line: #060708;
+    out property <color> status-ink: #a3a8b2;
+    // Monospaced font for technical texts (status bar, values, small
+    // uppercase labels). Switch to "JetBrains Mono" once installed.
+    out property <string> mono-font: "Noto Sans Mono";
 }
 
 // One row of the preset list. `number` is the bank number once the name is
@@ -76,42 +106,80 @@ component CharacterBadge inherits Rectangle {
     }
 }
 
-// Hand-made button: std-widgets don't follow the custom palette well.
-component StyledButton inherits Rectangle {
+// Raised hardware-style button: vertical gradient, near-black edge, top
+// highlight and a hard 2px drop. Pressed (or `checked`) it sinks: darker
+// inverted gradient, no drop, content shifted down 2px. Content goes in as
+// children; `hover` lets it brighten its text.
+component HwButton inherits Rectangle {
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <length> radius: 6px;
+    out property <bool> hover: ta.has-hover;
+    out property <bool> down: ta.pressed || root.checked;
+    property <length> shift: 0px;
+    callback clicked();
+
+    border-radius: root.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    background: @linear-gradient(180deg, Theme.hw-top 0%, Theme.hw-bottom 100%);
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: Theme.edge;
+    opacity: root.enabled ? 1 : 0.4;
+
+    // Top highlight (inset 0 1px 0 rgba(255,255,255,.1)).
+    Rectangle {
+        x: root.radius / 2;
+        y: 1px;
+        width: parent.width - root.radius;
+        height: 1px;
+        background: #ffffff1a;
+        visible: !root.down;
+    }
+
+    Rectangle {
+        y: root.shift;
+        width: parent.width;
+        height: parent.height;
+        @children
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    states [
+        sunk when root.down: {
+            background: @linear-gradient(180deg, Theme.hw-pressed-top 0%, Theme.hw-pressed-bottom 100%);
+            drop-shadow-offset-y: 0px;
+            shift: 2px;
+        }
+    ]
+}
+
+// Text button on the hardware look (std-widgets don't follow the palette).
+component StyledButton inherits HwButton {
     in property <string> text;
     in property <length> font-size: 16px;
     in property <int> font-weight: 600;
     in property <bool> active: false;
-    in property <color> base-color: Theme.soft;
-    callback clicked();
 
-    border-radius: 10px;
-    border-width: 1px;
-    border-color: root.active ? Theme.selected-border : Theme.border;
-    background: ta.pressed ? Theme.selected : (ta.has-hover ? Theme.hover : root.base-color);
-    min-height: 32px;
-    min-width: 40px;
-
-    animate background { duration: 90ms; }
+    min-height: 22px;
+    min-width: 22px;
 
     Text {
         width: parent.width;
         height: parent.height;
         text: root.text;
-        color: root.active ? Theme.ink : Theme.secondary-ink;
+        color: root.active ? Theme.accent : (root.hover ? Theme.hw-ink-hover : Theme.hw-ink);
         font-size: root.font-size;
         font-weight: root.font-weight;
         horizontal-alignment: center;
         vertical-alignment: center;
-    }
-
-    ta := TouchArea {
-        width: parent.width;
-        height: parent.height;
-        mouse-cursor: pointer;
-        clicked => {
-            root.clicked();
-        }
     }
 }
 
@@ -211,7 +279,7 @@ component Knob inherits VerticalLayout {
         text: root.number + root.unit;
         color: Theme.secondary-ink;
         font-size: 12px;
-        font-family: "monospace";
+        font-family: Theme.mono-font;
         horizontal-alignment: center;
         overflow: elide;
         wrap: no-wrap;
@@ -227,7 +295,7 @@ component OnOffChip inherits Rectangle {
     background: chip-ta.pressed ? Theme.selected : (chip-ta.has-hover ? Theme.hover : Theme.soft);
     border-radius: 6px;
     border-width: 1px;
-    border-color: root.on ? Theme.ok : Theme.border;
+    border-color: chip-ta.has-hover ? Theme.bevel : Theme.border;
     animate background { duration: 90ms; }
 
     HorizontalLayout {
@@ -238,17 +306,22 @@ component OnOffChip inherits Rectangle {
         spacing: 6px;
         VerticalLayout {
             alignment: center;
+            // LED: green with glow when on, dark when off.
             Rectangle {
-                width: 7px;
-                height: 7px;
-                border-radius: 3.5px;
-                background: root.on ? Theme.ok : Theme.muted.with-alpha(0.5);
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.on ? Theme.ok : Theme.led-off;
+                drop-shadow-blur: root.on ? 6px : 0px;
+                drop-shadow-color: root.on ? Theme.ok.with-alpha(0.9) : transparent;
             }
         }
         Text {
-            text: root.on ? "On" : "Off";
-            color: root.on ? Theme.ink : Theme.muted;
-            font-size: 11px;
+            text: root.on ? "ON" : "OFF";
+            color: chip-ta.has-hover ? Theme.hw-ink-hover : (root.on ? Theme.ink : Theme.status-ink);
+            font-size: 10px;
+            font-family: Theme.mono-font;
+            letter-spacing: 1px;
             vertical-alignment: center;
         }
     }
@@ -263,7 +336,8 @@ component OnOffChip inherits Rectangle {
 
 // Small two-state button whose caption names the current state
 // ("Pre amp" / "Post amp"); highlighted when `on`.
-component StateButton inherits Rectangle {
+// Latching hardware button: sunk with amber text when `on`.
+component StateButton inherits HwButton {
     in-out property <bool> on;
     in property <string> on-text;
     in property <string> off-text;
@@ -272,28 +346,21 @@ component StateButton inherits Rectangle {
     height: 26px;
     min-width: 32px;
     horizontal-stretch: 1;
-    border-radius: 7px;
-    border-width: 1px;
-    border-color: root.on ? Theme.selected-border : Theme.border;
-    background: sb-ta.pressed ? Theme.selected : (sb-ta.has-hover ? Theme.hover : Theme.field);
-    animate background { duration: 90ms; }
+    checked: root.on;
+    clicked => {
+        root.on = !root.on;
+        root.toggled(root.on);
+    }
 
     Text {
         width: parent.width;
         height: parent.height;
         text: root.on ? root.on-text : root.off-text;
-        color: root.on ? Theme.ink : Theme.secondary-ink;
+        color: root.on ? Theme.accent : (root.hover ? Theme.hw-ink-hover : Theme.hw-ink);
         font-size: 11px;
         horizontal-alignment: center;
         vertical-alignment: center;
         overflow: elide;
-    }
-    sb-ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            root.on = !root.on;
-            root.toggled(root.on);
-        }
     }
 }
 
@@ -379,7 +446,7 @@ export component AppWindow inherits Window {
     preferred-height: 1180px;
     min-width: 780px;
     min-height: 600px;
-    background: Theme.bg;
+    background: Theme.page;
 
     in-out property <int> preset: 43;
     in property <string> preset-name;
@@ -390,7 +457,9 @@ export component AppWindow inherits Window {
     // 150 list rows: bank number, character badge, name (empty until names load).
     in property <[PresetRow]> preset-names;
     in property <bool> connected: false;
-    in property <string> status-text: "Pedal not connected";
+    in property <string> status-text: "MIDI: PEDAL NOT CONNECTED";
+    // Connected MIDI output port ("" when disconnected), shown in the status bar.
+    in property <string> port-name;
     // Current preset modified since it was loaded (set/cleared from Rust).
     in property <bool> preset-dirty: false;
 
@@ -511,8 +580,40 @@ export component AppWindow inherits Window {
         list.ensure-selected-visible();
     }
 
+    // Chassis: rounded body with near-black edge and an inner bevel ring
+    // plus a brighter top line, inset from the window by a page margin.
+    property <length> margin: 10px;
+    Rectangle {
+        x: root.margin;
+        y: root.margin;
+        width: parent.width - 2 * root.margin;
+        height: parent.height - 2 * root.margin;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Theme.edge;
+        background: @linear-gradient(180deg, Theme.body-top 0%, Theme.body 38%, Theme.body-bottom 100%);
+
+        Rectangle {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
+            border-radius: 11px;
+            border-width: 1px;
+            border-color: Theme.bevel.with-alpha(0.5);
+        }
+        Rectangle {
+            x: 10px;
+            y: 1px;
+            width: parent.width - 20px;
+            height: 1px;
+            background: Theme.bevel;
+        }
+    }
+
+    // Content sits inside the chassis border.
     VerticalLayout {
-        padding: 0px;
+        padding: root.margin + 1px;
         spacing: 0px;
 
         // App header, full width: keeps both columns' tops level.
@@ -592,8 +693,10 @@ export component AppWindow inherits Window {
                                 x: 0px;
                                 width: parent.width;
                                 height: parent.height;
-                                border-radius: 8px;
-                                background: is-selected ? Theme.selected : (row-ta.has-hover ? Theme.hover : transparent);
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: is-selected ? Theme.bevel : transparent;
+                                background: is-selected ? Theme.selected : (row-ta.has-hover ? Theme.soft : transparent);
 
                                 // number · [CHARACTER] · name; before names
                                 // load only the bare preset number.
@@ -606,9 +709,10 @@ export component AppWindow inherits Window {
                                         horizontal-stretch: 0;
                                         min-width: 20px;
                                         text: row.number == "" ? number : row.number;
-                                        color: is-selected ? Theme.ink : Theme.muted;
-                                        font-size: 13px;
-                                        font-weight: is-selected ? 600 : 400;
+                                        color: is-selected ? Theme.accent : Theme.muted;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        font-family: Theme.mono-font;
                                         vertical-alignment: center;
                                     }
                                     Text {
@@ -671,6 +775,7 @@ export component AppWindow inherits Window {
                                 color: Theme.muted;
                                 font-size: 11px;
                                 font-weight: 600;
+                                font-family: Theme.mono-font;
                                 letter-spacing: 2px;
                                 vertical-alignment: center;
                             }
@@ -693,20 +798,24 @@ export component AppWindow inherits Window {
                                 }
                             }
                             // Current preset edited since it was loaded.
+                            // Solid amber chip with dark text.
                             if root.preset-dirty: Rectangle {
-                                background: Theme.changed.with-alpha(0.12);
-                                border-radius: 6px;
+                                background: Theme.changed;
+                                border-radius: 3px;
                                 border-width: 1px;
-                                border-color: Theme.changed.with-alpha(0.7);
+                                border-color: Theme.changed;
                                 HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-top: 3px;
-                                    padding-bottom: 3px;
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    padding-top: 2px;
+                                    padding-bottom: 2px;
                                     Text {
-                                        text: "Changed";
-                                        color: Theme.changed;
-                                        font-size: 11px;
+                                        text: "EDITED";
+                                        color: Theme.on-accent;
+                                        font-size: 10px;
+                                        font-weight: 600;
+                                        font-family: Theme.mono-font;
+                                        letter-spacing: 0.5px;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -718,15 +827,15 @@ export component AppWindow inherits Window {
                             // Tuner on/off (MIDI CC9). The pedal reports no
                             // tuner state, so this shows what the app set.
                             // Square icon button (tuning fork), flush right.
-                            Rectangle {
+                            tuner-btn := HwButton {
                                 horizontal-stretch: 0;
                                 width: 32px;
                                 height: 32px;
-                                border-radius: 7px;
-                                border-width: 1px;
-                                border-color: root.tuner-active ? Theme.selected-border : Theme.border;
-                                background: tuner-ta.pressed ? Theme.selected : (tuner-ta.has-hover ? Theme.hover : Theme.field);
-                                animate background { duration: 90ms; }
+                                checked: root.tuner-active;
+                                clicked => {
+                                    root.tuner-active = !root.tuner-active;
+                                    root.tuner-toggled(root.tuner-active);
+                                }
 
                                 Image {
                                     source: @image-url("../assets/tuner.png");
@@ -734,15 +843,8 @@ export component AppWindow inherits Window {
                                     height: 18px;
                                     x: (parent.width - self.width) / 2;
                                     y: (parent.height - self.height) / 2;
-                                    colorize: root.tuner-active ? Theme.ok : Theme.secondary-ink;
-                                }
-
-                                tuner-ta := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => {
-                                        root.tuner-active = !root.tuner-active;
-                                        root.tuner-toggled(root.tuner-active);
-                                    }
+                                    colorize: root.tuner-active ? Theme.ok
+                                        : (tuner-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink);
                                 }
                             }
                         }
@@ -1600,9 +1702,13 @@ export component AppWindow inherits Window {
             }
         }
 
-        // Status bar
+        // Status bar: LED + status on the left, port name + reconnect right.
         Rectangle {
-            background: Theme.surface-alt;
+            background: Theme.status-bg;
+            // Follows the chassis' rounded bottom corners.
+            border-bottom-left-radius: 11px;
+            border-bottom-right-radius: 11px;
+            clip: true;
 
             VerticalLayout {
                 padding: 0px;
@@ -1610,43 +1716,64 @@ export component AppWindow inherits Window {
 
                 Rectangle {
                     height: 1px;
-                    background: Theme.border;
+                    background: Theme.status-line;
                 }
 
                 HorizontalLayout {
+                    height: 30px;
                     padding-left: 16px;
-                    padding-right: 12px;
-                    padding-top: 8px;
-                    padding-bottom: 8px;
-                    spacing: 10px;
+                    padding-right: 10px;
+                    spacing: 8px;
 
                     VerticalLayout {
                         alignment: center;
+                        // Green when connected, dark gray otherwise.
                         Rectangle {
-                            width: 10px;
-                            height: 10px;
-                            border-radius: 5px;
-                            background: root.connected ? Theme.ok : Theme.error;
+                            width: 6px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: root.connected ? Theme.ok : Theme.led-off;
+                            drop-shadow-blur: root.connected ? 6px : 0px;
+                            drop-shadow-color: root.connected ? Theme.ok.with-alpha(0.9) : transparent;
                         }
                     }
 
                     Text {
                         horizontal-stretch: 1;
                         text: root.status-text;
-                        color: root.connected ? Theme.secondary-ink : Theme.muted;
-                        font-size: 12px;
+                        color: Theme.status-ink;
+                        font-size: 10px;
+                        font-weight: 500;
+                        font-family: Theme.mono-font;
+                        letter-spacing: 1px;
                         vertical-alignment: center;
                         overflow: elide;
                     }
 
-                    StyledButton {
-                        width: 140px;
-                        height: 30px;
-                        text: "Reconnect";
-                        font-size: 12px;
+                    Text {
+                        horizontal-stretch: 0;
+                        text: root.port-name;
+                        color: Theme.muted;
+                        font-size: 10px;
                         font-weight: 500;
-                        clicked => {
-                            root.reconnect();
+                        font-family: Theme.mono-font;
+                        letter-spacing: 1px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        StyledButton {
+                            width: 22px;
+                            height: 22px;
+                            radius: 5px;
+                            text: "⟳";
+                            font-size: 13px;
+                            font-weight: 500;
+                            clicked => {
+                                root.reconnect();
+                            }
                         }
                     }
                 }

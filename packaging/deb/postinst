@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+# Reload udev so the TONEX pedal serial port becomes user-accessible
+# without a reboot (rule: /lib/udev/rules.d/70-tonex-pedal.rules).
+udevadm control --reload-rules || true
+udevadm trigger --subsystem-match=tty || true
+#DEBHELPER#

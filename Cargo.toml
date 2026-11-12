@@ -2,7 +2,8 @@
 name = "tx-open-studio"
 version = "0.1.0"
 edition = "2021"
-description = "Minimalist TONEX preset switcher over USB-MIDI"
+description = "Unofficial desktop editor for the IK Multimedia TONEX Pedal"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 # unstable-winit-030: BackendSelector window-attributes hook, used to set the
@@ -13,3 +14,36 @@ serial2 = "0.2.39"
 
 [build-dependencies]
 slint-build = "1"
+
+# --- Packaging metadata (cargo-deb / cargo-generate-rpm) -------------------
+# Build: `cargo install cargo-deb && cargo deb`
+#        `cargo install cargo-generate-rpm && cargo build --release && cargo generate-rpm`
+
+[package.metadata.deb]
+maintainer = "Artem <12734879+mroldzeppelin@users.noreply.github.com>"
+extended-description = """\
+Unofficial desktop editor for the IK Multimedia TONEX Pedal: preset browsing \
+and switching over USB-MIDI, live parameter editing (amp, gate, compressor, \
+cabinet, modulation, delay, reverb) over USB serial. Not affiliated with \
+IK Multimedia. TONEX is a trademark of IK Multimedia."""
+section = "sound"
+priority = "optional"
+maintainer-scripts = "packaging/deb"
+assets = [
+    ["target/release/tx-open-studio", "usr/bin/", "755"],
+    ["packaging/70-tonex-pedal.rules", "lib/udev/rules.d/", "644"],
+    ["packaging/tx-open-studio.desktop", "usr/share/applications/", "644"],
+    ["assets/icon.png", "usr/share/icons/hicolor/256x256/apps/tx-open-studio.png", "644"],
+    ["assets/icon.svg", "usr/share/icons/hicolor/scalable/apps/tx-open-studio.svg", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/tx-open-studio", dest = "/usr/bin/tx-open-studio", mode = "755" },
+    { source = "packaging/70-tonex-pedal.rules", dest = "/usr/lib/udev/rules.d/70-tonex-pedal.rules", mode = "644" },
+    { source = "packaging/tx-open-studio.desktop", dest = "/usr/share/applications/tx-open-studio.desktop", mode = "644" },
+    { source = "assets/icon.png", dest = "/usr/share/icons/hicolor/256x256/apps/tx-open-studio.png", mode = "644" },
+    { source = "assets/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/tx-open-studio.svg", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/tx-open-studio/LICENSE", mode = "644", doc = true },
+]
+post_install_script = "udevadm control --reload-rules || true; udevadm trigger --subsystem-match=tty || true"

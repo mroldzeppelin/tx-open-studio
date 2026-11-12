@@ -495,11 +495,15 @@ component OnOffChip inherits Rectangle {
             }
         }
         Text {
+            // Fixed slot ("OFF" is wider than "ON"), so the chip never
+            // changes width and shoves its row neighbours.
+            width: 22px;
             text: root.on ? "ON" : "OFF";
             color: chip-ta.has-hover ? Theme.hw-ink-hover : (root.on ? Theme.ink : Theme.status-ink);
             font-size: 10px;
             font-family: Theme.mono-font;
             letter-spacing: 1px;
+            horizontal-alignment: left;
             vertical-alignment: center;
         }
     }

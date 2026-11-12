@@ -203,17 +203,6 @@ struct PresetNames {
     names: Arc<Mutex<Vec<PresetMeta>>>,
 }
 
-/// Display label: the pedal groups presets in banks of 3 (A/B/C), so
-/// preset 125 with name "FULDRV" is shown as "41 FULDRV". With no name the
-/// label is just the preset number ("43").
-fn display_label(preset_num: i32, name: &str) -> String {
-    if name.is_empty() {
-        preset_num.to_string()
-    } else {
-        format!("{} {}", bank_number(preset_num), name)
-    }
-}
-
 fn bank_number(preset_num: i32) -> i32 {
     (clamp_preset(preset_num) - 1) / 3
 }
@@ -259,17 +248,6 @@ impl PresetNames {
             .unwrap_or_default()
     }
 
-    /// Label for the current-preset card, or "" when the name is unknown
-    /// (the UI then falls back to the bare number).
-    fn name_for(&self, preset_num: i32) -> String {
-        let meta = self.meta(preset_num);
-        if meta.name.is_empty() {
-            String::new()
-        } else {
-            display_label(preset_num, &meta.name)
-        }
-    }
-
     fn row(preset_num: i32, meta: &PresetMeta) -> PresetRow {
         let number = if meta.name.is_empty() { preset_num } else { bank_number(preset_num) };
         PresetRow {
@@ -312,10 +290,12 @@ impl PresetNames {
     }
 }
 
-/// Header card: name and character badge of `preset`.
+/// OLED display: name ("" until known; bank/slot are derived in the UI)
+/// and character chip of `preset`.
 fn show_preset_meta(ui: &AppWindow, names: &PresetNames, preset: i32) {
-    ui.set_preset_name(names.name_for(preset).into());
-    let character = names.meta(preset).character;
+    let meta = names.meta(preset);
+    ui.set_preset_name(meta.name.into());
+    let character = meta.character;
     ui.set_preset_character_kind(character_kind(&character));
     ui.set_preset_character(character.into());
 }

@@ -37,6 +37,14 @@ export global Theme {
     out property <color> accent: #f59e0b;
     out property <color> accent-hover: #fbbf24;
     out property <color> amber-glow: #f59e0b80;
+    // OLED display: preset name ink and the display's black edge.
+    out property <color> oled-ink: #ece2cf;
+    out property <color> oled-edge: #000000;
+    // Knob ring track, cap gradient and pointer.
+    out property <color> knob-track: #2a2d33;
+    out property <color> knob-cap-top: #3d4149;
+    out property <color> knob-cap-bottom: #1c1e22;
+    out property <color> knob-pointer: #f2f3f5;
     // Dark text on solid amber.
     out property <color> on-accent: #111111;
     out property <color> ok: #22c55e;
@@ -100,6 +108,36 @@ component CharacterBadge inherits Rectangle {
             color: root.tint.brighter(0.35);
             font-size: root.font-size;
             font-weight: 600;
+            vertical-alignment: center;
+            wrap: no-wrap;
+        }
+    }
+}
+
+// Compact OLED chip: outlined in `tint`, or solid with dark text.
+component OledChip inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: Theme.accent;
+    in property <bool> solid: false;
+
+    horizontal-stretch: 0;
+    background: root.solid ? root.tint : transparent;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: root.solid ? root.tint : root.tint.with-alpha(0.6);
+
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        padding-top: 2px;
+        padding-bottom: 2px;
+        Text {
+            text: root.text;
+            color: root.solid ? Theme.on-accent : root.tint.brighter(0.35);
+            font-size: 9px;
+            font-weight: root.solid ? 600 : 500;
+            font-family: Theme.mono-font;
+            letter-spacing: 0.4px;
             vertical-alignment: center;
             wrap: no-wrap;
         }
@@ -229,23 +267,90 @@ component Knob inherits VerticalLayout {
     HorizontalLayout {
         alignment: center;
 
+        // 270° arc ring (track + amber value arc), raised cap and a white
+        // pointer. Paths use a fixed 100×100 viewbox so everything scales
+        // with `size`; angles: 0° = up, clockwise positive.
         dial := Rectangle {
             width: root.size;
             height: root.size;
-            border-radius: self.width / 2;
-            background: Theme.field;
-            border-width: 1px;
-            border-color: ta.has-hover || ta.pressed ? Theme.muted : Theme.border;
 
-            // Indicator dot on a circle of radius r, positioned via sin/cos.
-            property <length> r: self.width / 2 - 9px;
+            property <float> ring-r: 44;
+            property <length> ring-w: max(2px, root.size * 0.08);
+
+            // Track: full sweep -135° → +135°.
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                stroke: Theme.knob-track;
+                stroke-width: dial.ring-w;
+                MoveTo {
+                    x: 50 + dial.ring-r * sin(-135deg);
+                    y: 50 - dial.ring-r * cos(-135deg);
+                }
+                ArcTo {
+                    x: 50 + dial.ring-r * sin(135deg);
+                    y: 50 - dial.ring-r * cos(135deg);
+                    radius-x: dial.ring-r;
+                    radius-y: dial.ring-r;
+                    large-arc: true;
+                    sweep: true;
+                }
+            }
+            // Value arc: -135° → current value.
+            if root.frac > 0.004: Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                stroke: Theme.accent;
+                stroke-width: dial.ring-w;
+                MoveTo {
+                    x: 50 + dial.ring-r * sin(-135deg);
+                    y: 50 - dial.ring-r * cos(-135deg);
+                }
+                ArcTo {
+                    x: 50 + dial.ring-r * sin(root.sweep);
+                    y: 50 - dial.ring-r * cos(root.sweep);
+                    radius-x: dial.ring-r;
+                    radius-y: dial.ring-r;
+                    large-arc: root.frac > 2 / 3;
+                    sweep: true;
+                }
+            }
+
+            // Cap: lighter top for a domed look; amber glow while dragged.
             Rectangle {
-                width: 6px;
-                height: 6px;
-                border-radius: 3px;
-                background: Theme.selected-border;
-                x: dial.width / 2 + dial.r * sin(root.sweep) - self.width / 2;
-                y: dial.height / 2 - dial.r * cos(root.sweep) - self.height / 2;
+                width: root.size * 0.72;
+                height: self.width;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: self.width / 2;
+                background: @linear-gradient(180deg, Theme.knob-cap-top 0%, Theme.knob-cap-bottom 75%);
+                border-width: 1px;
+                border-color: ta.has-hover || ta.pressed ? Theme.bevel : Theme.edge;
+                drop-shadow-blur: ta.pressed ? 8px : 3px;
+                drop-shadow-offset-y: ta.pressed ? 0px : 1px;
+                drop-shadow-color: ta.pressed ? Theme.amber-glow : #00000099;
+            }
+
+            // Pointer line, rotated with the value.
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                stroke: Theme.knob-pointer;
+                stroke-width: max(1.5px, root.size * 0.045);
+                MoveTo {
+                    x: 50 + 14 * sin(root.sweep);
+                    y: 50 - 14 * cos(root.sweep);
+                }
+                LineTo {
+                    x: 50 + 31 * sin(root.sweep);
+                    y: 50 - 31 * cos(root.sweep);
+                }
             }
 
             opacity: root.enabled ? 1 : 0.55;
@@ -749,12 +854,228 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Right column: current preset header + effect tiles
+            // Right column: preset stage (OLED) + effect tiles
             VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 12px;
 
-                // Header card
+                // Stage: PREV | OLED display | NEXT (wraps 1 ↔ 150).
+                HorizontalLayout {
+                    vertical-stretch: 0;
+                    height: 116px;
+                    spacing: 8px;
+
+                    prev-btn := HwButton {
+                        width: 56px;
+                        clicked => {
+                            root.preset-changed(root.preset <= 1 ? 150 : root.preset - 1);
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text {
+                                text: "‹";
+                                color: prev-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink;
+                                font-size: 24px;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "PREV";
+                                color: prev-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink;
+                                font-size: 9px;
+                                font-weight: 600;
+                                font-family: Theme.mono-font;
+                                letter-spacing: 1.5px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+
+                    // OLED display. Bank/slot in pedal terms: 0-based bank
+                    // (0..49, as in the preset list) plus slot letter.
+                    oled := Rectangle {
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        background: Theme.oled;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: Theme.oled-edge;
+                        clip: true;
+
+                        property <int> bank: floor((root.preset - 1) / 3);
+                        property <string> slot: ["A", "B", "C"][mod(root.preset - 1, 3)];
+
+                        // Inset shadow illusion along the top edge.
+                        Rectangle {
+                            y: 0px;
+                            height: 14px;
+                            background: @linear-gradient(180deg, #000000e6 0%, #00000000 100%);
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 18px;
+                            padding-right: 12px;
+                            spacing: 12px;
+
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                alignment: center;
+                                spacing: 7px;
+
+                                // "● ACTIVE PRESET" (green) / "● TUNER ON" (amber).
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 5px;
+                                            height: 5px;
+                                            border-radius: 2.5px;
+                                            background: root.tuner-active ? Theme.accent : Theme.ok;
+                                            drop-shadow-blur: 6px;
+                                            drop-shadow-color: (root.tuner-active ? Theme.accent : Theme.ok).with-alpha(0.9);
+                                        }
+                                    }
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: root.tuner-active ? "TUNER ON" : "ACTIVE PRESET";
+                                        color: root.tuner-active ? Theme.accent : Theme.muted;
+                                        font-size: 9px;
+                                        font-weight: 500;
+                                        font-family: Theme.mono-font;
+                                        letter-spacing: 1.5px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                Text {
+                                    text: "BANK \{oled.bank < 10 ? "0" : ""}\{oled.bank} • SLOT \{oled.slot}";
+                                    color: Theme.accent;
+                                    font-size: 15px;
+                                    font-weight: 600;
+                                    font-family: Theme.mono-font;
+                                    letter-spacing: 1.8px;
+                                    wrap: no-wrap;
+                                }
+
+                                // Name read over USB serial; muted placeholder
+                                // until names are loaded.
+                                Text {
+                                    text: root.preset-name == "" ? "Preset \{root.preset}" : root.preset-name;
+                                    color: root.preset-name == "" ? Theme.muted : Theme.oled-ink;
+                                    font-size: 17px;
+                                    font-weight: root.preset-name == "" ? 400 : 600;
+                                    overflow: elide;
+                                    wrap: no-wrap;
+                                }
+
+                                // Character (gray TONE when the preset names
+                                // none) + EDITED; fixed height so the display
+                                // doesn't jump when chips come and go.
+                                HorizontalLayout {
+                                    height: 16px;
+                                    alignment: start;
+                                    spacing: 5px;
+                                    if root.preset-name != "": OledChip {
+                                        text: root.preset-character-kind > 0 ? root.preset-character : "TONE";
+                                        tint: CharacterColors.of(root.preset-character-kind);
+                                    }
+                                    if root.preset-dirty: OledChip {
+                                        text: "EDITED";
+                                        tint: Theme.changed;
+                                        solid: true;
+                                    }
+                                }
+                            }
+
+                            // Tuner on/off (MIDI CC9). The pedal reports no
+                            // tuner state, so this shows what the app set.
+                            VerticalLayout {
+                                alignment: center;
+                                tuner-btn := HwButton {
+                                    width: 56px;
+                                    height: 56px;
+                                    checked: root.tuner-active;
+                                    clicked => {
+                                        root.tuner-active = !root.tuner-active;
+                                        root.tuner-toggled(root.tuner-active);
+                                    }
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 5px;
+                                        HorizontalLayout {
+                                            alignment: center;
+                                            Image {
+                                                source: @image-url("../assets/tuner.png");
+                                                width: 18px;
+                                                height: 18px;
+                                                colorize: root.tuner-active ? Theme.accent
+                                                    : (tuner-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink);
+                                            }
+                                        }
+                                        Text {
+                                            text: "TUNER";
+                                            color: root.tuner-active ? Theme.accent
+                                                : (tuner-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink);
+                                            font-size: 8px;
+                                            font-weight: 600;
+                                            font-family: Theme.mono-font;
+                                            letter-spacing: 1.2px;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+                                    // Amber LED, top-right, while the tuner is on.
+                                    if root.tuner-active: Rectangle {
+                                        x: parent.width - 10px;
+                                        y: 5px;
+                                        width: 5px;
+                                        height: 5px;
+                                        border-radius: 2.5px;
+                                        background: Theme.accent;
+                                        drop-shadow-blur: 6px;
+                                        drop-shadow-color: Theme.accent.with-alpha(0.9);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Diagonal glass sheen (no input, so clicks pass through).
+                        Rectangle {
+                            background: @linear-gradient(115deg, #ffffff12 0%, #ffffff04 30%, #ffffff00 30.2%);
+                        }
+                    }
+
+                    next-btn := HwButton {
+                        width: 56px;
+                        clicked => {
+                            root.preset-changed(root.preset >= 150 ? 1 : root.preset + 1);
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text {
+                                text: "›";
+                                color: next-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink;
+                                font-size: 24px;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "NEXT";
+                                color: next-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink;
+                                font-size: 9px;
+                                font-weight: 600;
+                                font-family: Theme.mono-font;
+                                letter-spacing: 1.5px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Temporary row for preset volume and the pedal-wide levels
+                // (moves into the GLOBAL tab in phase 3).
                 Rectangle {
                     vertical-stretch: 0;
                     background: Theme.surface;
@@ -762,200 +1083,58 @@ export component AppWindow inherits Window {
                     border-width: 1px;
                     border-radius: 12px;
 
-                    VerticalLayout {
-                        padding: 18px;
-                        // Tight: top line, name and badge sit close together.
-                        spacing: 2px;
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        spacing: 8px;
 
-                        HorizontalLayout {
-                            spacing: 10px;
-                            Text {
-                                // Pedal terms: 0-based bank (0..49) plus slot letter, e.g. 43 → "14-A".
-                                text: "PRESET \{floor((root.preset - 1) / 3)}-\{["A", "B", "C"][mod(root.preset - 1, 3)]} / 49";
-                                color: Theme.muted;
-                                font-size: 11px;
-                                font-weight: 600;
-                                font-family: Theme.mono-font;
-                                letter-spacing: 2px;
-                                vertical-alignment: center;
-                            }
-                            Rectangle {
-                                background: Theme.soft;
-                                border-radius: 6px;
-                                border-width: 1px;
-                                border-color: Theme.border;
-                                HorizontalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-top: 3px;
-                                    padding-bottom: 3px;
-                                    Text {
-                                        text: "Active";
-                                        color: Theme.secondary-ink;
-                                        font-size: 11px;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                            // Current preset edited since it was loaded.
-                            // Solid amber chip with dark text.
-                            if root.preset-dirty: Rectangle {
-                                background: Theme.changed;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.changed;
-                                HorizontalLayout {
-                                    padding-left: 6px;
-                                    padding-right: 6px;
-                                    padding-top: 2px;
-                                    padding-bottom: 2px;
-                                    Text {
-                                        text: "EDITED";
-                                        color: Theme.on-accent;
-                                        font-size: 10px;
-                                        font-weight: 600;
-                                        font-family: Theme.mono-font;
-                                        letter-spacing: 0.5px;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                            }
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                min-width: 0px;
-                            }
-                            // Tuner on/off (MIDI CC9). The pedal reports no
-                            // tuner state, so this shows what the app set.
-                            // Square icon button (tuning fork), flush right.
-                            tuner-btn := HwButton {
-                                horizontal-stretch: 0;
-                                width: 32px;
-                                height: 32px;
-                                checked: root.tuner-active;
-                                clicked => {
-                                    root.tuner-active = !root.tuner-active;
-                                    root.tuner-toggled(root.tuner-active);
-                                }
-
-                                Image {
-                                    source: @image-url("../assets/tuner.png");
-                                    width: 18px;
-                                    height: 18px;
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    colorize: root.tuner-active ? Theme.ok
-                                        : (tuner-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink);
-                                }
-                            }
+                        // Per-preset output volume (pedal's PRESET VOLUME,
+                        // 0..10; serial section 03, see tonex_serial.rs).
+                        // Dimmed until read for this preset.
+                        Knob {
+                            horizontal-stretch: 0;
+                            label: "Preset Vol";
+                            size: 36px;
+                            min-value: 0;
+                            max-value: 10;
+                            step: 0.1;
+                            default-value: 5;
+                            value <=> root.preset-level;
+                            opacity: root.preset-level-known ? 1 : 0.5;
+                            edited(v) => { root.preset-level-changed(v); }
                         }
 
-                        // Preset name + character badge; replaced by the tuner
-                        // display while the tuner is on (the knob row below
-                        // stays). The name/badge stay in the layout, just
-                        // hidden, so the card keeps its height.
                         Rectangle {
-                            VerticalLayout {
-                                spacing: 2px;
-                                visible: !root.tuner-active;
-
-                                // Name read over USB serial; falls back to the bare
-                                // preset number until names are loaded.
-                                Text {
-                                    text: root.preset-name == "" ? root.preset : root.preset-name;
-                                    color: Theme.ink;
-                                    font-size: 30px;
-                                    font-weight: 700;
-                                    overflow: elide;
-                                    wrap: no-wrap;
-                                }
-                                // Character from the preset's metadata; gray TONE
-                                // when the preset doesn't name one.
-                                if root.preset-name != "": HorizontalLayout {
-                                    alignment: start;
-                                    CharacterBadge {
-                                        text: root.preset-character-kind > 0 ? root.preset-character : "TONE";
-                                        kind: root.preset-character-kind;
-                                        font-size: 11px;
-                                    }
-                                }
-                            }
-
-                            // Tuner mode. The pedal streams no pitch data, so the
-                            // app can only point to the pedal's own display.
-                            if root.tuner-active: VerticalLayout {
-                                x: 0px;
-                                y: 0px;
-                                width: parent.width;
-                                height: parent.height;
-                                alignment: center;
-                                spacing: 4px;
-                                Text {
-                                    text: "TUNER";
-                                    color: Theme.ok;
-                                    font-size: 30px;
-                                    font-weight: 700;
-                                    letter-spacing: 4px;
-                                    horizontal-alignment: center;
-                                }
-                                Text {
-                                    text: "Tune on the pedal display";
-                                    color: Theme.muted;
-                                    font-size: 12px;
-                                    horizontal-alignment: center;
-                                }
-                            }
+                            horizontal-stretch: 1;
+                            min-width: 0px;
                         }
 
-                        HorizontalLayout {
-                            spacing: 8px;
-                            padding-top: 12px;
-
-                            // Per-preset output volume (pedal's PRESET VOLUME,
-                            // 0..10; serial section 03, see tonex_serial.rs).
-                            // Dimmed until read for this preset.
-                            Knob {
-                                horizontal-stretch: 0;
-                                label: "Preset Vol";
-                                size: 40px;
-                                min-value: 0;
-                                max-value: 10;
-                                step: 0.1;
-                                default-value: 5;
-                                value <=> root.preset-level;
-                                opacity: root.preset-level-known ? 1 : 0.5;
-                                edited(v) => { root.preset-level-changed(v); }
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                min-width: 0px;
-                            }
-
-                            // Pedal-wide (global) levels, not stored per preset.
-                            Knob {
-                                horizontal-stretch: 0;
-                                label: "In Trim";
-                                size: 40px;
-                                min-value: -15;
-                                max-value: 15;
-                                step: 0.1;
-                                default-value: 0;
-                                unit: " dB";
-                                value <=> root.global-trim;
-                                edited(v) => { root.global-changed(0, v); }
-                            }
-                            Knob {
-                                horizontal-stretch: 0;
-                                label: "Master";
-                                size: 40px;
-                                min-value: -40;
-                                max-value: 3;
-                                step: 0.1;
-                                default-value: 0;
-                                unit: " dB";
-                                value <=> root.global-volume;
-                                edited(v) => { root.global-changed(1, v); }
-                            }
+                        // Pedal-wide (global) levels, not stored per preset.
+                        Knob {
+                            horizontal-stretch: 0;
+                            label: "In Trim";
+                            size: 36px;
+                            min-value: -15;
+                            max-value: 15;
+                            step: 0.1;
+                            default-value: 0;
+                            unit: " dB";
+                            value <=> root.global-trim;
+                            edited(v) => { root.global-changed(0, v); }
+                        }
+                        Knob {
+                            horizontal-stretch: 0;
+                            label: "Master";
+                            size: 36px;
+                            min-value: -40;
+                            max-value: 3;
+                            step: 0.1;
+                            default-value: 0;
+                            unit: " dB";
+                            value <=> root.global-volume;
+                            edited(v) => { root.global-changed(1, v); }
                         }
                     }
                 }

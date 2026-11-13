@@ -358,7 +358,7 @@ Order = Builty `enum TonexParameters` ("defined in the same order as they are se
 | 22 | not named in code | | 100 | |
 | 23 | Builty "CABINET_UNKNOWN" (left alone) | | 1 | |
 | 24 | Cab type | 0 Tone Model (captured cab), 1 VIR, 2 Off — see note | 0 | |
-| 25 | VIR cab model | integer; Builty says 0..10, hardware reported **25**; app accepts 0..63 | 25 | ✔ |
+| 25 | VIR cab model | integer 0..39: 40 models on FW 1.6.24, the pedal clamps higher indices to the last one. Names in index order (as in the official TONEX software's list, order verified on the pedal at 0, 25 and 39): 16 DK, 18 CHAMP, 110 TONE, 112 DLX, 112 MARK, 112 CALI, 112 MAZ, 112 TINY, 115 BMAN, 212 TWIN, 212 BLUE, 212 H70, 212 JAZZ, 212 OPEN, 212 PPC, 212 REHO, 212 DZ, 412 1960, 412 B30, 412 B8000, 412 B9000, 412 BS, 412 DBAG, 412 HW, 412 F1, 412 T1, 412 V1, 412 M1, 412 PPC, 412 RETS, 412 RKB, 412 RKV, 412 PIG, 412 GRN, 412 XXL, 412 STD, 410 SVX, 115 SVX, 810 SVX, 810 OBC. The app still accepts reads up to 63 and shows them as "Cab N". | 25 | ✔ |
 | 26 | VIR resonance | 0..10 | 5 | |
 | 27 | Mic 1 type | 0 Condenser, 1 Dynamic, 2 Ribbon | 0 | |
 | 28 | Mic 1 X | 0..10 | 1.5 | |
@@ -511,7 +511,7 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 | Hello reply | Content not decoded. |
 | Global config | 19 of the 22 floats identified on hardware (see the table in §4.5); idx 14 unknown, idx 0/1 (exp. calibration) deduced but unexercised. The `0x0206` body after the 22 floats is opaque. |
 | Amp model names | Not stored on the device: metadata slots are empty even on factory presets; only "character" is populated. |
-| VIR cab model names | Unknown; at least 26 models exist (25 observed), Builty's 0..10 range is too small. |
+| VIR cab model names | Resolved: 40 models (0..39) on FW 1.6.24, see §5 param 25. |
 | Array indices 10, 14, 15, 19, 22, 23 | Present in dumps, not identified. |
 | Tuner | No pitch data and no notification of pedal-side tuner toggles (see §8). Tuner-mode quirk (FW 1.6.24, MIDI-invoked tuner, analog outs): Off shows the tuner screen but mutes, Through passes audio, and Muted unexpectedly also passes audio. |
 | Indices ≥ 128 in `0x0207` | Would be extended-encoded; never needed for the 109-array. |

@@ -42,6 +42,19 @@ const EQ_FREQS: [(usize, (f32, f32)); 3] =
 /// dump; range 0..100.
 const P_AMP_MIX: usize = 22;
 const AMP_MIX_RANGE: (f32, f32) = (0.0, 100.0);
+/// EQ mid Q (PROTOCOL.md §5); range as on the pedal's own menu.
+const P_EQ_MID_Q: usize = 14;
+pub const EQ_MID_Q_RANGE: (f32, f32) = (0.2, 3.0);
+/// EQ position, 0 pre / 1 post (hardware-verified).
+const P_EQ_POST: usize = 10;
+
+/// Single serial-only amp-tab params, each behind its own plausibility
+/// gate (a range check of the one value): (card, index, range, step).
+const SINGLES: [(Card, usize, (f32, f32), f32); 3] = [
+    (Card::Mix, P_AMP_MIX, AMP_MIX_RANGE, 1.0),
+    (Card::MidQ, P_EQ_MID_Q, EQ_MID_Q_RANGE, 0.05),
+    (Card::EqPost, P_EQ_POST, (0.0, 1.0), 1.0),
+];
 
 /// Knob step for a frequency: 5 Hz below 1 kHz, 50 Hz from there (the
 /// same rule as the UI knob's `step` binding).
@@ -82,12 +95,32 @@ const P_GATE_DEPTH: usize = 4;
 /// brunothesatellite, reading a different index) claim the reverse.
 const P_CAB_TYPE: usize = 24;
 const CAB_TYPES: usize = 3;
-/// VIR cabinet model (select; names unknown, shown as "Cab N"). Builty
-/// declares 0..=10, but the user's pedal reported 25.0 here (preset 148
-/// dump), so the list is longer: accepted as any whole number below
-/// `CAB_MODELS`.
+/// VIR cabinet model (select). FW 1.6.24 has the 40 models of
+/// `VIR_CAB_NAMES` and clamps higher indices to the last one; reads are
+/// still accepted as any whole number below `CAB_MODELS` (future firmware,
+/// odd presets), shown as "Cab N" beyond the table.
 const P_CAB_MODEL: usize = 25;
 pub const CAB_MODELS: usize = 64;
+
+/// VIR cab names in index order, as in the official TONEX software's cab
+/// list; order verified on the pedal at indices 0, 25 and 39.
+pub const VIR_CAB_NAMES: [&str; 40] = [
+    "16 DK", "18 CHAMP", "110 TONE", "112 DLX", "112 MARK", "112 CALI", "112 MAZ", "112 TINY", "115 BMAN",
+    "212 TWIN", "212 BLUE", "212 H70", "212 JAZZ", "212 OPEN", "212 PPC", "212 REHO", "212 DZ", "412 1960",
+    "412 B30", "412 B8000", "412 B9000", "412 BS", "412 DBAG", "412 HW", "412 F1", "412 T1", "412 V1",
+    "412 M1", "412 PPC", "412 RETS", "412 RKB", "412 RKV", "412 PIG", "412 GRN", "412 XXL", "412 STD",
+    "410 SVX", "115 SVX", "810 SVX", "810 OBC",
+];
+
+/// Cab model selector options: the named models, extended with numbered
+/// entries ("Cab 41", 1-based) up to `current` if that lies beyond the
+/// table, so any index the pedal reports stays selectable.
+pub fn cab_model_options(current: usize) -> Vec<String> {
+    let len = VIR_CAB_NAMES.len().max(current + 1);
+    (0..len)
+        .map(|i| VIR_CAB_NAMES.get(i).map_or_else(|| format!("Cab {}", i + 1), |n| n.to_string()))
+        .collect()
+}
 /// VIR resonance 0..10.
 const P_CAB_RESO: usize = 26;
 /// Mic 1 type: 0 Condenser, 1 Dynamic, 2 Ribbon (Builty MIDI map).
@@ -184,6 +217,8 @@ pub enum FxControl {
     EqMidFreq,
     EqTrebleFreq,
     AmpMix,
+    EqMidQ,
+    EqPost,
 }
 
 /// Which card a parameter belongs to.
@@ -200,6 +235,10 @@ pub enum Card {
     /// Amp mix knob of the amp tab (own plausibility gate: one 0..100 value
     /// says little about the layout, unlike the three EQ frequencies).
     Mix,
+    /// EQ mid Q knob (own gate, see SINGLES).
+    MidQ,
+    /// EQ pre/post switch (own gate, see SINGLES).
+    EqPost,
 }
 
 /// Selected (0-based) model per card, for per-model parameter indices.
@@ -260,6 +299,8 @@ impl FxControl {
             61 => EqMidFreq,
             62 => EqTrebleFreq,
             63 => AmpMix,
+            64 => EqMidQ,
+            65 => EqPost,
             _ => return None,
         })
     }
@@ -324,6 +365,8 @@ impl FxControl {
             EqMidFreq => P_EQ_MID_FREQ,
             EqTrebleFreq => P_EQ_TREBLE_FREQ,
             AmpMix => P_AMP_MIX,
+            EqMidQ => P_EQ_MID_Q,
+            EqPost => P_EQ_POST,
         })
     }
 
@@ -342,6 +385,8 @@ impl FxControl {
             | CabBlend => Card::Cab,
             EqBassFreq | EqMidFreq | EqTrebleFreq => Card::Eq,
             AmpMix => Card::Mix,
+            EqMidQ => Card::MidQ,
+            EqPost => Card::EqPost,
         }
     }
 
@@ -380,8 +425,8 @@ pub fn card_of(index: usize) -> Option<Card> {
     if EQ_FREQS.iter().any(|&(i, _)| i == index) {
         return Some(Card::Eq);
     }
-    if index == P_AMP_MIX {
-        return Some(Card::Mix);
+    if let Some(&(card, ..)) = SINGLES.iter().find(|s| s.1 == index) {
+        return Some(card);
     }
     [
         (Card::Delay, delay_range()),
@@ -447,11 +492,6 @@ fn cab_section_ok(raw: &[f32]) -> bool {
 /// above, these values are the only evidence the layout is right).
 fn eq_section_ok(raw: &[f32]) -> bool {
     EQ_FREQS.iter().all(|&(i, (min, max))| raw.get(i).is_some_and(|v| (min..=max).contains(v)))
-}
-
-fn mix_ok(raw: &[f32]) -> bool {
-    let (min, max) = AMP_MIX_RANGE;
-    raw.get(P_AMP_MIX).is_some_and(|v| (min..=max).contains(v))
 }
 
 fn mod_section_ok(raw: &[f32]) -> bool {
@@ -521,13 +561,18 @@ impl FxMirror {
         } else if !raw.is_empty() {
             eprintln!("TONEX: EQ frequencies look implausible, not shown");
         }
-        if mix_ok(raw) {
-            if !self.recent(P_AMP_MIX) {
-                self.values[P_AMP_MIX] = Some(raw[P_AMP_MIX]);
+        for (card, i, (min, max), _) in SINGLES {
+            match raw.get(i) {
+                // A switch must be exactly 0 or 1.
+                Some(&v) if (min..=max).contains(&v) && (card != Card::EqPost || is_switch(v)) => {
+                    if !self.recent(i) {
+                        self.values[i] = Some(v);
+                    }
+                    cards.push(card);
+                }
+                Some(v) => eprintln!("TONEX: {card:?} value {v} outside {min}..{max}, not shown"),
+                None => {}
             }
-            cards.push(Card::Mix);
-        } else if !raw.is_empty() {
-            eprintln!("TONEX: amp mix looks implausible, not shown");
         }
         cards
     }
@@ -696,7 +741,12 @@ pub fn refresh(ui: &AppWindow, m: &FxMirror, card: Card) {
                 }
             };
             pick(P_CAB_TYPE, CAB_TYPES, AppWindow::set_cab_type);
-            pick(P_CAB_MODEL, CAB_MODELS, AppWindow::set_cab_model);
+            // Options first (extended past the named models if needed), so
+            // the selector never shows an index without a label.
+            if let Some(model) = model_of(m.get(P_CAB_MODEL), CAB_MODELS) {
+                set_cab_model_options(ui, model);
+                ui.set_cab_model(model as i32);
+            }
             pick(P_CAB_MIC1, MIC_TYPES, AppWindow::set_cab_mic1);
             pick(P_CAB_MIC2, MIC_TYPES, AppWindow::set_cab_mic2);
             let knobs: [(usize, (f32, f32, f32), fn(&AppWindow, f32)); 6] = [
@@ -725,20 +775,36 @@ pub fn refresh(ui: &AppWindow, m: &FxMirror, card: Card) {
             }
             ui.set_eq_freq_known(known);
         }
-        Card::Mix => match m.get(P_AMP_MIX) {
-            Some(v) => {
-                let (min, max) = AMP_MIX_RANGE;
-                ui.set_amp_mix(snap(v, (min, max, 1.0)));
-                ui.set_amp_mix_known(true);
+        Card::Mix | Card::MidQ | Card::EqPost => {
+            let Some(&(_, i, (min, max), step)) = SINGLES.iter().find(|s| s.0 == card) else { return };
+            let v = m.get(i).map(|v| snap(v, (min, max, step)));
+            match card {
+                Card::Mix => {
+                    if let Some(v) = v {
+                        ui.set_amp_mix(v);
+                    }
+                    ui.set_amp_mix_known(v.is_some());
+                }
+                Card::MidQ => {
+                    if let Some(v) = v {
+                        ui.set_eq_mid_q(v);
+                    }
+                    ui.set_eq_mid_q_known(v.is_some());
+                }
+                _ => {
+                    if let Some(v) = v {
+                        ui.set_eq_post(v != 0.0);
+                    }
+                    ui.set_eq_post_known(v.is_some());
+                }
             }
-            None => ui.set_amp_mix_known(false),
-        },
+        }
     }
 }
 
 /// Points the double-click reset of the serial-only amp-tab knobs (EQ
-/// frequencies, mix) at the values the preset was loaded with (in range
-/// only).
+/// frequencies, mix, mid Q) at the values the preset was loaded with (in
+/// range only).
 pub fn set_loaded_defaults(ui: &AppWindow, diff: &PresetDiff) {
     let setters: [fn(&AppWindow, f32); 3] = [
         AppWindow::set_eq_bass_freq_default,
@@ -753,6 +819,21 @@ pub fn set_loaded_defaults(ui: &AppWindow, diff: &PresetDiff) {
     let (min, max) = AMP_MIX_RANGE;
     if let Some(v) = diff.baseline(P_AMP_MIX).filter(|v| (min..=max).contains(v)) {
         ui.set_amp_mix_default(v);
+    }
+    let (min, max) = EQ_MID_Q_RANGE;
+    if let Some(v) = diff.baseline(P_EQ_MID_Q).filter(|v| (min..=max).contains(v)) {
+        ui.set_eq_mid_q_default(v);
+    }
+}
+
+/// Puts `cab_model_options(current)` into the UI unless the list already
+/// has that length.
+pub fn set_cab_model_options(ui: &AppWindow, current: usize) {
+    use slint::Model;
+    let options = cab_model_options(current);
+    if ui.get_cab_model_names().row_count() != options.len() {
+        let model: Vec<slint::SharedString> = options.into_iter().map(Into::into).collect();
+        ui.set_cab_model_names(slint::ModelRc::new(slint::VecModel::from(model)));
     }
 }
 
@@ -794,7 +875,7 @@ mod tests {
         assert_eq!(card_of(63), Some(Card::Mod));
         assert_eq!(card_of(93), Some(Card::Mod));
         assert_eq!(card_of(5), Some(Card::Comp));
-        assert_eq!(card_of(10), None);
+        assert_eq!(card_of(10), Some(Card::EqPost));
         assert_eq!(card_of(20), None);
         // Gate 0..=4, cabinet 24..=33; amp knobs/enable stay outside.
         assert_eq!(GateThreshold.param_index(m(0, 0, 0)), Some(2));
@@ -804,18 +885,20 @@ mod tests {
         assert_eq!(card_of(4), Some(Card::Gate));
         assert_eq!(card_of(24), Some(Card::Cab));
         assert_eq!(card_of(33), Some(Card::Cab));
-        for amp in [11, 13, 14, 16, 18, 20, 21, 23, 34, 35] {
+        for amp in [11, 13, 16, 18, 20, 21, 23, 34, 35] {
             assert_eq!(card_of(amp), None, "index {amp}");
         }
         for eq in [12, 15, 17] {
             assert_eq!(card_of(eq), Some(Card::Eq), "index {eq}");
         }
         assert_eq!(card_of(22), Some(Card::Mix));
+        assert_eq!(card_of(14), Some(Card::MidQ));
+        assert_eq!(card_of(10), Some(Card::EqPost));
     }
 
     #[test]
     fn ids_roundtrip_and_cards() {
-        for id in (0..=8).chain(10..=16).chain(20..=24).chain(30..=38).chain(40..=44).chain(50..=63) {
+        for id in (0..=8).chain(10..=16).chain(20..=24).chain(30..=38).chain(40..=44).chain(50..=65) {
             let c = FxControl::from_id(id).unwrap();
             let card = match id {
                 0..=8 => Card::Delay,
@@ -825,13 +908,17 @@ mod tests {
                 40..=44 => Card::Gate,
                 60..=62 => Card::Eq,
                 63 => Card::Mix,
+                64 => Card::MidQ,
+                65 => Card::EqPost,
                 _ => Card::Cab,
             };
             assert_eq!(c.card(), card);
         }
         assert_eq!(FxControl::EqMidFreq.param_index(Models::default()), Some(15));
         assert_eq!(FxControl::AmpMix.param_index(Models::default()), Some(22));
-        for id in [9, 17, 25, 39, 45, 64] {
+        assert_eq!(FxControl::EqMidQ.param_index(Models::default()), Some(14));
+        assert_eq!(FxControl::EqPost.param_index(Models::default()), Some(10));
+        for id in [9, 17, 25, 39, 45, 66] {
             assert_eq!(FxControl::from_id(id), None);
         }
     }
@@ -857,7 +944,7 @@ mod tests {
         let mut m = FxMirror::default();
         assert_eq!(
             m.load(&plausible_raw()),
-            [Card::Delay, Card::Reverb, Card::Comp, Card::Mod, Card::Gate, Card::Cab, Card::Mix]
+            [Card::Delay, Card::Reverb, Card::Comp, Card::Mod, Card::Gate, Card::Cab, Card::Mix, Card::EqPost]
         );
         let idx = FxControl::DelayTime.param_index(Models { delay: 1, ..Models::default() }).unwrap();
         assert_eq!(m.get(idx), Some(320.0));
@@ -870,8 +957,8 @@ mod tests {
         let mut m = FxMirror::default();
         raw[MOD_BLOCKS[2].0] = 0.5;
         raw[P_CAB_MODEL] = 2.5; // not a whole number
-        assert_eq!(m.load(&raw), [Card::Reverb, Card::Comp, Card::Gate, Card::Mix]);
-        assert_eq!(m.load(&raw[..80]), [Card::Reverb, Card::Comp, Card::Gate, Card::Mix]);
+        assert_eq!(m.load(&raw), [Card::Reverb, Card::Comp, Card::Gate, Card::Mix, Card::EqPost]);
+        assert_eq!(m.load(&raw[..80]), [Card::Reverb, Card::Comp, Card::Gate, Card::Mix, Card::EqPost]);
         assert!(m.load(&[]).is_empty());
     }
 
@@ -908,6 +995,44 @@ mod tests {
             assert!(!FxMirror::default().load(&raw).contains(&Card::Mix), "{bad}");
         }
         assert!(!FxMirror::default().load(&raw[..22]).contains(&Card::Mix));
+    }
+
+    #[test]
+    fn mid_q_and_eq_position_gates() {
+        let mut raw = plausible_raw();
+        raw[P_EQ_MID_Q] = 0.7; // preset 148
+        raw[P_EQ_POST] = 1.0;
+        let mut m = FxMirror::default();
+        let cards = m.load(&raw);
+        assert!(cards.contains(&Card::MidQ) && cards.contains(&Card::EqPost));
+        assert_eq!((m.get(P_EQ_MID_Q), m.get(P_EQ_POST)), (Some(0.7), Some(1.0)));
+        // Outside the pedal's Q range, or a non-switch position: not
+        // shown, so the controls stay locked.
+        for (i, bad) in [(P_EQ_MID_Q, 0.1), (P_EQ_MID_Q, 3.5), (P_EQ_POST, 0.5), (P_EQ_POST, 2.0)] {
+            let mut r = raw.clone();
+            r[i] = bad;
+            assert!(!FxMirror::default().load(&r).contains(&card_of(i).unwrap()), "{i}={bad}");
+        }
+        assert_eq!(snap(0.72, (EQ_MID_Q_RANGE.0, EQ_MID_Q_RANGE.1, 0.05)), 0.7);
+    }
+
+    #[test]
+    fn vir_cab_names_and_fallback() {
+        // Verified on the pedal: 0, 25 and 39.
+        assert_eq!(VIR_CAB_NAMES[0], "16 DK");
+        assert_eq!(VIR_CAB_NAMES[25], "412 T1");
+        assert_eq!(VIR_CAB_NAMES[39], "810 OBC");
+        let named = cab_model_options(0);
+        assert_eq!(named.len(), 40);
+        assert_eq!(named[25], "412 T1");
+        assert_eq!(cab_model_options(39).len(), 40);
+        // Beyond the table: numbered entries up to the current index.
+        let extended = cab_model_options(45);
+        assert_eq!(extended.len(), 46);
+        assert_eq!(extended[39], "810 OBC");
+        assert_eq!(extended[40], "Cab 41");
+        assert_eq!(extended[45], "Cab 46");
+        assert!(VIR_CAB_NAMES.len() < CAB_MODELS, "reads past the table stay accepted");
     }
 
     #[test]

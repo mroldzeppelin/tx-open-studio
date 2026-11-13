@@ -748,6 +748,8 @@ fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
     ui.set_preset_level_known(false);
     ui.set_eq_freq_known(false);
     ui.set_amp_mix_known(false);
+    ui.set_eq_mid_q_known(false);
+    ui.set_eq_post_known(false);
     show_preset_meta(ui, names, preset);
     // A (re)loaded preset starts clean.
     ui.set_preset_dirty(false);
@@ -857,6 +859,8 @@ impl SyncCtx {
         ui.set_preset_level_known(false);
         ui.set_eq_freq_known(false);
     ui.set_amp_mix_known(false);
+    ui.set_eq_mid_q_known(false);
+    ui.set_eq_post_known(false);
         ui.set_tuner_active(false);
     }
 
@@ -1155,8 +1159,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let engine = ctx.midi.clone();
 
     ui.set_preset(DEFAULT_PRESET);
-    let cab_names: Vec<slint::SharedString> = (1..=fx::CAB_MODELS).map(|n| format!("Cab {n}").into()).collect();
-    ui.set_cab_model_names(ModelRc::new(VecModel::from(cab_names)));
+    fx::set_cab_model_options(&ui, 0);
     show_list(&ui, &ctx.names);
 
     {

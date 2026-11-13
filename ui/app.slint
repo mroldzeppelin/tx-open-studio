@@ -345,7 +345,12 @@ component Knob inherits VerticalLayout {
     property <angle> sweep: (-135 + root.frac * 270) * 1deg;
     property <int> tenths: round(root.value * 10);
     property <int> abs-tenths: abs(root.tenths);
-    property <string> number: root.hz ? Format.hz(root.value) : root.decimals == 0
+    // decimals 2: always two places ("0.70"; EQ mid Q).
+    property <int> abs-hundredths: abs(round(root.value * 100));
+    property <string> number: root.hz ? Format.hz(root.value) : root.decimals == 2
+        ? (root.value < -0.005 ? "-" : "") + "\{floor(root.abs-hundredths / 100)}."
+            + (mod(root.abs-hundredths, 100) < 10 ? "0" : "") + "\{mod(root.abs-hundredths, 100)}"
+        : root.decimals == 0
         ? "\{round(root.value)}"
         : (root.tenths < 0 ? "-" : "") + "\{floor(root.abs-tenths / 10)}"
             + (mod(root.abs-tenths, 10) == 0 ? "" : ".\{mod(root.abs-tenths, 10)}");
@@ -512,11 +517,20 @@ component EqPair inherits Rectangle {
     in property <float> freq-default;
     in property <bool> freq-enabled: true;
     callback freq-edited(float);
+    // Optional Q knob (mid band, Two Notes style): mirrors the frequency
+    // knob up-left of the gain knob, with its own trace.
+    in property <bool> has-q: false;
+    in-out property <float> q;
+    in property <float> q-default;
+    in property <bool> q-enabled: true;
+    callback q-edited(float);
 
     height: 132px;
-    // Dial centres: the big one left of centre so the pair is balanced,
-    // the small one offset up-right.
-    property <length> cx: self.width / 2 - 16px;
+    // Dial centres: the big one left of centre so a two-knob pair is
+    // balanced (centred with a Q knob), the small ones offset up-right
+    // (frequency) and up-left (Q).
+    property <length> cx: self.width / 2 - (root.has-q ? 0px : 16px);
+    property <length> qcx: self.cx - 52px;
     property <length> cy: big.y + big.dial-top + 36px;
     property <length> scx: self.cx + 52px;
     property <length> scy: self.cy - 58px;
@@ -526,6 +540,9 @@ component EqPair inherits Rectangle {
     property <length> y0: self.cy - 37px * cos(50deg);
     property <length> x1: self.scx - 15px * sin(45deg);
     property <length> y1: self.scy + 15px * cos(45deg);
+    // Mirror for the Q trace: big rim at -50°, Q rim at its bottom-right.
+    property <length> qx0: self.cx - 37px * sin(50deg);
+    property <length> qx1: self.qcx + 15px * sin(45deg);
 
     // Quarter curve: leaves the big knob upwards, meets the small one
     // horizontally.
@@ -548,6 +565,53 @@ component EqPair inherits Rectangle {
         }
     }
 
+    if root.has-q: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        stroke: Theme.trace;
+        stroke-width: 1px;
+        MoveTo {
+            x: root.qx0 / 1px;
+            y: root.y0 / 1px;
+        }
+        QuadraticTo {
+            control-x: root.qx0 / 1px;
+            control-y: root.y1 / 1px;
+            x: root.qx1 / 1px;
+            y: root.y1 / 1px;
+        }
+    }
+
+    if root.has-q: Text {
+        x: root.qcx - self.width / 2;
+        y: root.scy - 14px - self.height - 1px;
+        text: "Q";
+        color: Theme.muted;
+        font-size: 8px;
+        font-family: Theme.mono-font;
+        wrap: no-wrap;
+    }
+
+    if root.has-q: Knob {
+        x: root.qcx - self.width / 2;
+        y: root.scy - 14px;
+        width: 40px;
+        height: self.preferred-height;
+        label: "";
+        size: 28px;
+        value-font-size: 10px;
+        enabled: root.q-enabled;
+        min-value: 0.2;
+        max-value: 3.0;
+        step: 0.05;
+        decimals: 2;
+        default-value: root.q-default;
+        value <=> root.q;
+        edited(v) => { root.q-edited(v); }
+    }
+
     big := Knob {
         x: root.cx - self.width / 2;
         y: root.height - self.height;
@@ -562,7 +626,7 @@ component EqPair inherits Rectangle {
     Text {
         x: root.scx - self.width / 2;
         y: small.y - self.height - 1px;
-        text: Format.hz(root.freq-min) + "–" + Format.hz(root.freq-max);
+        text: "Hz";
         color: Theme.muted;
         font-size: 8px;
         font-family: Theme.mono-font;
@@ -593,6 +657,12 @@ component EqPair inherits Rectangle {
 // it like a faceplate legend; children are laid out in one row.
 component GlobalGroup inherits Rectangle {
     in property <string> title;
+    // Vertical padding (the AMP tab trims it to fit the tray).
+    in property <length> pad-top: 10px;
+    in property <length> pad-bottom: 8px;
+    // space-between pushes the outer children toward the group's edges
+    // (used by the EQ group so Bass/Treble sit near the borders).
+    in property <LayoutAlignment> content-alignment: LayoutAlignment.center;
 
     border-width: 1px;
     border-color: Theme.border;
@@ -601,10 +671,10 @@ component GlobalGroup inherits Rectangle {
     HorizontalLayout {
         padding-left: 8px;
         padding-right: 8px;
-        padding-top: 10px;
-        padding-bottom: 8px;
+        padding-top: root.pad-top;
+        padding-bottom: root.pad-bottom;
         spacing: 6px;
-        alignment: center;
+        alignment: root.content-alignment;
         @children
     }
 
@@ -963,6 +1033,13 @@ export component AppWindow inherits Window {
     in-out property <float> amp-mix: 100;
     in property <float> amp-mix-default: 100;
     in property <bool> amp-mix-known: false;
+    // EQ mid Q (0.20..3.00) and EQ position (false pre / true post), same
+    // rules as the EQ frequencies (fx ids 64, 65).
+    in-out property <float> eq-mid-q: 0.7;
+    in property <float> eq-mid-q-default: 0.7;
+    in property <bool> eq-mid-q-known: false;
+    in-out property <bool> eq-post: false;
+    in property <bool> eq-post-known: false;
     // True while any amp knob is being dragged (Rust skips pedal updates then).
     out property <bool> knob-active: k-gain.active || k-volume.active || k-presence.active
         || k-depth.active || k-bass.active || k-mid.active || k-treble.active;
@@ -1036,7 +1113,7 @@ export component AppWindow inherits Window {
     // 0 Tone Model, 1 VIR, 2 Off.
     in-out property <int> cab-type: 0;
     in-out property <int> cab-model: 0;
-    // "Cab 1".."Cab N" labels for the VIR cab model (set from Rust).
+    // VIR cab model names (fx::cab_model_options, set from Rust).
     in property <[string]> cab-model-names;
     in-out property <int> cab-mic1: 0;
     in-out property <int> cab-mic2: 0;
@@ -2178,8 +2255,10 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // AMP: knobs send MIDI CCs, values are read from the current
-                // preset over USB serial. 7 knobs in two rows (4 + 3).
+                // AMP: gain/volume/presence/depth and the EQ band gains are
+                // MIDI CCs; mix, EQ frequencies, mid Q and EQ position are
+                // serial-only (fx ids 60..65). Values are read from the
+                // current preset over USB serial. Groups: GAIN | MODEL, EQ.
                 Rectangle {
                     x: tray.pad;
                     y: tray.pad;
@@ -2189,40 +2268,62 @@ export component AppWindow inherits Window {
 
                     VerticalLayout {
                         spacing: 8px;
+                        alignment: start;
                         HorizontalLayout {
                             height: 24px;
                             spacing: 6px;
                             ModuleTitle { text: "AMPLIFIER"; }
+                            // EQ before or after the amp model (param 10).
+                            StateButton {
+                                horizontal-stretch: 0;
+                                width: 76px;
+                                height: 24px;
+                                enabled: root.eq-post-known;
+                                on <=> root.eq-post;
+                                on-text: "Post amp";
+                                off-text: "Pre amp";
+                                toggled(on) => { root.fx-changed(65, on ? 1 : 0); }
+                            }
                             // Amp enable/bypass toggle (written over USB serial).
                             OnOffChip {
                                 on <=> root.amp-enabled;
                                 toggled(on) => { root.amp-enable-changed(on); }
                             }
                         }
-                        VerticalLayout {
-                            vertical-stretch: 1;
-                            alignment: center;
-                            spacing: 18px;
-                            HorizontalLayout {
-                                alignment: center;
+                        // Group borders cost height: trimmed paddings keep
+                        // the knob sizes within the 320 px tray.
+                        HorizontalLayout {
+                            spacing: 8px;
+                            GlobalGroup {
+                                title: "GAIN";
+                                horizontal-stretch: 2;
+                                pad-top: 8px;
+                                pad-bottom: 4px;
                                 k-gain := Knob {
-                                    width: tray.slot5;
+                                    width: 72px;
                                     size: 52px;
                                     label: "Gain";
                                     value <=> root.amp-gain;
                                     edited(v) => { root.amp-param-changed(0, v); }
                                 }
+
                                 k-volume := Knob {
-                                    width: tray.slot5;
+                                    width: 72px;
                                     size: 52px;
                                     label: "Volume";
                                     value <=> root.amp-volume;
                                     edited(v) => { root.amp-param-changed(1, v); }
                                 }
-                                // Serial-only (fx id 63): locked until read,
-                                // double-click returns to the loaded value.
+                            }
+                            GlobalGroup {
+                                title: "MODEL";
+                                horizontal-stretch: 3;
+                                pad-top: 8px;
+                                pad-bottom: 4px;
+                                // Mix: serial-only (fx id 63), locked until
+                                // read, double-click returns to the loaded value.
                                 Knob {
-                                    width: tray.slot5;
+                                    width: 72px;
                                     size: 52px;
                                     label: "Mix";
                                     unit: "%";
@@ -2235,26 +2336,34 @@ export component AppWindow inherits Window {
                                     value <=> root.amp-mix;
                                     edited(v) => { root.fx-changed(63, v); }
                                 }
+
                                 k-presence := Knob {
-                                    width: tray.slot5;
+                                    width: 72px;
                                     size: 52px;
                                     label: "Presence";
                                     value <=> root.amp-presence;
                                     edited(v) => { root.amp-param-changed(2, v); }
                                 }
+
                                 k-depth := Knob {
-                                    width: tray.slot5;
+                                    width: 72px;
                                     size: 52px;
                                     label: "Depth";
                                     value <=> root.amp-depth;
                                     edited(v) => { root.amp-param-changed(3, v); }
                                 }
                             }
-                            // EQ bands: gain knob (MIDI CC) with its
-                            // frequency knob (serial, fx ids 60..62)
-                            // diagonally above-right (EqPair).
-                            HorizontalLayout {
-                                alignment: center;
+                        }
+                        // EQ bands: gain knob (MIDI CC) with its frequency
+                        // knob (serial, fx ids 60..62) up-right; the mid band
+                        // also has Q (fx id 64) up-left (EqPair).
+                        GlobalGroup {
+                            title: "EQ";
+                            // Extra top padding keeps the small knobs' labels
+                            // clear of the group's border line.
+                            pad-top: 18px;
+                            pad-bottom: 4px;
+                            content-alignment: LayoutAlignment.space-between;
                                 k-bass := EqPair {
                                     width: tray.slot;
                                     label: "Bass";
@@ -2267,8 +2376,9 @@ export component AppWindow inherits Window {
                                     freq <=> root.eq-bass-freq;
                                     freq-edited(v) => { root.fx-changed(60, v); }
                                 }
+
                                 k-mid := EqPair {
-                                    width: tray.slot;
+                                    width: tray.slot + 40px;
                                     label: "Mid";
                                     gain <=> root.amp-mid;
                                     gain-edited(v) => { root.amp-param-changed(5, v); }
@@ -2278,7 +2388,13 @@ export component AppWindow inherits Window {
                                     freq-default: root.eq-mid-freq-default;
                                     freq <=> root.eq-mid-freq;
                                     freq-edited(v) => { root.fx-changed(61, v); }
+                                    has-q: true;
+                                    q-enabled: root.eq-mid-q-known;
+                                    q-default: root.eq-mid-q-default;
+                                    q <=> root.eq-mid-q;
+                                    q-edited(v) => { root.fx-changed(64, v); }
                                 }
+
                                 k-treble := EqPair {
                                     width: tray.slot;
                                     label: "Treble";
@@ -2291,7 +2407,6 @@ export component AppWindow inherits Window {
                                     freq <=> root.eq-treble-freq;
                                     freq-edited(v) => { root.fx-changed(62, v); }
                                 }
-                            }
                         }
                     }
                 }
@@ -2336,7 +2451,7 @@ export component AppWindow inherits Window {
                             alignment: start;
                             Stepper {
                                 enabled: vir;
-                                value-width: 42px; // "Cab 63"
+                                value-width: 58px; // "412 B8000"
                                 height: 24px;
                                 options: root.cab-model-names;
                                 index <=> root.cab-model;

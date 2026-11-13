@@ -572,6 +572,7 @@ fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
     ui.set_preset(preset);
     // Until the new preset's details arrive.
     ui.set_preset_level_known(false);
+    ui.set_eq_freq_known(false);
     show_preset_meta(ui, names, preset);
     // A (re)loaded preset starts clean.
     ui.set_preset_dirty(false);
@@ -664,6 +665,7 @@ impl SyncCtx {
         *self.global_touched.lock().unwrap_or_else(|e| e.into_inner()) = [None; 2];
         ui.set_preset_dirty(false);
         ui.set_preset_level_known(false);
+        ui.set_eq_freq_known(false);
         ui.set_tuner_active(false);
     }
 
@@ -882,6 +884,7 @@ impl SyncCtx {
         }
         amp.diff.load(raw);
         ui.set_preset_dirty(amp.diff.dirty());
+        fx::set_eq_defaults(ui, &amp.diff);
     }
 
     /// User changed an effect-card control: write it over serial.
@@ -1316,5 +1319,32 @@ mod tests {
         l.serial_denied(id, "/dev/ttyACM0".into());
         l.serial_ended(id);
         assert_eq!(l.status(), LinkStatus::Reconnecting);
+    }
+
+    #[test]
+    fn frequency_labels() {
+        // The formatter lives in app.slint; call it through a component on
+        // the software renderer (no display needed).
+        use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+        use slint::platform::{Platform, WindowAdapter};
+        use std::rc::Rc;
+        struct Headless(Rc<MinimalSoftwareWindow>);
+        impl Platform for Headless {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        let _ = slint::platform::set_platform(Box::new(Headless(window)));
+        let ui = AppWindow::new().unwrap();
+        let hz = |v: f32| ui.global::<Format>().invoke_hz(v).to_string();
+        assert_eq!(hz(75.0), "75");
+        assert_eq!(hz(180.0), "180");
+        assert_eq!(hz(750.0), "750");
+        assert_eq!(hz(1000.0), "1K");
+        assert_eq!(hz(1600.0), "1.6K");
+        assert_eq!(hz(1650.0), "1.7K");
+        assert_eq!(hz(4000.0), "4K");
+        assert_eq!(hz(5000.0), "5K");
     }
 }

@@ -47,6 +47,8 @@ export global Theme {
     out property <color> knob-cap-top: #3d4149;
     out property <color> knob-cap-bottom: #1c1e22;
     out property <color> knob-pointer: #f2f3f5;
+    // Faceplate trace joining an EQ band's gain and frequency knobs.
+    out property <color> trace: #4a4e57;
     // Dark text on solid amber.
     out property <color> on-accent: #111111;
     out property <color> ok: #22c55e;
@@ -72,6 +74,20 @@ export struct PresetRow {
     name: string,
     character: string,
     kind: int,
+}
+
+// Value formatting shared by knobs and labels (exported so Rust tests can
+// call it).
+export global Format {
+    // Frequency label: "180", "750", "1.6K", "4K": from 1 kHz on in kHz
+    // with one decimal, a trailing .0 dropped.
+    pure public function hz(v: float) -> string {
+        if (v < 1000) {
+            return "\{round(v)}";
+        }
+        let tenths = round(v / 100);
+        return "\{floor(tenths / 10)}" + (mod(tenths, 10) == 0 ? "" : ".\{mod(tenths, 10)}") + "K";
+    }
 }
 
 // Muted colours per preset character group, shared by list and OLED.
@@ -308,6 +324,9 @@ component Knob inherits VerticalLayout {
     in property <float> default-value: 5;
     in property <int> decimals: 1;
     in property <string> unit;
+    // Show the value as a frequency ("750", "1.6K"; see Format.hz).
+    in property <bool> hz: false;
+    in property <length> value-font-size: 12px;
     in property <length> size: 48px;
     // false: display only (no drag, no double-click reset), dimmed.
     in property <bool> enabled: true;
@@ -318,7 +337,7 @@ component Knob inherits VerticalLayout {
     property <angle> sweep: (-135 + root.frac * 270) * 1deg;
     property <int> tenths: round(root.value * 10);
     property <int> abs-tenths: abs(root.tenths);
-    property <string> number: root.decimals == 0
+    property <string> number: root.hz ? Format.hz(root.value) : root.decimals == 0
         ? "\{round(root.value)}"
         : (root.tenths < 0 ? "-" : "") + "\{floor(root.abs-tenths / 10)}"
             + (mod(root.abs-tenths, 10) == 0 ? "" : ".\{mod(root.abs-tenths, 10)}");
@@ -328,7 +347,8 @@ component Knob inherits VerticalLayout {
     min-width: root.size;
     horizontal-stretch: 1;
 
-    Text {
+    // No label row at all when empty (small EQ frequency knobs).
+    if root.label != "": Text {
         text: root.label;
         color: Theme.muted;
         font-size: 12px;
@@ -337,7 +357,10 @@ component Knob inherits VerticalLayout {
         wrap: no-wrap;
     }
 
-    HorizontalLayout {
+    // Top of the dial row (for drawing next to the dial, see EqPair).
+    out property <length> dial-top: dial-row.y;
+
+    dial-row := HorizontalLayout {
         alignment: center;
 
         // 270° arc ring (track + amber value arc), raised cap and a white
@@ -456,11 +479,105 @@ component Knob inherits VerticalLayout {
     Text {
         text: root.number + root.unit;
         color: Theme.secondary-ink;
-        font-size: 12px;
+        font-size: root.value-font-size;
         font-family: Theme.mono-font;
         horizontal-alignment: center;
         overflow: elide;
         wrap: no-wrap;
+    }
+}
+
+// One EQ band, Two Notes style: the band's gain knob (MIDI CC) with a
+// small frequency knob (serial) diagonally above-right of it, joined by a
+// thin faceplate trace. Range printed above the small knob, its value in
+// Hz/kHz below; steps 5 Hz below 1 kHz, 50 Hz above (fx::freq_step). The
+// frequency knob is locked and dimmed until plausible values were read
+// (`freq-enabled`), so nothing guessed is written.
+component EqPair inherits Rectangle {
+    in property <string> label;
+    in-out property <float> gain;
+    callback gain-edited(float);
+    out property <bool> active: big.active;
+    in-out property <float> freq;
+    in property <float> freq-min;
+    in property <float> freq-max;
+    in property <float> freq-default;
+    in property <bool> freq-enabled: true;
+    callback freq-edited(float);
+
+    height: 132px;
+    // Dial centres: the big one left of centre so the pair is balanced,
+    // the small one offset up-right.
+    property <length> cx: self.width / 2 - 16px;
+    property <length> cy: big.y + big.dial-top + 36px;
+    property <length> scx: self.cx + 52px;
+    property <length> scy: self.cy - 58px;
+    // Trace ends just outside both rings: big rim at 50° (clear of the
+    // label), small rim at its bottom-left (225°).
+    property <length> x0: self.cx + 37px * sin(50deg);
+    property <length> y0: self.cy - 37px * cos(50deg);
+    property <length> x1: self.scx - 15px * sin(45deg);
+    property <length> y1: self.scy + 15px * cos(45deg);
+
+    // Quarter curve: leaves the big knob upwards, meets the small one
+    // horizontally.
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        stroke: Theme.trace;
+        stroke-width: 1px;
+        MoveTo {
+            x: root.x0 / 1px;
+            y: root.y0 / 1px;
+        }
+        QuadraticTo {
+            control-x: root.x0 / 1px;
+            control-y: root.y1 / 1px;
+            x: root.x1 / 1px;
+            y: root.y1 / 1px;
+        }
+    }
+
+    big := Knob {
+        x: root.cx - self.width / 2;
+        y: root.height - self.height;
+        width: 80px;
+        height: self.preferred-height;
+        size: 72px;
+        label: root.label;
+        value <=> root.gain;
+        edited(v) => { root.gain-edited(v); }
+    }
+
+    Text {
+        x: root.scx - self.width / 2;
+        y: small.y - self.height - 1px;
+        text: Format.hz(root.freq-min) + "–" + Format.hz(root.freq-max);
+        color: Theme.muted;
+        font-size: 8px;
+        font-family: Theme.mono-font;
+        wrap: no-wrap;
+    }
+
+    small := Knob {
+        x: root.scx - self.width / 2;
+        y: root.scy - 14px;
+        width: 40px;
+        height: self.preferred-height;
+        label: "";
+        size: 28px;
+        hz: true;
+        value-font-size: 10px;
+        enabled: root.freq-enabled;
+        min-value: root.freq-min;
+        max-value: root.freq-max;
+        step: root.freq >= 1000 ? 50 : 5;
+        decimals: 0;
+        default-value: root.freq-default;
+        value <=> root.freq;
+        edited(v) => { root.freq-edited(v); }
     }
 }
 
@@ -669,6 +786,16 @@ export component AppWindow inherits Window {
     in-out property <float> amp-mid: 5;
     in-out property <float> amp-treble: 5;
     in-out property <bool> amp-enabled: true;
+    // EQ band frequencies (Hz) of the current preset; locked until read
+    // (eq-freq-known). Double-click resets to the values the preset was
+    // loaded with (*-default; initial values: a hardware dump).
+    in-out property <float> eq-bass-freq: 300;
+    in-out property <float> eq-mid-freq: 750;
+    in-out property <float> eq-treble-freq: 2000;
+    in property <float> eq-bass-freq-default: 300;
+    in property <float> eq-mid-freq-default: 750;
+    in property <float> eq-treble-freq-default: 2000;
+    in property <bool> eq-freq-known: false;
     // True while any amp knob is being dragged (Rust skips pedal updates then).
     out property <bool> knob-active: k-gain.active || k-volume.active || k-presence.active
         || k-depth.active || k-bass.active || k-mid.active || k-treble.active;
@@ -709,7 +836,8 @@ export component AppWindow inherits Window {
     // 15 rvb color, 16 rvb mix,
     // 20 comp on, 21 comp post, 22 comp threshold, 23 comp gain, 24 comp attack,
     // 30 mod on, 31 mod post, 32 mod model, 33 mod sync, 34 mod division,
-    // 35..38 mod knobs 1..4 of the selected type.
+    // 35..38 mod knobs 1..4 of the selected type,
+    // 60 EQ bass freq, 61 EQ mid freq, 62 EQ treble freq (Hz, serial only).
     callback fx-changed(int, float);
 
     // Compressor / Modulation (pedal units; see fx.rs).
@@ -1721,28 +1849,46 @@ export component AppWindow inherits Window {
                                     edited(v) => { root.amp-param-changed(3, v); }
                                 }
                             }
+                            // EQ bands: gain knob (MIDI CC) with its
+                            // frequency knob (serial, fx ids 60..62)
+                            // diagonally above-right (EqPair).
                             HorizontalLayout {
                                 alignment: center;
-                                k-bass := Knob {
+                                k-bass := EqPair {
                                     width: tray.slot;
-                                    size: 52px;
                                     label: "Bass";
-                                    value <=> root.amp-bass;
-                                    edited(v) => { root.amp-param-changed(4, v); }
+                                    gain <=> root.amp-bass;
+                                    gain-edited(v) => { root.amp-param-changed(4, v); }
+                                    freq-min: 75;
+                                    freq-max: 600;
+                                    freq-enabled: root.eq-freq-known;
+                                    freq-default: root.eq-bass-freq-default;
+                                    freq <=> root.eq-bass-freq;
+                                    freq-edited(v) => { root.fx-changed(60, v); }
                                 }
-                                k-mid := Knob {
+                                k-mid := EqPair {
                                     width: tray.slot;
-                                    size: 52px;
                                     label: "Mid";
-                                    value <=> root.amp-mid;
-                                    edited(v) => { root.amp-param-changed(5, v); }
+                                    gain <=> root.amp-mid;
+                                    gain-edited(v) => { root.amp-param-changed(5, v); }
+                                    freq-min: 150;
+                                    freq-max: 5000;
+                                    freq-enabled: root.eq-freq-known;
+                                    freq-default: root.eq-mid-freq-default;
+                                    freq <=> root.eq-mid-freq;
+                                    freq-edited(v) => { root.fx-changed(61, v); }
                                 }
-                                k-treble := Knob {
+                                k-treble := EqPair {
                                     width: tray.slot;
-                                    size: 52px;
                                     label: "Treble";
-                                    value <=> root.amp-treble;
-                                    edited(v) => { root.amp-param-changed(6, v); }
+                                    gain <=> root.amp-treble;
+                                    gain-edited(v) => { root.amp-param-changed(6, v); }
+                                    freq-min: 1000;
+                                    freq-max: 4000;
+                                    freq-enabled: root.eq-freq-known;
+                                    freq-default: root.eq-treble-freq-default;
+                                    freq <=> root.eq-treble-freq;
+                                    freq-edited(v) => { root.fx-changed(62, v); }
                                 }
                             }
                         }

@@ -27,6 +27,27 @@ use crate::{AppWindow, ECHO_GUARD};
 const DIVISIONS: usize = 18;
 const DELAY_TIME_MAX: f32 = 1000.0;
 
+// Amp EQ band frequencies (Hz), serial-only (no MIDI CC); the band gains
+// (11, 13, 16) are amp knobs on MIDI CCs. Bass and treble ranges: Builty
+// `tonex_params.c`, also the layout fingerprint in tonex_serial.rs. Mid:
+// not established in this code base (PROTOCOL.md: idx 15 "suggests a
+// frequency", 750 in a preset dump); 150..5000 Hz is an assumption.
+const P_EQ_BASS_FREQ: usize = 12;
+const P_EQ_MID_FREQ: usize = 15;
+const P_EQ_TREBLE_FREQ: usize = 17;
+const EQ_FREQS: [(usize, (f32, f32)); 3] =
+    [(P_EQ_BASS_FREQ, (75.0, 600.0)), (P_EQ_MID_FREQ, (150.0, 5000.0)), (P_EQ_TREBLE_FREQ, (1000.0, 4000.0))];
+
+/// Knob step for a frequency: 5 Hz below 1 kHz, 50 Hz from there (the
+/// same rule as the UI knob's `step` binding).
+pub fn freq_step(hz: f32) -> f32 {
+    if hz >= 1000.0 {
+        50.0
+    } else {
+        5.0
+    }
+}
+
 // Compressor (Builty enum 5..=9).
 /// 0 pre / 1 post amp (Builty "COMP POST", default 1).
 const P_COMP_POST: usize = 5;
@@ -154,6 +175,9 @@ pub enum FxControl {
     CabMic2X,
     CabMic2Z,
     CabBlend,
+    EqBassFreq,
+    EqMidFreq,
+    EqTrebleFreq,
 }
 
 /// Which card a parameter belongs to.
@@ -165,6 +189,8 @@ pub enum Card {
     Mod,
     Gate,
     Cab,
+    /// EQ band frequencies of the amp tab.
+    Eq,
 }
 
 /// Selected (0-based) model per card, for per-model parameter indices.
@@ -221,6 +247,9 @@ impl FxControl {
             57 => CabMic2X,
             58 => CabMic2Z,
             59 => CabBlend,
+            60 => EqBassFreq,
+            61 => EqMidFreq,
+            62 => EqTrebleFreq,
             _ => return None,
         })
     }
@@ -281,6 +310,9 @@ impl FxControl {
             CabMic2X => P_CAB_MIC2_X,
             CabMic2Z => P_CAB_MIC2_Z,
             CabBlend => P_CAB_BLEND,
+            EqBassFreq => P_EQ_BASS_FREQ,
+            EqMidFreq => P_EQ_MID_FREQ,
+            EqTrebleFreq => P_EQ_TREBLE_FREQ,
         })
     }
 
@@ -297,6 +329,7 @@ impl FxControl {
             GateEnable | GatePost | GateThreshold | GateRelease | GateDepth => Card::Gate,
             CabType | CabModel | CabReso | CabMic1 | CabMic1X | CabMic1Z | CabMic2 | CabMic2X | CabMic2Z
             | CabBlend => Card::Cab,
+            EqBassFreq | EqMidFreq | EqTrebleFreq => Card::Eq,
         }
     }
 
@@ -332,6 +365,9 @@ fn mod_range() -> std::ops::Range<usize> {
 
 /// Card owning parameter `index`, if any.
 pub fn card_of(index: usize) -> Option<Card> {
+    if EQ_FREQS.iter().any(|&(i, _)| i == index) {
+        return Some(Card::Eq);
+    }
     [
         (Card::Delay, delay_range()),
         (Card::Reverb, reverb_range()),
@@ -392,6 +428,12 @@ fn cab_section_ok(raw: &[f32]) -> bool {
         && is_index(raw[P_CAB_MIC2], MIC_TYPES)
 }
 
+/// EQ frequencies: each within its Hz range (unlike the switch-only checks
+/// above, these values are the only evidence the layout is right).
+fn eq_section_ok(raw: &[f32]) -> bool {
+    EQ_FREQS.iter().all(|&(i, (min, max))| raw.get(i).is_some_and(|v| (min..=max).contains(v)))
+}
+
 fn mod_section_ok(raw: &[f32]) -> bool {
     raw.len() >= MOD_END
         && is_switch(raw[P_MOD_POST])
@@ -448,6 +490,16 @@ impl FxMirror {
                 }
             }
             cards.push(card);
+        }
+        if eq_section_ok(raw) {
+            for (i, _) in EQ_FREQS {
+                if !self.recent(i) {
+                    self.values[i] = Some(raw[i]);
+                }
+            }
+            cards.push(Card::Eq);
+        } else if !raw.is_empty() {
+            eprintln!("TONEX: EQ frequencies look implausible, not shown");
         }
         cards
     }
@@ -633,6 +685,33 @@ pub fn refresh(ui: &AppWindow, m: &FxMirror, card: Card) {
                 }
             }
         }
+        Card::Eq => {
+            let setters: [fn(&AppWindow, f32); 3] =
+                [AppWindow::set_eq_bass_freq, AppWindow::set_eq_mid_freq, AppWindow::set_eq_treble_freq];
+            let mut known = true;
+            for ((i, (min, max)), set) in EQ_FREQS.into_iter().zip(setters) {
+                match m.get(i) {
+                    Some(v) => set(ui, snap(v, (min, max, freq_step(v)))),
+                    None => known = false,
+                }
+            }
+            ui.set_eq_freq_known(known);
+        }
+    }
+}
+
+/// Points the EQ frequency knobs' double-click reset at the values the
+/// preset was loaded with (in range only).
+pub fn set_eq_defaults(ui: &AppWindow, diff: &PresetDiff) {
+    let setters: [fn(&AppWindow, f32); 3] = [
+        AppWindow::set_eq_bass_freq_default,
+        AppWindow::set_eq_mid_freq_default,
+        AppWindow::set_eq_treble_freq_default,
+    ];
+    for ((i, (min, max)), set) in EQ_FREQS.into_iter().zip(setters) {
+        if let Some(v) = diff.baseline(i).filter(|v| (min..=max).contains(v)) {
+            set(ui, v);
+        }
     }
 }
 
@@ -684,14 +763,17 @@ mod tests {
         assert_eq!(card_of(4), Some(Card::Gate));
         assert_eq!(card_of(24), Some(Card::Cab));
         assert_eq!(card_of(33), Some(Card::Cab));
-        for amp in [11, 13, 16, 18, 20, 21, 23, 34, 35] {
+        for amp in [11, 13, 14, 16, 18, 20, 21, 23, 34, 35] {
             assert_eq!(card_of(amp), None, "index {amp}");
+        }
+        for eq in [12, 15, 17] {
+            assert_eq!(card_of(eq), Some(Card::Eq), "index {eq}");
         }
     }
 
     #[test]
     fn ids_roundtrip_and_cards() {
-        for id in (0..=8).chain(10..=16).chain(20..=24).chain(30..=38).chain(40..=44).chain(50..=59) {
+        for id in (0..=8).chain(10..=16).chain(20..=24).chain(30..=38).chain(40..=44).chain(50..=62) {
             let c = FxControl::from_id(id).unwrap();
             let card = match id {
                 0..=8 => Card::Delay,
@@ -699,11 +781,13 @@ mod tests {
                 20..=24 => Card::Comp,
                 30..=38 => Card::Mod,
                 40..=44 => Card::Gate,
+                60..=62 => Card::Eq,
                 _ => Card::Cab,
             };
             assert_eq!(c.card(), card);
         }
-        for id in [9, 17, 25, 39, 45, 60] {
+        assert_eq!(FxControl::EqMidFreq.param_index(Models::default()), Some(15));
+        for id in [9, 17, 25, 39, 45, 63] {
             assert_eq!(FxControl::from_id(id), None);
         }
     }
@@ -745,6 +829,34 @@ mod tests {
         assert_eq!(m.load(&raw), [Card::Reverb, Card::Comp, Card::Gate]);
         assert_eq!(m.load(&raw[..80]), [Card::Reverb, Card::Comp, Card::Gate]);
         assert!(m.load(&[]).is_empty());
+    }
+
+    #[test]
+    fn eq_frequencies_load_only_when_plausible() {
+        let mut raw = plausible_raw();
+        raw[P_EQ_BASS_FREQ] = 300.0;
+        raw[P_EQ_MID_FREQ] = 750.0;
+        raw[P_EQ_TREBLE_FREQ] = 2000.0;
+        let mut m = FxMirror::default();
+        assert!(m.load(&raw).contains(&Card::Eq));
+        assert_eq!(m.get(P_EQ_MID_FREQ), Some(750.0));
+        // Our write wins over a stale read within the echo guard.
+        m.wrote(P_EQ_MID_FREQ, 900.0);
+        m.load(&raw);
+        assert_eq!(m.get(P_EQ_MID_FREQ), Some(900.0));
+
+        raw[P_EQ_TREBLE_FREQ] = 1.0; // shifted layout / junk
+        assert!(!FxMirror::default().load(&raw).contains(&Card::Eq));
+        assert!(!FxMirror::default().load(&raw[..16]).contains(&Card::Eq));
+    }
+
+    #[test]
+    fn freq_steps() {
+        assert_eq!(freq_step(75.0), 5.0);
+        assert_eq!(freq_step(995.0), 5.0);
+        assert_eq!(freq_step(1000.0), 50.0);
+        assert_eq!(snap(1623.0, (1000.0, 4000.0, freq_step(1623.0))), 1600.0);
+        assert_eq!(snap(312.4, (75.0, 600.0, freq_step(312.4))), 310.0);
     }
 
     /// params[0..40] of preset 148 dumped from the user's pedal.
@@ -832,6 +944,12 @@ impl PresetDiff {
             self.baseline = raw.to_vec();
         }
         self.current = raw.to_vec();
+    }
+
+    /// Value of parameter `index` as loaded with the preset (None before
+    /// the first read); double-click resets of the EQ frequencies use it.
+    pub fn baseline(&self, index: usize) -> Option<f32> {
+        self.baseline.get(index).copied()
     }
 
     /// Preset volume read with the preset's details: baseline right after

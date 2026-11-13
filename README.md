@@ -18,21 +18,24 @@ TX Open Studio is written in Rust with the [Slint](https://slint.dev) UI toolkit
 - Lists all 150 presets with the names and "character" tags (CLEAN, DRIVE, STOMP - OVERDRIVE, ...) read from the pedal, labelled by bank and slot the way the pedal's display shows them (for example `46C`).
 - Search field: every word you type must match the preset id, bank, slot, name or character (`46c`, `bank 14`, `clean`, `dg solo`). Escape clears the search.
 - Keyboard navigation: Left/Right step through presets. In the search field, Down moves into the list. In the list, Up/Down move the highlight and Enter selects the preset.
-- Preset switching over USB-MIDI (Bank Select CC0 + Program Change, channel 1).
+- Preset switching over USB-MIDI (Bank Select CC0 + Program Change, on whatever MIDI channel the pedal is set to — the app reads it from the pedal).
 - When you change presets with the footswitches, the app follows.
+- The list's numbering follows the pedal's **Naming** setting (Bank+Name `46C`, 0-based `PC 083`, or names only) — change it on either side and both displays switch.
 
 **Live editing (USB serial)**
 
 Changes are sent to the pedal as you turn a knob in the app. Sync goes both ways: turn a knob on the pedal and the app updates. The tabs mirror the pedal's signal chain:
 
-- **Amp**: on/off, Gain, Volume, Presence, Depth, Bass, Mid, Treble.
+- **Amp**: on/off, Gain, Volume, Mix (dry/wet of the model), Presence, Depth — and a Two-Notes-style EQ: Bass, Mid and Treble gain knobs, each with a small frequency knob (75–600 Hz / 150 Hz–5 kHz / 1–4 kHz).
 - **Noise gate**: on/off, pre/post amp, Threshold, Release, Depth.
 - **Compressor**: on/off, pre/post amp, Threshold, Gain, Attack.
 - **Cabinet**: Tone Model (the captured cab), VIR or Off; VIR cab model, resonance, two mics (condenser/dynamic/ribbon, X/Z position) and mic blend.
 - **Modulation**: on/off, pre/post, Chorus / Tremolo / Phaser / Flanger / Rotary with tempo sync and per-model controls.
 - **Delay**: on/off, pre/post, Digital / Tape, sync or time, feedback, normal/ping-pong, mix.
 - **Reverb**: on/off, pre/post, Spring 1-4 / Room / Plate, time, pre-delay, color, mix.
-- **Global**: In Trim and Master (pedal-wide settings), plus Preset Volume.
+- **Global**: the pedal's GLOBAL SETUP without the menu diving — Preset Volume, In Trim, Master and Interface (USB) levels; tuner mode (Off / Through / Muted) and reference pitch; tap tempo (button or the T key) with the pedal's **actual BPM** read back, writable as a number, and the Global/Preset tempo mode; global cab-sim bypass; display Naming; MIDI channel, MIDI Thru and MIDI Clock mode.
+
+![Global tab](docs/screenshot-global.png)
 
 Other details:
 
@@ -141,7 +144,7 @@ The desktop entry runs `tx-open-studio`, so the binary has to be on your `PATH` 
 ## Usage notes
 
 - Connect the pedal over USB and start the app. No configuration is needed. The app connects to the first MIDI output whose name contains "TONEX" and to the `/dev/ttyACM*` port whose USB vendor is IK Multimedia (`1963`).
-- The app sends MIDI on **channel 1**. On the pedal, set the MIDI channel to 1 under GLOBAL SETUP.
+- The app reads the pedal's MIDI channel over serial and sends on it, so any channel works. Before the first read (or if the serial side is down, for example without the udev rule) it falls back to **channel 1**.
 - Run with `TX_DEBUG_SERIAL=1` to log unhandled serial frames as hex on stderr. This is useful for protocol work and bug reports:
 
   ```sh

@@ -454,7 +454,7 @@ Set `TX_DEBUG_SERIAL=1` to make the app log unhandled frames as hex on stderr.
 
 ## 7. MIDI control (USB-MIDI port, same cable)
 
-Channel 1. Source: `src/main.rs` (`send_preset`, `bank_and_pc`, `knob_cc`, `TUNER_CC`).
+The pedal listens on the channel set in GLOBAL SETUP (global idx 7, §4.5, default 1); the app reads it over serial and sends on it. Source: `src/main.rs` (`send_preset`, `bank_and_pc`, `knob_cc`, `TUNER_CC`).
 
 ### Preset select
 

@@ -709,7 +709,34 @@ impl PresetNames {
         }
         true
     }
+
+    /// Stores a preset's new name (after a verified rename) and updates its
+    /// list row in place if it is shown.
+    fn set_name(&self, ui: &AppWindow, preset_idx: u8, name: String) {
+        let i = usize::from(preset_idx);
+        let meta = {
+            let mut names = self.lock();
+            if names.len() < PRESET_COUNT {
+                names.resize(PRESET_COUNT, PresetMeta::default());
+            }
+            names[i].name = name;
+            names[i].clone()
+        };
+        let model = ui.get_preset_names();
+        let preset = i as i32 + 1;
+        if let Some(row) = model.iter().position(|r| r.preset == preset) {
+            model.set_row_data(row, Self::row(preset, &meta));
+        }
+    }
+
+    fn name_of(&self, preset: i32) -> String {
+        self.meta(preset).name
+    }
 }
+
+/// How long after a rename a pushed preset change for the renamed preset
+/// is taken as an echo of the write, not as a footswitch change.
+const RENAME_ECHO_GUARD: Duration = Duration::from_secs(3);
 
 /// OLED display: name ("" until known; bank/slot are derived in the UI)
 /// and character chip of `preset`.
@@ -784,6 +811,9 @@ struct SyncCtx {
     serial: Arc<Mutex<Option<tonex_serial::Pedal>>>,
     /// Our own recent global writes (see `GlobalGuard`).
     global_guard: Arc<Mutex<GlobalGuard>>,
+    /// Last rename (0-based preset index, when it finished), see
+    /// `RENAME_ECHO_GUARD`.
+    rename_echo: Arc<Mutex<Option<(u8, Instant)>>>,
 }
 
 impl SyncCtx {
@@ -855,6 +885,8 @@ impl SyncCtx {
         self.amp().clear();
         *self.global_guard() = GlobalGuard::default();
         ui.set_globals_known(false);
+        // A rename in flight on the lost session never reports back.
+        ui.set_rename_busy(0);
         ui.set_preset_dirty(false);
         ui.set_preset_level_known(false);
         ui.set_eq_freq_known(false);
@@ -1040,8 +1072,29 @@ impl SyncCtx {
                     self.request_amp_params(preset);
                 }
             }
+            Event::Renamed { preset_idx, result } => {
+                ui.set_rename_busy(0);
+                *self.rename_echo.lock().unwrap_or_else(|e| e.into_inner()) = Some((preset_idx, Instant::now()));
+                match result {
+                    Ok(name) => {
+                        eprintln!("TONEX: preset {} renamed to \"{name}\"", preset_id(i32::from(preset_idx) + 1));
+                        self.names.set_name(ui, preset_idx, name);
+                        if ui.get_preset() == i32::from(preset_idx) + 1 {
+                            show_preset_meta(ui, &self.names, ui.get_preset());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("TONEX: rename failed: {e}");
+                        ui.set_status_note("RENAME FAILED".into());
+                    }
+                }
+            }
             Event::PresetChanged { preset_idx, params, raw } => {
                 let preset = i32::from(preset_idx) + 1;
+                let echo = *self.rename_echo.lock().unwrap_or_else(|e| e.into_inner());
+                if preset != ui.get_preset() && echo.is_some_and(|(i, t)| i == preset_idx && t.elapsed() < RENAME_ECHO_GUARD) {
+                    return; // echo of our rename write, not a footswitch change
+                }
                 if preset != ui.get_preset() {
                     show_preset(ui, &self.names, preset);
                     self.amp().clear();
@@ -1161,6 +1214,34 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_preset(DEFAULT_PRESET);
     fx::set_cab_model_options(&ui, 0);
     show_list(&ui, &ctx.names);
+
+    // Live filter for the rename field: printable ASCII, max 32 bytes.
+    ui.on_name_filter(|text| tonex_serial::filter_name(&text).into());
+
+    {
+        // Preset rename (list context menu). Only one at a time; the row
+        // shows "saving…" until Event::Renamed.
+        let ui_weak = ui.as_weak();
+        let ctx = ctx.clone();
+        ui.on_rename_preset(move |preset, name| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if ui.get_rename_busy() != 0 || !(MIN_PRESET..=MAX_PRESET).contains(&preset) {
+                return;
+            }
+            let name = tonex_serial::clean_name(&name);
+            if name.is_empty() || name == ctx.names.name_of(preset) {
+                return; // nothing to write: same as cancel
+            }
+            let idx = (preset - 1) as u8;
+            match ctx.with_serial(|p| p.rename_preset(idx, &name, &preset_id(preset))) {
+                Ok(()) => ui.set_rename_busy(preset),
+                Err(e) => {
+                    eprintln!("TONEX: rename not started: {e}");
+                    ui.set_status_note("RENAME FAILED".into());
+                }
+            }
+        });
+    }
 
     {
         let ui_weak = ui.as_weak();

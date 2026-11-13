@@ -1522,6 +1522,15 @@ export component AppWindow inherits Window {
     // Preset list search: Rust filters `preset-names` and reports the match
     // count and the current preset's row (-1 = filtered out).
     callback search-changed(string);
+    // Preset rename (list context menu): row being edited and rename in
+    // flight (preset numbers, 0 = none). rename-preset writes to the pedal
+    // (Rust); name-filter keeps the field to printable ASCII, 32 bytes.
+    in-out property <int> rename-edit: 0;
+    in property <int> rename-busy: 0;
+    callback rename-preset(int, string);
+    pure callback name-filter(string) -> string;
+    // Short status bar message (e.g. "RENAME FAILED"), cleared after 4 s.
+    in-out property <string> status-note;
     in property <int> preset-count: 150;
     in property <int> selected-row: -1;
     // Keyboard-highlighted list row (-1 = none).
@@ -1556,7 +1565,16 @@ export component AppWindow inherits Window {
     }
     function select-tab(n: int) {
         root.tab = n;
+        root.rename-edit = 0;
         main-keys.focus();
+    }
+
+    Timer {
+        interval: 4s;
+        running: root.status-note != "";
+        triggered => {
+            root.status-note = "";
+        }
     }
 
     Timer {
@@ -2141,6 +2159,8 @@ export component AppWindow inherits Window {
 
                                     property <bool> is-selected: root.preset == row.preset;
                                     property <bool> is-cursor: list-keys.has-focus && root.cursor-row == index;
+                                    property <bool> editing: root.rename-edit == row.preset;
+                                    property <bool> saving: root.rename-busy == row.preset;
 
                                     Rectangle {
                                         y: 1px;
@@ -2150,8 +2170,13 @@ export component AppWindow inherits Window {
                                         border-width: 1px;
                                         border-color: is-cursor ? Theme.accent.with-alpha(0.5) : (is-selected ? Theme.bevel : transparent);
                                         background: is-selected ? Theme.selected : (row-ta.has-hover || is-cursor ? Theme.soft : transparent);
+                                        opacity: saving ? 0.5 : 1;
 
-                                        HorizontalLayout {
+                                        // Context menu position (right-click).
+                                        property <length> menu-x;
+                                        property <length> menu-y;
+
+                                        if !editing: HorizontalLayout {
                                             padding-left: 8px;
                                             padding-right: 8px;
                                             spacing: 10px;
@@ -2181,9 +2206,16 @@ export component AppWindow inherits Window {
                                                 overflow: elide;
                                                 wrap: no-wrap;
                                             }
+                                            if saving: Text {
+                                                text: "saving…";
+                                                color: Theme.muted;
+                                                font-size: 9px;
+                                                font-family: Theme.mono-font;
+                                                vertical-alignment: center;
+                                            }
                                             // Character tag in its colour; gray
                                             // TONE when the metadata names none.
-                                            if row.name != "": Text {
+                                            if row.name != "" && !saving: Text {
                                                 text: row.kind > 0 ? row.character : "TONE";
                                                 color: row.kind > 0 ? CharacterColors.of(row.kind).brighter(0.35) : Theme.muted;
                                                 font-size: 9px;
@@ -2206,12 +2238,164 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
+                                        // Inline rename editor: name field, ✓ and ✕.
+                                        // Enter confirms, Escape cancels.
+                                        if editing: HorizontalLayout {
+                                            padding-left: 6px;
+                                            padding-right: 4px;
+                                            padding-top: 2px;
+                                            padding-bottom: 2px;
+                                            spacing: 4px;
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                background: Theme.oled;
+                                                border-radius: 4px;
+                                                border-width: 1px;
+                                                border-color: Theme.accent.with-alpha(0.6);
+                                                clip: true;
+                                                rename-input := TextInput {
+                                                    x: 6px;
+                                                    width: parent.width - 12px;
+                                                    height: parent.height;
+                                                    vertical-alignment: center;
+                                                    horizontal-alignment: left;
+                                                    single-line: true;
+                                                    color: Theme.ink;
+                                                    font-size: 12px;
+                                                    selection-background-color: Theme.amber-glow;
+                                                    init => {
+                                                        self.text = row.name;
+                                                        self.focus();
+                                                        self.select-all();
+                                                    }
+                                                    edited => {
+                                                        let filtered = root.name-filter(self.text);
+                                                        if (filtered != self.text) {
+                                                            self.text = filtered;
+                                                        }
+                                                    }
+                                                    accepted => {
+                                                        root.rename-preset(row.preset, self.text);
+                                                        root.rename-edit = 0;
+                                                        list-keys.focus();
+                                                    }
+                                                    // Losing focus (clicking another row, a tab, …)
+                                                    // cancels the edit — except when the focus loss
+                                                    // comes from pressing ✓ or ✕ themselves.
+                                                    changed has-focus => {
+                                                        if (!self.has-focus && root.rename-edit == row.preset
+                                                                && !ok-ta.has-hover && !cancel-ta.has-hover) {
+                                                            root.rename-edit = 0;
+                                                        }
+                                                    }
+                                                    key-pressed(event) => {
+                                                        if (event.text == Key.Escape) {
+                                                            root.rename-edit = 0;
+                                                            list-keys.focus();
+                                                            return accept;
+                                                        }
+                                                        reject
+                                                    }
+                                                }
+                                            }
+                                            ok-btn := Rectangle {
+                                                width: 22px;
+                                                border-radius: 4px;
+                                                background: ok-ta.has-hover ? Theme.soft : transparent;
+                                                Text {
+                                                    text: "✓";
+                                                    color: Theme.accent;
+                                                    font-size: 13px;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                ok-ta := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => {
+                                                        root.rename-preset(row.preset, rename-input.text);
+                                                        root.rename-edit = 0;
+                                                        list-keys.focus();
+                                                    }
+                                                }
+                                            }
+                                            Rectangle {
+                                                width: 22px;
+                                                border-radius: 4px;
+                                                background: cancel-ta.has-hover ? Theme.soft : transparent;
+                                                Text {
+                                                    text: "✕";
+                                                    color: Theme.muted;
+                                                    font-size: 12px;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                                cancel-ta := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => {
+                                                        root.rename-edit = 0;
+                                                        list-keys.focus();
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         row-ta := TouchArea {
+                                            // Off while editing, so the editor gets the clicks.
+                                            enabled: !editing;
                                             mouse-cursor: pointer;
                                             clicked => {
                                                 root.cursor-row = index;
                                                 list-keys.focus();
                                                 root.preset-changed(row.preset);
+                                            }
+                                            // Right-click: context menu (named presets
+                                            // only, one rename at a time).
+                                            pointer-event(event) => {
+                                                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down
+                                                        && row.name != "" && root.rename-busy == 0) {
+                                                    parent.menu-x = self.mouse-x;
+                                                    parent.menu-y = self.mouse-y;
+                                                    row-menu.show();
+                                                }
+                                            }
+                                        }
+
+                                        row-menu := PopupWindow {
+                                            x: parent.menu-x;
+                                            y: parent.menu-y;
+                                            width: 110px;
+                                            height: 32px;
+                                            Rectangle {
+                                                background: Theme.surface;
+                                                border-width: 1px;
+                                                border-color: Theme.edge;
+                                                border-radius: 6px;
+                                                drop-shadow-blur: 10px;
+                                                drop-shadow-offset-y: 3px;
+                                                drop-shadow-color: #000000aa;
+                                                Rectangle {
+                                                    x: 4px;
+                                                    y: 4px;
+                                                    width: parent.width - 8px;
+                                                    height: 24px;
+                                                    border-radius: 4px;
+                                                    background: menu-ta.has-hover ? Theme.soft : transparent;
+                                                    Text {
+                                                        x: 8px;
+                                                        height: parent.height;
+                                                        text: "Rename";
+                                                        color: Theme.ink;
+                                                        font-size: 11px;
+                                                        vertical-alignment: center;
+                                                    }
+                                                    menu-ta := TouchArea {
+                                                        mouse-cursor: pointer;
+                                                        clicked => {
+                                                            root.rename-edit = row.preset;
+                                                            row-menu.close();
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -3275,8 +3459,8 @@ export component AppWindow inherits Window {
 
                     Text {
                         horizontal-stretch: 1;
-                        text: root.status-text;
-                        color: Theme.status-ink;
+                        text: root.status-note != "" ? root.status-note : root.status-text;
+                        color: root.status-note != "" ? Theme.error : Theme.status-ink;
                         font-size: 10px;
                         font-weight: 500;
                         font-family: Theme.mono-font;

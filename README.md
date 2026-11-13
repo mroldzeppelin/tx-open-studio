@@ -157,7 +157,7 @@ The desktop entry runs `tx-open-studio`, so the binary has to be on your `PATH` 
 
 These are not on a to-do list waiting for time. Each one is either an unknown part of the protocol or something the pedal does not report.
 
-- **No renaming or saving presets to the pedal.** No message for writing a preset name or storing a preset has been identified. Edits change the pedal's live state only. To keep them, save the preset on the pedal itself.
+- **Presets can be renamed, but edits can't be saved yet.** Right-click a preset in the list → Rename writes the new name to the pedal (the preset is backed up to `~/.local/share/tx-open-studio/backups` first). Parameter edits change the pedal's live state only; to keep them, save the preset on the pedal itself.
 - **No upload or download of `.tonex` captures / presets.** The full preset dump is an undecoded binary blob, and no upload path is known.
 - **The amp model (capture) cannot be changed.** Only the parameters around it can. The pedal does not even store model names in a readable form.
 - **Preset volume is unknown until first touched.** The pedal does not include it in any identified place of the preset data. The app learns the value once you move it in the app or on the pedal.

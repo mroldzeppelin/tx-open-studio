@@ -131,7 +131,9 @@ const FLAG: u8 = 0x7E;
 const ESCAPE: u8 = 0x7D;
 const ESCAPE_XOR: u8 = 0x20;
 /// Received frames larger than this are discarded (summary is ~2 KB).
-const MAX_FRAME_LEN: usize = 64 * 1024;
+/// Upper bound for one frame as received (still byte-stuffed): a full
+/// preset dump is ~30 KB and may grow when stuffed.
+const MAX_FRAME_LEN: usize = 128 * 1024;
 
 const OVERALL_DEADLINE: Duration = Duration::from_secs(10);
 const READ_POLL: Duration = Duration::from_millis(50);
@@ -346,6 +348,162 @@ fn preset_request(index: u8) -> Vec<u8> {
     req.push(index);
     req.push(0x00); // summary, not full details
     req
+}
+
+// ---------------------------------------------------------------- preset dump / rename
+
+/// Full preset dump reply, and the preset write (type 0x0203).
+const TYPE_PRESET_DUMP: u16 = 0x0203;
+const DUMP_TIMEOUT: Duration = Duration::from_millis(4000);
+/// Time the pedal gets to store a written preset before it is re-read.
+const WRITE_SETTLE: Duration = Duration::from_millis(300);
+/// The name is the 33-byte buffer (ASCII, NUL-terminated, zero-filled)
+/// right after the first `BC 21` of a dump body, which must lie within
+/// the first `NAME_TAG_WINDOW` bytes.
+const NAME_TAG: [u8; 2] = [0xBC, 0x21];
+const NAME_BUF_LEN: usize = 33;
+const NAME_TAG_WINDOW: usize = 64;
+
+/// A preset index in the value encoding: literal below 128, `80 xx` above.
+fn index_bytes(idx: u8) -> Vec<u8> {
+    if idx >= 0x80 {
+        vec![0x80, idx]
+    } else {
+        vec![idx]
+    }
+}
+
+/// Full preset dump request, as the official editor sends it: like the
+/// details request but with the last byte 01 (full) and the header size
+/// field = body length.
+fn full_dump_request(idx: u8) -> Vec<u8> {
+    let mut body = vec![0xB9, 0x04, 0x10, 0x01];
+    body.extend(index_bytes(idx));
+    body.push(0x01);
+    let mut req = vec![0xB9, 0x03, 0x81, 0x00, 0x02, 0x82];
+    req.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    req.extend_from_slice(&[0x80, 0x10, 0x03]);
+    req.extend(body);
+    req
+}
+
+/// Preset write: `B9 03 81 03 02 82 <len LE> 80 10 03` + a (patched) dump
+/// body.
+fn preset_write_request(body: &[u8]) -> Result<Vec<u8>, String> {
+    let len = u16::try_from(body.len()).map_err(|_| "preset body too large".to_string())?;
+    let mut req = vec![0xB9, 0x03, 0x81, 0x03, 0x02, 0x82];
+    req.extend_from_slice(&len.to_le_bytes());
+    req.extend_from_slice(&[0x80, 0x10, 0x03]);
+    req.extend_from_slice(body);
+    Ok(req)
+}
+
+/// Offset of the name buffer in a dump body.
+fn name_buf_offset(body: &[u8]) -> Result<usize, String> {
+    let window = &body[..body.len().min(NAME_TAG_WINDOW)];
+    let start = find(window, &NAME_TAG).ok_or("name field not found")? + NAME_TAG.len();
+    if body.len() < start + NAME_BUF_LEN {
+        return Err("dump body too short".into());
+    }
+    Ok(start)
+}
+
+fn name_buffer(body: &[u8]) -> Result<&[u8], String> {
+    let start = name_buf_offset(body)?;
+    Ok(&body[start..start + NAME_BUF_LEN])
+}
+
+/// The body of a full dump reply for preset `idx`, after the layout checks
+/// a write relies on: type 0x0203, header size == body length, body starts
+/// `B9 04 01 00 <idx>`, name field near the start. Anything else: Err.
+fn dump_body(payload: &[u8], idx: u8) -> Result<&[u8], String> {
+    if frame_type(payload) != Some(TYPE_PRESET_DUMP) {
+        return Err("not a preset dump".into());
+    }
+    let mut pos = 2;
+    read_u16_value(payload, &mut pos).ok_or("bad dump header")?; // type
+    let size = read_u16_value(payload, &mut pos).ok_or("bad dump header size")?;
+    read_u16_value(payload, &mut pos).ok_or("bad dump header")?; // `10`
+    let body = payload.get(pos..).ok_or("dump too short")?;
+    if body.len() != usize::from(size) {
+        return Err(format!("dump body is {} bytes, header says {size}", body.len()));
+    }
+    let mut start = vec![0xB9, 0x04, 0x01, 0x00];
+    start.extend(index_bytes(idx));
+    if !body.starts_with(&start) {
+        return Err(format!("dump body is not for preset index {idx}"));
+    }
+    name_buf_offset(body)?;
+    Ok(body)
+}
+
+/// A name as typed, reduced to what the pedal stores: printable ASCII
+/// (0x20..=0x7E) only, at most 32 bytes. Not trimmed (for live typing).
+pub fn filter_name(input: &str) -> String {
+    input.chars().filter(|c| (' '..='~').contains(c)).take(NAME_LEN).collect()
+}
+
+/// A name ready to write: `filter_name`, then trimmed.
+pub fn clean_name(input: &str) -> String {
+    filter_name(input).trim().to_string()
+}
+
+/// `body` with the name buffer set to `name` (cleaned), zero-filled.
+fn patch_dump_name(body: &[u8], name: &str) -> Result<Vec<u8>, String> {
+    let name = clean_name(name);
+    if name.is_empty() {
+        return Err("empty name".into());
+    }
+    let start = name_buf_offset(body)?;
+    let mut out = body.to_vec();
+    let buf = &mut out[start..start + NAME_BUF_LEN];
+    buf.fill(0);
+    buf[..name.len()].copy_from_slice(name.as_bytes());
+    Ok(out)
+}
+
+/// `~/.local/share/tx-open-studio/backups` (or under `$XDG_DATA_HOME`).
+fn backup_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+    Some(base.join("tx-open-studio").join("backups"))
+}
+
+/// `YYYYmmdd-HHMMSS` (UTC) for Unix time `secs`.
+fn utc_stamp(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    // Days since 1970-01-01 → civil date (H. Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+/// Backup file name: `<UTC stamp>-<preset id>.bin`.
+fn backup_file_name(secs: u64, label: &str) -> String {
+    format!("{}-{label}.bin", utc_stamp(secs))
+}
+
+/// Saves a dump body (the preset as it was before a write).
+fn save_backup(body: &[u8], label: &str) -> Result<PathBuf, String> {
+    let dir = backup_dir().ok_or("no home directory")?;
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(backup_file_name(secs, label));
+    fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
 }
 
 /// Single-parameter write (Builty `usb_tonex_send_single_parameter`, big
@@ -964,6 +1122,10 @@ pub enum Event {
     CurrentPreset(u8),
     /// Global config (reply to `request_globals`, or pushed by the pedal).
     Globals(Result<Globals, String>),
+    /// Result of `Pedal::rename_preset` (0-based preset index): the name
+    /// as stored and verified, or why nothing (or nothing verified) was
+    /// written. Always sent, also when the session ends mid-operation.
+    Renamed { preset_idx: u8, result: Result<String, String> },
     /// The pedal switched preset by itself (footswitch); carries the new
     /// preset's amp params when they parsed, and its raw parameter array.
     PresetChanged { preset_idx: u8, params: Option<AmpParams>, raw: Vec<f32> },
@@ -1025,6 +1187,8 @@ enum Request {
     SetParam(u8, u8, f32),
     Globals,
     SetGlobal(usize, f32),
+    /// Rename a preset (index, new name, id for the backup file name).
+    Rename(u8, String, String),
 }
 
 /// Handle to the session thread that owns the serial port. Dropping it ends
@@ -1092,6 +1256,17 @@ impl Pedal {
 
     pub fn request_amp_params(&self, preset_idx: u8) -> Result<(), String> {
         self.send(Request::AmpParams(preset_idx))
+    }
+
+    /// Renames preset `idx` (0-based): reads a fresh full dump, validates
+    /// it, saves it as a backup, writes it back with the new name and
+    /// verifies by re-reading. Answered with `Event::Renamed`. `label` is
+    /// the preset id used in the backup file name.
+    pub fn rename_preset(&self, idx: u8, name: &str, label: &str) -> Result<(), String> {
+        if usize::from(idx) >= PRESET_COUNT {
+            return Err(format!("preset index {idx} out of range"));
+        }
+        self.send(Request::Rename(idx, name.to_string(), label.to_string()))
     }
 
     /// Reads the global config; answered with `Event::Globals`.
@@ -1228,6 +1403,7 @@ impl<F: Fn(Event)> Session<'_, F> {
         let mut global_writes: Vec<(usize, f32)> = Vec::new();
         let mut read_globals = false;
         let mut latest_read = None;
+        let mut renames = Vec::new();
         let mut rest = VecDeque::new();
         for r in std::mem::take(&mut self.queue) {
             match r {
@@ -1245,6 +1421,7 @@ impl<F: Fn(Event)> Session<'_, F> {
                 },
                 Request::Globals => read_globals = true,
                 Request::AmpParams(idx) => latest_read = Some(idx),
+                Request::Rename(idx, name, label) => renames.push((idx, name, label)),
                 other => rest.push_back(other),
             }
         }
@@ -1271,7 +1448,94 @@ impl<F: Fn(Event)> Session<'_, F> {
             }
             served = true;
         }
+        for (idx, name, label) in renames {
+            match self.rename_preset(idx, &name, &label) {
+                Ok(result) => (self.on_event)(Event::Renamed { preset_idx: idx, result }),
+                Err(e) => {
+                    // Link failure: report it, then end the session.
+                    (self.on_event)(Event::Renamed { preset_idx: idx, result: Err(e.clone()) });
+                    return Err(e);
+                }
+            }
+            served = true;
+        }
         Ok(served)
+    }
+
+    /// Requests a full dump of preset `idx` and returns its reply payload,
+    /// handling other frames meanwhile. Preset-details pushes are dropped
+    /// here: one may echo our own write and must not look like a
+    /// footswitch change. Inner Err: no valid dump (with the last layout
+    /// problem seen); outer Err: link failure.
+    fn fetch_dump(&mut self, idx: u8) -> Result<Result<Vec<u8>, String>, String> {
+        self.link.send(&full_dump_request(idx))?;
+        let until = Instant::now() + DUMP_TIMEOUT;
+        let mut problem = "no preset dump received".to_string();
+        while let Some(payload) = self.link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
+            match frame_type(&payload) {
+                Some(TYPE_PRESET_DUMP) => match dump_body(&payload, idx) {
+                    Ok(_) => return Ok(Ok(payload)),
+                    Err(e) => problem = e,
+                },
+                Some(TYPE_PRESET_DETAILS) => {
+                    if self.debug {
+                        eprintln!("TONEX serial: preset push during a dump read dropped");
+                    }
+                }
+                _ => {
+                    self.dispatch(&payload, false);
+                }
+            }
+        }
+        Ok(Err(problem))
+    }
+
+    /// The rename operation (see `Pedal::rename_preset`). Inner Err: not
+    /// written or not verified; outer Err: link failure.
+    fn rename_preset(&mut self, idx: u8, name: &str, label: &str) -> Result<Result<String, String>, String> {
+        // 1. A fresh dump, validated.
+        let dump = match self.fetch_dump(idx)? {
+            Ok(d) => d,
+            Err(e) => return Ok(Err(format!("reading the preset: {e}"))),
+        };
+        let body = match dump_body(&dump, idx) {
+            Ok(b) => b.to_vec(),
+            Err(e) => return Ok(Err(e)),
+        };
+        // 2. Patch the name (validates the name field again).
+        let patched = match patch_dump_name(&body, name) {
+            Ok(p) => p,
+            Err(e) => return Ok(Err(e)),
+        };
+        let request = match preset_write_request(&patched) {
+            Ok(r) => r,
+            Err(e) => return Ok(Err(e)),
+        };
+        // 3. Backup first; no backup, no write.
+        match save_backup(&body, label) {
+            Ok(path) => eprintln!("TONEX: preset {label} backed up to {}", path.display()),
+            Err(e) => return Ok(Err(format!("backup failed, nothing written: {e}"))),
+        }
+        // 4. Write, let it settle, re-read and compare the name buffer only
+        // (the active preset's model data is stored in another, benign
+        // form, so the rest may differ).
+        self.link.send(&request)?;
+        let settle = Instant::now() + WRITE_SETTLE;
+        while let Some(payload) = self.link.read_frame(settle.saturating_duration_since(Instant::now()), settle)? {
+            if frame_type(&payload) != Some(TYPE_PRESET_DETAILS) {
+                self.dispatch(&payload, false);
+            }
+        }
+        let after = match self.fetch_dump(idx)? {
+            Ok(d) => d,
+            Err(e) => return Ok(Err(format!("verifying the write: {e}"))),
+        };
+        let stored = dump_body(&after, idx).and_then(name_buffer);
+        match (name_buffer(&patched), stored) {
+            (Ok(want), Ok(got)) if want == got => Ok(Ok(clean_name(name))),
+            (Ok(_), Ok(_)) => Ok(Err("the pedal did not store the new name".into())),
+            (Err(e), _) | (_, Err(e)) => Ok(Err(e)),
+        }
     }
 
     /// Removes all queued names requests; true if there was one.
@@ -1477,6 +1741,104 @@ impl<F: Fn(Event)> Session<'_, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Synthetic full-dump reply for preset `idx` (no real dump bytes):
+    /// header, body `B9 04 01 00 <idx> B9 02 BC 21 <33-byte name> <filler>`.
+    fn synthetic_dump(idx: u8, name: &str, filler: usize) -> Vec<u8> {
+        let mut body = vec![0xB9, 0x04, 0x01, 0x00];
+        body.extend(index_bytes(idx));
+        body.extend_from_slice(&[0xB9, 0x02, 0xBC, 0x21]);
+        let mut buf = [0u8; NAME_BUF_LEN];
+        buf[..name.len()].copy_from_slice(name.as_bytes());
+        body.extend_from_slice(&buf);
+        body.extend((0..filler).map(|i| (i % 251) as u8));
+        let mut p = vec![0xB9, 0x03, 0x81, 0x03, 0x02, 0x81];
+        p.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        p.push(0x10);
+        p.extend(body);
+        p
+    }
+
+    #[test]
+    fn dump_and_write_requests() {
+        assert_eq!(
+            full_dump_request(5),
+            [0xB9, 0x03, 0x81, 0x00, 0x02, 0x82, 0x06, 0x00, 0x80, 0x10, 0x03, 0xB9, 0x04, 0x10, 0x01, 0x05, 0x01]
+        );
+        // Index >= 128: `80 xx`, size field = body length (7).
+        assert_eq!(
+            full_dump_request(131),
+            [0xB9, 0x03, 0x81, 0x00, 0x02, 0x82, 0x07, 0x00, 0x80, 0x10, 0x03, 0xB9, 0x04, 0x10, 0x01, 0x80, 0x83, 0x01]
+        );
+        let body = vec![0xAA; 300];
+        let w = preset_write_request(&body).unwrap();
+        assert_eq!(&w[..11], &[0xB9, 0x03, 0x81, 0x03, 0x02, 0x82, 0x2C, 0x01, 0x80, 0x10, 0x03]);
+        assert_eq!(&w[11..], body.as_slice());
+        assert_eq!(frame_type(&w), Some(TYPE_PRESET_DUMP));
+    }
+
+    #[test]
+    fn dump_layout_validation() {
+        let good = synthetic_dump(42, "OLD NAME", 500);
+        let body = dump_body(&good, 42).unwrap();
+        assert!(body.starts_with(&[0xB9, 0x04, 0x01, 0x00, 42]));
+        assert_eq!(name_buffer(body).unwrap()[..8], *b"OLD NAME");
+        // Index >= 128.
+        assert!(dump_body(&synthetic_dump(140, "X", 10), 140).is_ok());
+        // Another preset's dump.
+        assert!(dump_body(&good, 43).is_err());
+        // Length field != body length.
+        let mut short = good.clone();
+        short.pop();
+        assert!(dump_body(&short, 42).is_err());
+        // Wrong type (a summary reply header).
+        let mut wrong = good.clone();
+        wrong[3] = 0x04;
+        assert!(dump_body(&wrong, 42).is_err());
+        // No name tag near the body start.
+        let mut no_tag = good.clone();
+        let tag = find(&no_tag, &NAME_TAG).unwrap();
+        no_tag[tag] = 0x00;
+        assert!(dump_body(&no_tag, 42).is_err());
+        // Too short to hold the name buffer.
+        let mut p = vec![0xB9, 0x03, 0x81, 0x03, 0x02, 0x81, 10, 0, 0x10];
+        p.extend_from_slice(&[0xB9, 0x04, 0x01, 0x00, 42, 0xB9, 0x02, 0xBC, 0x21, 0x41]);
+        assert!(dump_body(&p, 42).is_err());
+    }
+
+    #[test]
+    fn name_patching() {
+        let dump = synthetic_dump(7, "A MUCH LONGER OLD NAME", 100);
+        let body = dump_body(&dump, 7).unwrap();
+        let patched = patch_dump_name(body, "  New ").unwrap();
+        let buf = name_buffer(&patched).unwrap();
+        assert_eq!(&buf[..3], b"New");
+        assert!(buf[3..].iter().all(|&b| b == 0), "zero-filled after the name");
+        // Only the name buffer changes.
+        let start = name_buf_offset(body).unwrap();
+        assert_eq!(&patched[..start], &body[..start]);
+        assert_eq!(&patched[start + NAME_BUF_LEN..], &body[start + NAME_BUF_LEN..]);
+        // 32 bytes max (33rd stays NUL), printable ASCII only.
+        let long = patch_dump_name(body, &"x".repeat(40)).unwrap();
+        let buf = name_buffer(&long).unwrap();
+        assert_eq!(&buf[..32], "x".repeat(32).as_bytes());
+        assert_eq!(buf[32], 0);
+        assert_eq!(filter_name("Caf\u{e9} \u{2713} ok\ttab"), "Caf  oktab");
+        assert_eq!(clean_name("  Crunch 1  "), "Crunch 1");
+        assert!(patch_dump_name(body, " \u{e9} ").is_err(), "empty after cleaning");
+    }
+
+    #[test]
+    fn backup_names() {
+        assert_eq!(utc_stamp(0), "19700101-000000");
+        assert_eq!(utc_stamp(1_700_000_000), "20231114-221320");
+        assert_eq!(utc_stamp(951_782_400), "20000229-000000");
+        assert_eq!(utc_stamp(4_102_444_799), "20991231-235959");
+        assert_eq!(backup_file_name(1_700_000_000, "43C"), "20231114-221320-43C.bin");
+        if let Some(dir) = backup_dir() {
+            assert!(dir.ends_with("tx-open-studio/backups"));
+        }
+    }
 
     #[test]
     fn open_failures_report_permission_problem_first() {

@@ -216,9 +216,46 @@ Layout sanity check used by the app before trusting the array (guards against a 
 
 When the preset is changed on the pedal (footswitch), it pushes a `0x0204` frame containing the pushed-preset-index marker above plus the same name/array/metadata content. The app only treats a `0x0204` as a push while no request is pending; a push landing during a request is missed.
 
-#### Full dump (`full = 01`)
+#### Full dump (`full = 01`) → `0x0203`
 
-~30 KB. Contains the raw model data; the app does not parse it. See §9 for what is known.
+As the official editor sends it (Windows USB capture), the header size field is the real body length (`07 00` for idx ≥ 128):
+
+```
+B9 03 81 00 02 82 <len LE> 80 10 03 | B9 04 10 01 <idx> 01
+```
+
+Reply, type `0x0203`:
+
+```
+B9 03 81 03 02 81 <len lo> <len hi> 10 | B9 04 01 00 <idx> ... (body)
+```
+
+The body length equals the header's `len` (30358 B on FW 1.6.24; don't hardcode it). Two consecutive reads are byte-identical. The body holds the raw model data (`BC 81 C8 35 …` region) the app does not decode.
+
+**Name buffer**: the 33 bytes right after the **first** `BC 21` following the body start (within its first few dozen bytes): ASCII, NUL-terminated, zero-filled after the name (32 characters max).
+
+### 4.3.1 Preset write (rename) `0x0203`
+
+Verified on hardware (official editor capture + the app's own write tests): the whole dump body, modified, sent back as type `0x0203`:
+
+```
+B9 03 81 03 02 82 <len lo> <len hi> 80 10 03 | <body>
+```
+
+- Rename = read a fresh full dump, set the name buffer (zero-fill the rest of the 33 bytes), write it back. Reading the dump back afterwards shows the new name and no other byte changed, **if the preset is not the active one**.
+- When the target **is** the active preset, the pedal stores the model blob in a different but benign form (~10 KB differ, sounds identical; the official editor shows the same). So a write is verified by comparing the **name buffer only**, never the whole body.
+- No acknowledgement frame was seen for the app's writes (the editor saw a `0x0204` push); verify by re-reading the dump. The app ignores `0x0204` pushes for the renamed preset while it reads/writes, and for 3 s after.
+- The app validates the dump before patching (type `0x0203`, `len` == body length, body starts `B9 04 01 00 <idx>`, name tag near the start) and saves it to `~/.local/share/tx-open-studio/backups/<UTC YYYYmmdd-HHMMSS>-<preset id>.bin` first; no valid dump or no backup → no write.
+
+Writing edited parameters (saving a preset) would use the same message but is not implemented.
+
+### 4.3.2 Preset select over serial (not used by the app)
+
+Seen in the official editor's traffic; the app selects presets over MIDI (§7):
+
+```
+B9 03 81 01 02 82 05 00 80 10 03 | B9 02 <idx> 00
+```
 
 ### 4.4 Parameter change `0x0207`
 
@@ -496,16 +533,18 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 - Unsolicited frames can arrive at any time; a client must accept `0x0201`, `0x0204`, `0x0206`, `0x0207` interleaved with replies.
 - Changes made via MIDI CC are reported back over serial as `0x0207` (the app relies on this for two-way sync).
 - Tuner: the pedal sends **no pitch data** over USB, and does **not** report tuner on/off toggled on the pedal itself.
+- Preset writes (`0x0203`, §4.3.1) get no acknowledgement frame; the active preset's model data is stored in a different (benign) form after a write.
 
 ## 9. Known limitations and open questions
 
 | Topic | Status |
 |---|---|
-| Preset rename / save / upload | **Unknown**, not just unimplemented. No message for writing a preset name or saving/uploading a preset has been identified (Builty's save-preset is an empty TODO). A rename feature was built and deliberately reverted. |
+| Preset rename | **Supported**: full dump → patch the name buffer → write (`0x0203`, §4.3.1), verified on hardware. |
+| Preset save (parameters) / upload | Not implemented. Saving edits would use the same write message with a modified body, but where the live parameters go in the body is not mapped; no `.tonex` upload path is known. |
 | Preset volume at load | Not readable. The summary reply does not contain it in any identified place; the full dump holds a saved copy at unstable offsets inside the model blob. It is only known once the pedal pushes a `0x0207` section `03` change or the host writes it. (The code still range-checks one candidate, element 0 of the 2nd array in `BA 03`, and logs all candidates under `TX_DEBUG_SERIAL=1` — unverified.) |
 | "Sections" in `0x0207` | Hypothesis: `<section> 00 <idx>` addresses float arrays in document order (Builty's old preset-tempo write `01 00 01`; `02` = 109-array confirmed; `03` = preset volume confirmed). How `03` maps onto the summary's arrays is not established. |
 | Name-group float | `B9 02 [BC 21 …] BA 01 88 <f32>` after the name (from vit3k's capture): meaning unknown; it is **not** the preset volume. |
-| Full dump `full = 01` | ~30 KB raw model blob; offsets vary between presets; reply type not parsed by the app (reported as `0x0203` in project notes, not confirmed in code). |
+| Full dump `full = 01` | Reply type `0x0203` (§4.3); the app reads the header, body start and name buffer only. The model blob (~30 KB) is not decoded; offsets inside it vary between presets. |
 | Header third field | Host request headers from Builty end in `80 10 01` / `80 10 03`. Under the HW-verified one-byte `80` rule that decodes as `0x10` plus a stray 4th item in a 3-item `B9 03` header (it only made sense when `80` was read as u16: `0x0110` / `0x0310`). The pedal accepts these requests anyway; pedal-originated frames use a literal (`10`, `02`) and no stray byte. Meaning unknown. |
 | State `0x0201` list[1] | Second item of the `B9 02` list: `00` and `01` seen; meaning unknown. |
 | Hello reply | Content not decoded. |

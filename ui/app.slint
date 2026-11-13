@@ -1259,8 +1259,11 @@ export component AppWindow inherits Window {
                             GlowText {
                                 text: root.preset-name == "" ? "Preset \{root.preset}" : root.preset-name;
                                 ink: root.preset-name == "" ? Theme.muted : Theme.oled-ink;
-                                glow: Theme.oled-glow;
-                                glow-alpha: root.preset-name == "" ? 0 : 0.10;
+                                // The strong amber wash stays in the OLED's upper
+                                // zone (it followed the bank line down after the
+                                // line swap; the user wants it back on top).
+                                glow: Theme.accent;
+                                glow-alpha: root.preset-name == "" ? 0 : 0.20;
                                 font-size: 20px;
                                 font-weight: root.preset-name == "" ? 400 : 600;
                             }
@@ -1272,8 +1275,8 @@ export component AppWindow inherits Window {
                                 text: root.naming == 2 ? "BANK \{oled.bank < 10 ? "0" : ""}\{oled.bank} • SLOT \{oled.slot}"
                                     : "PC \{Format.ordinal(root.preset)}";
                                 ink: Theme.accent;
-                                glow: Theme.accent;
-                                glow-alpha: 0.20;
+                                glow: Theme.oled-glow;
+                                glow-alpha: 0.10;
                                 font-size: 15px;
                                 font-weight: 600;
                                 font-family: Theme.mono-font;

@@ -513,7 +513,7 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 | Amp model names | Not stored on the device: metadata slots are empty even on factory presets; only "character" is populated. |
 | VIR cab model names | Unknown; at least 26 models exist (25 observed), Builty's 0..10 range is too small. |
 | Array indices 10, 14, 15, 19, 22, 23 | Present in dumps, not identified. |
-| Tuner | No pitch data and no notification of pedal-side tuner toggles (see §8). |
+| Tuner | No pitch data and no notification of pedal-side tuner toggles (see §8). Tuner-mode quirk (FW 1.6.24, MIDI-invoked tuner, analog outs): Off shows the tuner screen but mutes, Through passes audio, and Muted unexpectedly also passes audio. |
 | Indices ≥ 128 in `0x0207` | Would be extended-encoded; never needed for the 109-array. |
 | Preset index ≥ 128 in requests | Body grows to 7 bytes while size stays `0x0006`; accepted by the pedal, correct size unknown. |
 

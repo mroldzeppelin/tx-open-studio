@@ -343,12 +343,12 @@ Order = Builty `enum TonexParameters` ("defined in the same order as they are se
 
 | Idx | Parameter | Range / values | 148 | HW |
 |---|---|---|---|---|
-| 10 | not named in code | | 1.0 | |
+| 10 | EQ position (0 Pre, 1 Post of the amp model) | 0/1 | 1.0 | ✔ (pedal-menu capture) |
 | 11 | EQ bass | 0..10 | 4.3 | ✔ (MIDI CC 23 + read) |
 | 12 | EQ bass freq | 75..600 Hz | 300 | ✔ (layout check) |
 | 13 | EQ mid | 0..10 | 8.1 | ✔ (CC 25) |
-| 14 | not named in code | | 0.7 | |
-| 15 | not named in code (value suggests a frequency, e.g. mid freq — unconfirmed) | | 750 | |
+| 14 | EQ mid Q | ~0.3..1.6 observed (menu ends unchecked) | 0.7 | ✔ (pedal-menu capture) |
+| 15 | EQ mid freq | 150..5000 Hz (ends read off the pedal's own display) | 750 | ✔ |
 | 16 | EQ treble | 0..10 | 2.6 | ✔ (CC 28) |
 | 17 | EQ treble freq | 1000..4000 Hz | 2000 | ✔ (layout check) |
 | 18 | **Amp enable** | 0/1 — serial-only, no MIDI CC | 1 | ✔ (write) |

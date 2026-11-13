@@ -26,10 +26,12 @@ TX Open Studio is written in Rust with the [Slint](https://slint.dev) UI toolkit
 
 Changes are sent to the pedal as you turn a knob in the app. Sync goes both ways: turn a knob on the pedal and the app updates. The tabs mirror the pedal's signal chain:
 
-- **Amp**: on/off, Gain, Volume, Mix (dry/wet of the model), Presence, Depth — and a Two-Notes-style EQ: Bass, Mid and Treble gain knobs, each with a small frequency knob (75–600 Hz / 150 Hz–5 kHz / 1–4 kHz).
+- **Amp**: on/off, Gain, Volume, Mix (dry/wet of the model), Presence, Depth, EQ pre/post position — and a Two-Notes-style EQ: Bass, Mid and Treble gain knobs with small frequency knobs (75–600 Hz / 150 Hz–5 kHz / 1–4 kHz) plus Q on the mid band.
 - **Noise gate**: on/off, pre/post amp, Threshold, Release, Depth.
 - **Compressor**: on/off, pre/post amp, Threshold, Gain, Attack.
-- **Cabinet**: Tone Model (the captured cab), VIR or Off; VIR cab model, resonance, two mics (condenser/dynamic/ribbon, X/Z position) and mic blend.
+- **Cabinet**: Tone Model (the captured cab), VIR or Off; all 40 VIR cabs by their real names (412 GRN, 212 TWIN, …), resonance, two mics (Condenser 414 / Dynamic 57 / Ribbon 121) dragged on an interactive position pad fanning out of the speaker, and mic blend.
+
+![Cabinet tab](docs/screenshot-cab.png)
 - **Modulation**: on/off, pre/post, Chorus / Tremolo / Phaser / Flanger / Rotary with tempo sync and per-model controls.
 - **Delay**: on/off, pre/post, Digital / Tape, sync or time, feedback, normal/ping-pong, mix.
 - **Reverb**: on/off, pre/post, Spring 1-4 / Room / Plate, time, pre-delay, color, mix.

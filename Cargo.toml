@@ -1,6 +1,6 @@
 [package]
 name = "tx-open-studio"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Unofficial desktop editor for the IK Multimedia TONEX Pedal"
 license = "GPL-3.0-or-later"

@@ -209,11 +209,34 @@ const REQUEST_GLOBALS_CMD: [u8; 15] = [
 const GLOBALS_TIMEOUT: Duration = Duration::from_millis(1500);
 /// `BA 16` = array of 22 globals (`88 <f32>` each), inside `B9 02`.
 const GLOBALS_MARKER: [u8; 4] = [0xB9, 0x02, 0xBA, 0x16];
-const GLOBALS_COUNT: usize = 22;
+pub const GLOBALS_COUNT: usize = 22;
+// Global indices used by the app (full map: PROTOCOL.md §4.5, from a
+// hardware mapping session, FW 1.6.24).
+/// Naming (how the pedal's display titles presets): 0 Name / 1 PC+Name /
+/// 2 Bank+Name.
+pub const G_NAMING: usize = 2;
+/// MIDI channel, 1..=16.
+pub const G_MIDI_CHANNEL: usize = 7;
+/// MIDI Thru, 0 off / 1 thru.
+pub const G_MIDI_THRU: usize = 8;
 /// Input trim, dB (-15..=15, default 0).
 pub const G_INPUT_TRIM: usize = 9;
 /// Main (master) volume, dB (-40..=3, default 0).
 pub const G_MAIN_VOLUME: usize = 10;
+/// Interface (USB) volume, dB (default -10).
+pub const G_INTERFACE_VOLUME: usize = 11;
+/// Global cab sim, 1 active / 0 bypass.
+pub const G_CAB_SIM: usize = 15;
+/// Tuner mode, 0 off / 1 through / 2 muted.
+pub const G_TUNER_MODE: usize = 16;
+/// Tuner reference, Hz.
+pub const G_TUNER_REF: usize = 17;
+/// Tempo, BPM (one decimal).
+pub const G_TEMPO: usize = 18;
+/// Tempo mode, 0 global / 1 preset.
+pub const G_TEMPO_MODE: usize = 19;
+/// MIDI clock, 0 off / 1 master / 2 slave mix / 3 slave USB.
+pub const G_MIDI_CLOCK: usize = 20;
 pub const INPUT_TRIM_RANGE: (f32, f32) = (-15.0, 15.0);
 pub const MAIN_VOLUME_RANGE: (f32, f32) = (-40.0, 3.0);
 /// Global-config write header: type 0x0206, `82 <size LE>` patched in.
@@ -594,11 +617,14 @@ fn report_state(state: Option<&[u8]>, on_event: &impl Fn(Event), debug: bool) {
     }
 }
 
-/// Global levels, in dB.
+/// The 22 global config values (index map: `G_*`, PROTOCOL.md §4.5).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Globals {
-    pub input_trim: f32,
-    pub master_volume: f32,
+pub struct Globals(pub [f32; GLOBALS_COUNT]);
+
+impl Globals {
+    pub fn get(&self, index: usize) -> f32 {
+        self.0[index]
+    }
 }
 
 /// Byte offset of global `index`'s `88 <f32>` item in a global config payload.
@@ -617,14 +643,17 @@ fn global_at(payload: &[u8], index: usize) -> Result<f32, String> {
     Ok(f32::from_le_bytes([payload[off + 1], payload[off + 2], payload[off + 3], payload[off + 4]]))
 }
 
-/// Input trim and main volume from a global config payload (type 0x0206):
-/// floats after `B9 02 BA 16`, indices 9 and 10. Range-checked.
+/// All 22 globals from a global config payload (type 0x0206): floats
+/// after `B9 02 BA 16`. Input trim and main volume are range-checked as a
+/// layout fingerprint; the caller validates the others it uses.
 fn extract_globals(payload: &[u8]) -> Result<Globals, String> {
-    let trim = global_at(payload, G_INPUT_TRIM)?;
-    let vol = global_at(payload, G_MAIN_VOLUME)?;
-    check_range("input trim", trim, INPUT_TRIM_RANGE.0, INPUT_TRIM_RANGE.1)?;
-    check_range("main volume", vol, MAIN_VOLUME_RANGE.0, MAIN_VOLUME_RANGE.1)?;
-    Ok(Globals { input_trim: trim, master_volume: vol })
+    let mut values = [0.0; GLOBALS_COUNT];
+    for (i, v) in values.iter_mut().enumerate() {
+        *v = global_at(payload, i)?;
+    }
+    check_range("input trim", values[G_INPUT_TRIM], INPUT_TRIM_RANGE.0, INPUT_TRIM_RANGE.1)?;
+    check_range("main volume", values[G_MAIN_VOLUME], MAIN_VOLUME_RANGE.0, MAIN_VOLUME_RANGE.1)?;
+    Ok(Globals(values))
 }
 
 /// All 22 globals as one debug line ("[0]=1 [1]=0.5 ..."; "?" where an
@@ -1070,7 +1099,7 @@ impl Pedal {
         self.send(Request::Globals)
     }
 
-    /// Writes one global (`G_INPUT_TRIM` / `G_MAIN_VOLUME`) by sending the
+    /// Writes one global (any `G_*` index) by sending the
     /// last global config read back with that value changed. Verified on
     /// hardware.
     pub fn set_global(&self, index: usize, value: f32) -> Result<(), String> {
@@ -1711,7 +1740,9 @@ mod tests {
     fn extracts_globals() {
         let p = globals_payload(-3.5, -12.0);
         assert_eq!(frame_type(&p), Some(TYPE_GLOBAL_CONFIG));
-        assert_eq!(extract_globals(&p).unwrap(), Globals { input_trim: -3.5, master_volume: -12.0 });
+        let g = extract_globals(&p).unwrap();
+        assert_eq!((g.get(G_INPUT_TRIM), g.get(G_MAIN_VOLUME)), (-3.5, -12.0));
+        assert_eq!(g.get(G_MIDI_CHANNEL), 1.0);
         assert!(extract_globals(&globals_payload(40.0, 0.0)).is_err());
         assert!(extract_globals(&[0xB9, 0x03]).is_err());
     }
@@ -1726,7 +1757,7 @@ mod tests {
         let size = usize::from(u16::from_le_bytes([req[6], req[7]]));
         assert_eq!(size, req.len() - GLOBAL_WRITE_HEADER.len());
         assert_eq!(&req[11..17], &[0xB9, 0x01, 0xB9, 0x02, 0xBA, 0x16]);
-        assert_eq!(extract_globals(&req).unwrap().master_volume, -6.0);
+        assert_eq!(extract_globals(&req).unwrap().get(G_MAIN_VOLUME), -6.0);
         assert!(global_write_request(&[0xB9, 0x03, 0x81, 0x04, 0x02]).is_err());
     }
 

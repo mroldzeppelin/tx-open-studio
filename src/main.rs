@@ -1,6 +1,7 @@
 mod fx;
 mod tonex_serial;
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -215,10 +216,24 @@ impl LinkState {
     }
 }
 
+/// MIDI channel 1..=16 (the pedal's global, as read or chosen) → the
+/// status byte's low nibble 0..=15; None for anything else.
+fn channel_nibble(channel: f32) -> Option<u8> {
+    (channel.fract() == 0.0 && (1.0..=16.0).contains(&channel)).then(|| channel as u8 - 1)
+}
+
+/// Channel-voice status byte: message kind (0xB0 CC, 0xC0 PC) + channel.
+fn status_byte(kind: u8, nibble: u8) -> u8 {
+    (kind & 0xF0) | (nibble & 0x0F)
+}
+
 /// Thread-safe holder for the MIDI output connection to the pedal.
 #[derive(Clone, Default)]
 struct MidiEngine {
     conn: Arc<Mutex<Option<MidiOutputConnection>>>,
+    /// Channel every message goes out on, as a status nibble (0 = channel
+    /// 1, the default until the pedal's MIDI channel global is read).
+    channel: Arc<AtomicU8>,
 }
 
 impl MidiEngine {
@@ -286,24 +301,33 @@ impl MidiEngine {
         }
     }
 
-    /// Sends Bank Select (CC0) + Program Change on MIDI channel 1.
-    fn send_preset(&self, preset_num: i32) -> Result<(), String> {
-        let (bank, pc) = bank_and_pc(preset_num);
-        self.send_all(&[&[0xB0, 0x00, bank], &[0xC0, pc]])
+    /// Follows the pedal's MIDI channel (status nibble, see `channel_nibble`).
+    fn set_channel(&self, nibble: u8) {
+        self.channel.store(nibble & 0x0F, Ordering::Relaxed);
     }
 
-    /// Sends a Control Change on MIDI channel 1.
+    fn status(&self, kind: u8) -> u8 {
+        status_byte(kind, self.channel.load(Ordering::Relaxed))
+    }
+
+    /// Sends Bank Select (CC0) + Program Change on the pedal's channel.
+    fn send_preset(&self, preset_num: i32) -> Result<(), String> {
+        let (bank, pc) = bank_and_pc(preset_num);
+        self.send_all(&[&[self.status(0xB0), 0x00, bank], &[self.status(0xC0), pc]])
+    }
+
+    /// Sends a Control Change on the pedal's channel.
     fn send_cc(&self, cc: u8, value: u8) -> Result<(), String> {
-        self.send_all(&[&[0xB0, cc & 0x7F, value & 0x7F]])
+        self.send_all(&[&[self.status(0xB0), cc & 0x7F, value & 0x7F]])
     }
 }
 
-/// Tuner on/off: CC9 on channel 1, 127 = on, 0 = off (verified on the
+/// Tuner on/off: CC9, 127 = on, 0 = off (verified on the
 /// pedal). The pedal sends no tuner pitch data and doesn't report tuner
 /// toggles made on the pedal itself, so the UI shows the state we set.
 const TUNER_CC: u8 = 9;
 
-/// Tap tempo: CC10 on channel 1, value 127 per tap (community TouchOSC
+/// Tap tempo: CC10, value 127 per tap (community TouchOSC
 /// template); the pedal derives the tempo from the tap intervals.
 const TAP_TEMPO_CC: u8 = 10;
 /// A longer gap starts a new tap sequence.
@@ -358,12 +382,95 @@ impl TapTempo {
     }
 }
 
-/// Tap-button caption: "160 BPM" (rounded), or "TEMPO" before the first
-/// estimate.
-fn bpm_label(bpm: Option<f32>) -> String {
-    match bpm {
-        Some(b) => format!("{:.0}BPM", b.round()),
-        None => "TEMPO".into(),
+/// After the last tap of a burst, the globals are read once more to show
+/// the tempo the pedal actually computed.
+const TAP_REREAD_DELAY: Duration = Duration::from_millis(500);
+
+/// A pedal-wide setting the GLOBAL tab edits: `id` is the `global-changed`
+/// id in app.slint, `index` the global (PROTOCOL.md §4.5).
+struct GlobalControl {
+    id: i32,
+    index: usize,
+    range: (f32, f32),
+    /// Rounded to tenths (levels in dB, tempo) instead of whole numbers
+    /// (selectors, switches, Hz).
+    tenths: bool,
+}
+
+impl GlobalControl {
+    /// Value as written/shown: rounded and clamped to the range.
+    fn sanitize(&self, v: f32) -> f32 {
+        let v = if self.tenths { (v * 10.0).round() / 10.0 } else { v.round() };
+        v.clamp(self.range.0, self.range.1)
+    }
+}
+
+/// Interface (USB) volume range: default -10, 1 dB steps seen on the pedal;
+/// the lower end is a guess (PROTOCOL.md: "-40(?)..0").
+const INTERFACE_VOLUME_RANGE: (f32, f32) = (-40.0, 0.0);
+/// Tuner reference range as in IK's UIs (~427..453 Hz).
+const TUNER_REF_RANGE: (f32, f32) = (427.0, 453.0);
+const TEMPO_RANGE: (f32, f32) = (30.0, 300.0);
+
+const GLOBAL_CONTROLS: [GlobalControl; 12] = {
+    use tonex_serial::*;
+    const fn c(id: i32, index: usize, range: (f32, f32), tenths: bool) -> GlobalControl {
+        GlobalControl { id, index, range, tenths }
+    }
+    [
+        c(0, G_INPUT_TRIM, INPUT_TRIM_RANGE, true),
+        c(1, G_MAIN_VOLUME, MAIN_VOLUME_RANGE, true),
+        c(2, G_INTERFACE_VOLUME, INTERFACE_VOLUME_RANGE, false),
+        c(3, G_TUNER_MODE, (0.0, 2.0), false),
+        c(4, G_TUNER_REF, TUNER_REF_RANGE, false),
+        c(5, G_TEMPO, TEMPO_RANGE, true),
+        c(6, G_TEMPO_MODE, (0.0, 1.0), false),
+        c(7, G_CAB_SIM, (0.0, 1.0), false),
+        c(8, G_MIDI_CHANNEL, (1.0, 16.0), false),
+        c(9, G_MIDI_THRU, (0.0, 1.0), false),
+        c(10, G_MIDI_CLOCK, (0.0, 3.0), false),
+        c(11, G_NAMING, (0.0, 2.0), false),
+    ]
+};
+
+fn global_control(id: i32) -> Option<&'static GlobalControl> {
+    GLOBAL_CONTROLS.iter().find(|c| c.id == id)
+}
+
+/// Shows global control `id`'s (sanitized) value in the GLOBAL tab.
+fn show_global(ui: &AppWindow, id: i32, v: f32) {
+    match id {
+        0 => ui.set_global_trim(v),
+        1 => ui.set_global_volume(v),
+        2 => ui.set_global_interface(v),
+        3 => ui.set_tuner_mode(v as i32),
+        4 => ui.set_tuner_ref(v),
+        5 => ui.set_tempo_bpm(v),
+        6 => ui.set_tempo_mode(v as i32),
+        7 => ui.set_cab_sim(v != 0.0),
+        8 => ui.set_midi_channel_index(v as i32 - 1),
+        9 => ui.set_midi_thru(v != 0.0),
+        10 => ui.set_midi_clock(v as i32),
+        11 => ui.set_naming(v as i32),
+        _ => {}
+    }
+}
+
+/// Echo guard per global index: after our own write, reads and pushes of
+/// that global are ignored for `ECHO_GUARD`. Globals are pedal-wide, so
+/// this is NOT cleared on preset change.
+#[derive(Clone, Copy, Default)]
+struct GlobalGuard([Option<Instant>; tonex_serial::GLOBALS_COUNT]);
+
+impl GlobalGuard {
+    fn touch(&mut self, index: usize, now: Instant) {
+        if let Some(t) = self.0.get_mut(index) {
+            *t = Some(now);
+        }
+    }
+
+    fn recent(&self, index: usize, now: Instant) -> bool {
+        self.0.get(index).copied().flatten().is_some_and(|t| now.saturating_duration_since(t) < ECHO_GUARD)
     }
 }
 
@@ -487,13 +594,16 @@ fn preset_id(preset_num: i32) -> String {
 }
 
 /// Search: every whitespace-separated token of `query` (case-insensitive)
-/// must occur in "id bank slot name character" (e.g. "46c", "dg solo",
-/// "clean", "bank 14"). An empty query matches everything.
+/// must occur in "id program-number ordinal bank slot name character" (e.g.
+/// "46c", "140" (PC, as the pedal shows it), "141",
+/// "dg solo", "clean", "bank 14"), whatever id style the list shows (the
+/// Naming global). An empty query matches everything.
 fn preset_matches(preset_num: i32, meta: &PresetMeta, query: &str) -> bool {
     let bank = bank_number(preset_num);
     let hay = format!(
-        "{} bank {bank:02} {bank} slot {} {} {}",
+        "{} {:03} {preset_num:03} bank {bank:02} {bank} slot {} {} {}",
         preset_id(preset_num),
+        preset_num - 1,
         slot_letter(preset_num),
         meta.name,
         meta.character
@@ -670,23 +780,37 @@ struct SyncCtx {
     amp: Arc<Mutex<AmpSync>>,
     /// The live serial session; replaced on reconnect.
     serial: Arc<Mutex<Option<tonex_serial::Pedal>>>,
-    /// When the user last changed each global (0 trim, 1 master). Globals
-    /// are pedal-wide, so this is NOT cleared on preset change.
-    global_touched: Arc<Mutex<[Option<Instant>; 2]>>,
-}
-
-/// UI global id → (global index, valid range).
-fn global_for_id(id: i32) -> Option<(usize, (f32, f32))> {
-    match id {
-        0 => Some((tonex_serial::G_INPUT_TRIM, tonex_serial::INPUT_TRIM_RANGE)),
-        1 => Some((tonex_serial::G_MAIN_VOLUME, tonex_serial::MAIN_VOLUME_RANGE)),
-        _ => None,
-    }
+    /// Our own recent global writes (see `GlobalGuard`).
+    global_guard: Arc<Mutex<GlobalGuard>>,
 }
 
 impl SyncCtx {
     fn amp(&self) -> MutexGuard<'_, AmpSync> {
         self.amp.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn global_guard(&self) -> MutexGuard<'_, GlobalGuard> {
+        self.global_guard.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The one place a globals read reaches the UI (startup, reconnect,
+    /// pushes, re-reads after taps): every GLOBAL tab control, unless we
+    /// just wrote it; the MIDI channel all sends use; unlocks the tab.
+    fn apply_globals(&self, ui: &AppWindow, g: &tonex_serial::Globals) {
+        let guard = *self.global_guard();
+        let now = Instant::now();
+        for c in &GLOBAL_CONTROLS {
+            if !guard.recent(c.index, now) {
+                show_global(ui, c.id, c.sanitize(g.get(c.index)));
+            }
+        }
+        if !guard.recent(tonex_serial::G_MIDI_CHANNEL, now) {
+            match channel_nibble(g.get(tonex_serial::G_MIDI_CHANNEL)) {
+                Some(n) => self.midi.set_channel(n),
+                None => eprintln!("TONEX: MIDI channel global {} invalid, keeping the current one", g.get(tonex_serial::G_MIDI_CHANNEL)),
+            }
+        }
+        ui.set_globals_known(true);
     }
 
     fn with_serial<T>(&self, f: impl FnOnce(&tonex_serial::Pedal) -> Result<T, String>) -> Result<T, String> {
@@ -727,7 +851,8 @@ impl SyncCtx {
     /// and global guards are reset; the tuner is off after a power cycle.
     fn reset_pedal_state(&self, ui: &AppWindow) {
         self.amp().clear();
-        *self.global_touched.lock().unwrap_or_else(|e| e.into_inner()) = [None; 2];
+        *self.global_guard() = GlobalGuard::default();
+        ui.set_globals_known(false);
         ui.set_preset_dirty(false);
         ui.set_preset_level_known(false);
         ui.set_eq_freq_known(false);
@@ -900,17 +1025,7 @@ impl SyncCtx {
                 }
             }
             Event::ParamChanged { index, value } => self.apply_param_change(ui, index, value),
-            Event::Globals(Ok(g)) => {
-                let touched = *self.global_touched.lock().unwrap_or_else(|e| e.into_inner());
-                let recent = |i: usize| touched[i].is_some_and(|t| t.elapsed() < ECHO_GUARD);
-                let tenth = |v: f32| (v * 10.0).round() / 10.0;
-                if !recent(0) {
-                    ui.set_global_trim(tenth(g.input_trim));
-                }
-                if !recent(1) {
-                    ui.set_global_volume(tenth(g.master_volume));
-                }
-            }
+            Event::Globals(Ok(g)) => self.apply_globals(ui, &g),
             Event::Globals(Err(e)) => eprintln!("TONEX global config read failed: {e}"),
             Event::CurrentPreset(preset_idx) => {
                 // Show what the pedal is on, without sending MIDI back.
@@ -1141,6 +1256,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let engine = engine.clone();
         let ctx = ctx.clone();
         let tap = std::cell::RefCell::new(TapTempo::default());
+        let reread = slint::Timer::default();
         ui.on_tap_tempo(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
             let TapResult::Counted(bpm) = tap.borrow_mut().tap(Instant::now()) else { return };
@@ -1148,9 +1264,19 @@ fn main() -> Result<(), slint::PlatformError> {
                 ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
                 return;
             }
+            // Instant feedback from the taps; the pedal's own value (global
+            // 18) replaces it with the re-read below.
             if let Some(bpm) = bpm {
-                ui.set_tap_bpm_text(bpm_label(Some(bpm)).into());
+                ui.set_tempo_bpm((bpm * 10.0).round() / 10.0);
             }
+            // Debounced: each tap restarts the timer, so one read follows
+            // the burst.
+            let ctx = ctx.clone();
+            reread.start(slint::TimerMode::SingleShot, TAP_REREAD_DELAY, move || {
+                if let Err(e) = ctx.with_serial(|p| p.request_globals()) {
+                    eprintln!("TONEX global config request failed: {e}");
+                }
+            });
         });
     }
 
@@ -1174,18 +1300,29 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ctx = ctx.clone();
+        // Pedal-wide settings: never part of the EDITED state.
         ui.on_global_changed(move |id, value| {
-            let Some((index, (min, max))) = global_for_id(id) else {
+            let Some(c) = global_control(id) else {
                 eprintln!("unknown global id {id}");
                 return;
             };
-            ctx.global_touched.lock().unwrap_or_else(|e| e.into_inner())[id as usize] = Some(Instant::now());
-            let result = ctx.with_serial(|p| p.set_global(index, value.clamp(min, max)));
-            if let Err(e) = result {
-                eprintln!("TONEX global write: {e}");
-                // Show the pedal's actual value again.
-                if let Err(e) = ctx.with_serial(|p| p.request_globals()) {
-                    eprintln!("TONEX global config request failed: {e}");
+            let value = c.sanitize(value);
+            match ctx.with_serial(|p| p.set_global(c.index, value)) {
+                Ok(()) => {
+                    ctx.global_guard().touch(c.index, Instant::now());
+                    if c.index == tonex_serial::G_MIDI_CHANNEL {
+                        // From now on everything goes out on the new channel.
+                        if let Some(n) = channel_nibble(value) {
+                            ctx.midi.set_channel(n);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("TONEX global write: {e}");
+                    // Show the pedal's actual value again.
+                    if let Err(e) = ctx.with_serial(|p| p.request_globals()) {
+                        eprintln!("TONEX global config request failed: {e}");
+                    }
                 }
             }
         });
@@ -1294,6 +1431,11 @@ mod tests {
         // Preset 141 = bank 46, slot C.
         assert!(preset_matches(141, &meta, ""));
         assert!(preset_matches(141, &meta, "46c"));
+        assert!(preset_matches(141, &meta, "141"));
+        assert!(preset_matches(7, &meta, "007"));
+        // PC number as the pedal shows it in PC+Name mode (0-based).
+        assert!(preset_matches(84, &meta, "083"));
+        assert!(preset_matches(1, &meta, "000"));
         assert!(preset_matches(141, &meta, "dg SOLO"));
         assert!(preset_matches(141, &meta, "  drive  bank 46 "));
         assert!(!preset_matches(141, &meta, "dg clean"));
@@ -1432,6 +1574,12 @@ mod tests {
         assert_eq!(hz(1650.0), "1.7K");
         assert_eq!(hz(4000.0), "4K");
         assert_eq!(hz(5000.0), "5K");
+        // PC+Name ids: 0-based program number, as the pedal shows it.
+        let pc = |p: i32| ui.global::<Format>().invoke_ordinal(p).to_string();
+        assert_eq!(pc(84), "083");
+        assert_eq!(pc(1), "000");
+        assert_eq!(pc(11), "010");
+        assert_eq!(pc(150), "149");
     }
 
     #[test]
@@ -1472,8 +1620,58 @@ mod tests {
         let mut fast = TapTempo::default();
         fast.tap(at(0));
         assert_eq!(fast.tap(at(160)), TapResult::Counted(Some(300.0)));
-        assert_eq!(bpm_label(Some(120.0)), "120BPM");
-        assert_eq!(bpm_label(Some(162.2)), "162BPM");
-        assert_eq!(bpm_label(None), "TEMPO");
+    }
+
+    #[test]
+    fn midi_channel_nibble_and_status() {
+        assert_eq!(channel_nibble(1.0), Some(0));
+        assert_eq!(channel_nibble(10.0), Some(9));
+        assert_eq!(channel_nibble(16.0), Some(15));
+        for bad in [0.0, 17.0, 1.5, -1.0, f32::NAN] {
+            assert_eq!(channel_nibble(bad), None, "{bad}");
+        }
+        assert_eq!(status_byte(0xB0, 0), 0xB0);
+        assert_eq!(status_byte(0xB0, 15), 0xBF);
+        assert_eq!(status_byte(0xC0, 9), 0xC9);
+        let engine = MidiEngine::default();
+        assert_eq!(engine.status(0xC0), 0xC0, "channel 1 until globals are read");
+        engine.set_channel(channel_nibble(16.0).unwrap());
+        assert_eq!((engine.status(0xB0), engine.status(0xC0)), (0xBF, 0xCF));
+    }
+
+    #[test]
+    fn global_values_are_rounded_and_clamped() {
+        let tempo = global_control(5).unwrap();
+        assert_eq!(tempo.index, tonex_serial::G_TEMPO);
+        assert_eq!(tempo.sanitize(120.04), 120.0);
+        assert_eq!(tempo.sanitize(162.25), 162.3);
+        assert_eq!(tempo.sanitize(12.0), 30.0);
+        assert_eq!(tempo.sanitize(450.0), 300.0);
+        let channel = global_control(8).unwrap();
+        assert_eq!(channel.sanitize(0.0), 1.0);
+        assert_eq!(channel.sanitize(16.4), 16.0);
+        assert_eq!(global_control(4).unwrap().sanitize(440.4), 440.0);
+        assert_eq!(global_control(10).unwrap().sanitize(7.0), 3.0);
+        assert_eq!(global_control(11).unwrap().index, tonex_serial::G_NAMING);
+        assert!(global_control(12).is_none());
+        // Ids and indices are unique.
+        for (i, a) in GLOBAL_CONTROLS.iter().enumerate() {
+            for b in &GLOBAL_CONTROLS[i + 1..] {
+                assert!(a.id != b.id && a.index != b.index);
+            }
+        }
+    }
+
+    #[test]
+    fn global_guard_per_index() {
+        let t0 = Instant::now();
+        let mut g = GlobalGuard::default();
+        assert!(!g.recent(tonex_serial::G_TEMPO, t0));
+        g.touch(tonex_serial::G_TEMPO, t0);
+        assert!(g.recent(tonex_serial::G_TEMPO, t0 + Duration::from_millis(500)));
+        assert!(!g.recent(tonex_serial::G_TEMPO, t0 + ECHO_GUARD + Duration::from_millis(1)));
+        assert!(!g.recent(tonex_serial::G_MIDI_CHANNEL, t0));
+        g.touch(99, t0); // out of range: ignored
+        assert!(!g.recent(99, t0));
     }
 }

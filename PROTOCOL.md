@@ -509,7 +509,7 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 | Header third field | Host request headers from Builty end in `80 10 01` / `80 10 03`. Under the HW-verified one-byte `80` rule that decodes as `0x10` plus a stray 4th item in a 3-item `B9 03` header (it only made sense when `80` was read as u16: `0x0110` / `0x0310`). The pedal accepts these requests anyway; pedal-originated frames use a literal (`10`, `02`) and no stray byte. Meaning unknown. |
 | State `0x0201` list[1] | Second item of the `B9 02` list: `00` and `01` seen; meaning unknown. |
 | Hello reply | Content not decoded. |
-| Global config | Only idx 9 (input trim) and 10 (main volume) identified out of 22 floats; the rest of the `0x0206` body is opaque. |
+| Global config | 19 of the 22 floats identified on hardware (see the table in §4.5); idx 14 unknown, idx 0/1 (exp. calibration) deduced but unexercised. The `0x0206` body after the 22 floats is opaque. |
 | Amp model names | Not stored on the device: metadata slots are empty even on factory presets; only "character" is populated. |
 | VIR cab model names | Unknown; at least 26 models exist (25 observed), Builty's 0..10 range is too small. |
 | Array indices 10, 14, 15, 19, 22, 23 | Present in dumps, not identified. |

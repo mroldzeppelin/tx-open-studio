@@ -303,6 +303,70 @@ impl MidiEngine {
 /// toggles made on the pedal itself, so the UI shows the state we set.
 const TUNER_CC: u8 = 9;
 
+/// Tap tempo: CC10 on channel 1, value 127 per tap (community TouchOSC
+/// template); the pedal derives the tempo from the tap intervals.
+const TAP_TEMPO_CC: u8 = 10;
+/// A longer gap starts a new tap sequence.
+const TAP_RESET: Duration = Duration::from_millis(2500);
+/// Taps closer than this are ignored (contact bounce, key repeat); 150 ms
+/// would be 400 BPM, above anything the readout shows.
+const TAP_MIN_INTERVAL: Duration = Duration::from_millis(150);
+/// Intervals averaged for the estimate.
+const TAP_AVERAGE: usize = 4;
+const TAP_BPM_RANGE: (f32, f32) = (30.0, 300.0);
+
+/// Outcome of one tap.
+#[derive(Debug, PartialEq)]
+enum TapResult {
+    /// Too soon after the previous tap: not sent, not counted.
+    Ignored,
+    /// Counted; the new tempo estimate once there is an interval (None on
+    /// the first tap of a sequence: keep showing the previous value).
+    Counted(Option<f32>),
+}
+
+/// Local tempo estimate from tap times. The pedal computes its own tempo
+/// from the same taps; it can't be read back yet (globals index unknown).
+#[derive(Debug, Default)]
+struct TapTempo {
+    last: Option<Instant>,
+    intervals: Vec<Duration>,
+}
+
+impl TapTempo {
+    fn tap(&mut self, now: Instant) -> TapResult {
+        let Some(last) = self.last else {
+            self.last = Some(now);
+            return TapResult::Counted(None);
+        };
+        let interval = now.saturating_duration_since(last);
+        if interval < TAP_MIN_INTERVAL {
+            return TapResult::Ignored;
+        }
+        self.last = Some(now);
+        if interval > TAP_RESET {
+            self.intervals.clear();
+            return TapResult::Counted(None);
+        }
+        self.intervals.push(interval);
+        if self.intervals.len() > TAP_AVERAGE {
+            self.intervals.remove(0);
+        }
+        let avg = self.intervals.iter().sum::<Duration>().as_secs_f32() / self.intervals.len() as f32;
+        let (min, max) = TAP_BPM_RANGE;
+        TapResult::Counted(Some((60.0 / avg).clamp(min, max)))
+    }
+}
+
+/// Tap-button caption: "160 BPM" (rounded), or "TEMPO" before the first
+/// estimate.
+fn bpm_label(bpm: Option<f32>) -> String {
+    match bpm {
+        Some(b) => format!("{:.0}BPM", b.round()),
+        None => "TEMPO".into(),
+    }
+}
+
 fn tuner_cc_value(on: bool) -> u8 {
     if on {
         127
@@ -1071,6 +1135,26 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     {
+        // Tap tempo: a live control, not a preset parameter, so it never
+        // touches the EDITED state (no record_value).
+        let ui_weak = ui.as_weak();
+        let engine = engine.clone();
+        let ctx = ctx.clone();
+        let tap = std::cell::RefCell::new(TapTempo::default());
+        ui.on_tap_tempo(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let TapResult::Counted(bpm) = tap.borrow_mut().tap(Instant::now()) else { return };
+            if let Err(e) = engine.send_cc(TAP_TEMPO_CC, 127) {
+                ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
+                return;
+            }
+            if let Some(bpm) = bpm {
+                ui.set_tap_bpm_text(bpm_label(Some(bpm)).into());
+            }
+        });
+    }
+
+    {
         let ui_weak = ui.as_weak();
         let ctx = ctx.clone();
         ui.on_amp_enable_changed(move |on| {
@@ -1348,5 +1432,48 @@ mod tests {
         assert_eq!(hz(1650.0), "1.7K");
         assert_eq!(hz(4000.0), "4K");
         assert_eq!(hz(5000.0), "5K");
+    }
+
+    #[test]
+    fn tap_tempo_averages_last_intervals() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut t = TapTempo::default();
+        assert_eq!(t.tap(at(0)), TapResult::Counted(None));
+        assert_eq!(t.tap(at(500)), TapResult::Counted(Some(120.0)));
+        // 500 + 1000 ms → 750 ms average → 80 BPM.
+        assert_eq!(t.tap(at(1500)), TapResult::Counted(Some(80.0)));
+        // Only the last 4 intervals count: 1000, 500, 500, 500 → 625 ms
+        // → 96 BPM; one more 500 ms tap pushes the 1000 out → 120 BPM.
+        t.tap(at(2000));
+        t.tap(at(2500));
+        assert_eq!(t.tap(at(3000)), TapResult::Counted(Some(96.0)));
+        assert_eq!(t.intervals.len(), 4);
+        assert_eq!(t.tap(at(3500)), TapResult::Counted(Some(120.0)));
+    }
+
+    #[test]
+    fn tap_tempo_resets_ignores_bounces_and_clamps() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut t = TapTempo::default();
+        t.tap(at(0));
+        t.tap(at(400));
+        // Bounce / key repeat: ignored, the next interval counts from 400.
+        assert_eq!(t.tap(at(450)), TapResult::Ignored);
+        assert_eq!(t.tap(at(800)), TapResult::Counted(Some(150.0)));
+        // A pause over 2.5 s starts a new sequence.
+        assert_eq!(t.tap(at(4000)), TapResult::Counted(None));
+        assert_eq!(t.tap(at(5000)), TapResult::Counted(Some(60.0)));
+        // Clamped to 30..300 BPM.
+        let mut slow = TapTempo::default();
+        slow.tap(at(0));
+        assert_eq!(slow.tap(at(2400)), TapResult::Counted(Some(30.0)));
+        let mut fast = TapTempo::default();
+        fast.tap(at(0));
+        assert_eq!(fast.tap(at(160)), TapResult::Counted(Some(300.0)));
+        assert_eq!(bpm_label(Some(120.0)), "120BPM");
+        assert_eq!(bpm_label(Some(162.2)), "162BPM");
+        assert_eq!(bpm_label(None), "TEMPO");
     }
 }

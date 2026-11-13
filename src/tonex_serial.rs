@@ -627,6 +627,18 @@ fn extract_globals(payload: &[u8]) -> Result<Globals, String> {
     Ok(Globals { input_trim: trim, master_volume: vol })
 }
 
+/// All 22 globals as one debug line ("[0]=1 [1]=0.5 ..."; "?" where an
+/// item isn't a float). For mapping the still unknown indices (e.g. BPM).
+fn globals_dump(payload: &[u8]) -> String {
+    (0..GLOBALS_COUNT)
+        .map(|i| match global_at(payload, i) {
+            Ok(v) => format!("[{i}]={v}"),
+            Err(_) => format!("[{i}]=?"),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Replaces global `index` in a stored global config payload.
 fn patch_global(payload: &mut [u8], index: usize, value: f32) -> Result<(), String> {
     let off = global_offset(payload, index)?;
@@ -1312,6 +1324,9 @@ impl<F: Fn(Event)> Session<'_, F> {
     fn dispatch(&mut self, payload: &[u8], awaiting: bool) -> bool {
         let ty = frame_type(payload);
         if ty == Some(TYPE_GLOBAL_CONFIG) {
+            if self.debug {
+                eprintln!("TONEX serial: globals: {}", globals_dump(payload));
+            }
             let result = extract_globals(payload);
             if result.is_ok() {
                 self.globals = Some(payload.to_vec());
@@ -1554,6 +1569,15 @@ mod tests {
         p.extend_from_slice(&[0x80, 0x10, 0x03]);
         p.extend_from_slice(&body);
         p
+    }
+
+    #[test]
+    fn globals_dump_lists_all_values() {
+        let line = globals_dump(&globals_payload(-2.5, -6.0));
+        assert!(line.starts_with("[0]=1 [1]=1 "), "{line}");
+        assert!(line.contains(" [9]=-2.5 [10]=-6 "), "{line}");
+        assert!(line.ends_with(" [21]=1"), "{line}");
+        assert_eq!(globals_dump(&[0xB9, 0x03]).matches("=?").count(), GLOBALS_COUNT);
     }
 
     #[test]

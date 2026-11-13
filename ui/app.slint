@@ -903,6 +903,9 @@ export component AppWindow inherits Window {
     in-out property <float> global-volume: 0;
     // Tuner on/off as last set by the app (the pedal doesn't report it).
     in-out property <bool> tuner-active: false;
+    // Tap tempo: one CC10 per tap (Rust); readout estimated from the taps.
+    callback tap-tempo();
+    in property <string> tap-bpm-text: "TEMPO";
     // Selected deck tab (UI only): 0 PRESETS, 1 GLOBAL, 2 GATE, 3 COMP,
     // 4 AMP, 5 CAB, 6 MOD, 7 DELAY, 8 REVERB.
     in-out property <int> tab: 0;
@@ -916,7 +919,8 @@ export component AppWindow inherits Window {
     in property <int> selected-row: -1;
     // Keyboard-highlighted list row (-1 = none).
     property <int> cursor-row: -1;
-    // Brief pressed look on PREV (-1) / NEXT (1) after an arrow key.
+    // Brief pressed look on PREV (-1) / NEXT (1) after an arrow key, TAP (2)
+    // after the T key.
     property <int> flash: 0;
 
     changed preset => {
@@ -970,6 +974,14 @@ export component AppWindow inherits Window {
             }
             if (event.text == Key.RightArrow) {
                 root.key-step(1);
+                return accept;
+            }
+            // T = tap tempo; held-key repeats would fake fast taps.
+            if ((event.text == "t" || event.text == "T") && !event.modifiers.control && !event.modifiers.alt) {
+                if (!event.repeat) {
+                    root.flash = 2;
+                    root.tap-tempo();
+                }
                 return accept;
             }
             reject
@@ -1596,7 +1608,34 @@ export component AppWindow inherits Window {
                         spacing: 8px;
                         HorizontalLayout {
                             height: 24px;
+                            spacing: 6px;
                             ModuleTitle { text: "GLOBAL"; }
+                            // Tap tempo (MIDI CC10, also key T), where other
+                            // cards keep their ON/OFF chip. Shows the app's
+                            // own estimate from the taps ("160 BPM"), since
+                            // the pedal's tempo can't be read yet.
+                            tap-btn := HwButton {
+                                width: 56px;
+                                height: 24px;
+                                horizontal-stretch: 0;
+                                checked: root.flash == 2;
+                                clicked => {
+                                    root.tap-tempo();
+                                    main-keys.focus();
+                                }
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: root.tap-bpm-text;
+                                    color: tap-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink;
+                                    font-size: 10px;
+                                    font-weight: 600;
+                                    font-family: Theme.mono-font;
+                                    letter-spacing: 1px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                         VerticalLayout {
                             vertical-stretch: 1;

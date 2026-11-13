@@ -796,6 +796,10 @@ export component AppWindow inherits Window {
     in property <float> eq-mid-freq-default: 750;
     in property <float> eq-treble-freq-default: 2000;
     in property <bool> eq-freq-known: false;
+    // Amp model mix (0..100 %), same rules as the EQ frequencies.
+    in-out property <float> amp-mix: 100;
+    in property <float> amp-mix-default: 100;
+    in property <bool> amp-mix-known: false;
     // True while any amp knob is being dragged (Rust skips pedal updates then).
     out property <bool> knob-active: k-gain.active || k-volume.active || k-presence.active
         || k-depth.active || k-bass.active || k-mid.active || k-treble.active;
@@ -837,7 +841,8 @@ export component AppWindow inherits Window {
     // 20 comp on, 21 comp post, 22 comp threshold, 23 comp gain, 24 comp attack,
     // 30 mod on, 31 mod post, 32 mod model, 33 mod sync, 34 mod division,
     // 35..38 mod knobs 1..4 of the selected type,
-    // 60 EQ bass freq, 61 EQ mid freq, 62 EQ treble freq (Hz, serial only).
+    // 60 EQ bass freq, 61 EQ mid freq, 62 EQ treble freq (Hz, serial only),
+    // 63 amp mix (%, serial only).
     callback fx-changed(int, float);
 
     // Compressor / Modulation (pedal units; see fx.rs).
@@ -1280,6 +1285,8 @@ export component AppWindow inherits Window {
                 property <length> pad: 10px;
                 // Knob slot: a quarter of the inner width (4 knobs per row).
                 property <length> slot: (self.width - 2 * self.pad) / 4;
+                // Five knobs per row (AMP row 1).
+                property <length> slot5: (self.width - 2 * self.pad) / 5;
 
                 // Inset shadow illusion along the top edge.
                 Rectangle {
@@ -1821,28 +1828,44 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 alignment: center;
                                 k-gain := Knob {
-                                    width: tray.slot;
+                                    width: tray.slot5;
                                     size: 52px;
                                     label: "Gain";
                                     value <=> root.amp-gain;
                                     edited(v) => { root.amp-param-changed(0, v); }
                                 }
                                 k-volume := Knob {
-                                    width: tray.slot;
+                                    width: tray.slot5;
                                     size: 52px;
                                     label: "Volume";
                                     value <=> root.amp-volume;
                                     edited(v) => { root.amp-param-changed(1, v); }
                                 }
+                                // Serial-only (fx id 63): locked until read,
+                                // double-click returns to the loaded value.
+                                Knob {
+                                    width: tray.slot5;
+                                    size: 52px;
+                                    label: "Mix";
+                                    unit: "%";
+                                    min-value: 0;
+                                    max-value: 100;
+                                    step: 1;
+                                    decimals: 0;
+                                    enabled: root.amp-mix-known;
+                                    default-value: root.amp-mix-default;
+                                    value <=> root.amp-mix;
+                                    edited(v) => { root.fx-changed(63, v); }
+                                }
                                 k-presence := Knob {
-                                    width: tray.slot;
+                                    width: tray.slot5;
                                     size: 52px;
                                     label: "Presence";
                                     value <=> root.amp-presence;
                                     edited(v) => { root.amp-param-changed(2, v); }
                                 }
                                 k-depth := Knob {
-                                    width: tray.slot;
+                                    width: tray.slot5;
                                     size: 52px;
                                     label: "Depth";
                                     value <=> root.amp-depth;

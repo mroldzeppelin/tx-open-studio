@@ -38,6 +38,11 @@ const P_EQ_TREBLE_FREQ: usize = 17;
 const EQ_FREQS: [(usize, (f32, f32)); 3] =
     [(P_EQ_BASS_FREQ, (75.0, 600.0)), (P_EQ_MID_FREQ, (150.0, 5000.0)), (P_EQ_TREBLE_FREQ, (1000.0, 4000.0))];
 
+/// Amp model dry/wet mix (%), serial-only (no MIDI CC). 100 in a preset
+/// dump; range 0..100.
+const P_AMP_MIX: usize = 22;
+const AMP_MIX_RANGE: (f32, f32) = (0.0, 100.0);
+
 /// Knob step for a frequency: 5 Hz below 1 kHz, 50 Hz from there (the
 /// same rule as the UI knob's `step` binding).
 pub fn freq_step(hz: f32) -> f32 {
@@ -178,6 +183,7 @@ pub enum FxControl {
     EqBassFreq,
     EqMidFreq,
     EqTrebleFreq,
+    AmpMix,
 }
 
 /// Which card a parameter belongs to.
@@ -191,6 +197,9 @@ pub enum Card {
     Cab,
     /// EQ band frequencies of the amp tab.
     Eq,
+    /// Amp mix knob of the amp tab (own plausibility gate: one 0..100 value
+    /// says little about the layout, unlike the three EQ frequencies).
+    Mix,
 }
 
 /// Selected (0-based) model per card, for per-model parameter indices.
@@ -250,6 +259,7 @@ impl FxControl {
             60 => EqBassFreq,
             61 => EqMidFreq,
             62 => EqTrebleFreq,
+            63 => AmpMix,
             _ => return None,
         })
     }
@@ -313,6 +323,7 @@ impl FxControl {
             EqBassFreq => P_EQ_BASS_FREQ,
             EqMidFreq => P_EQ_MID_FREQ,
             EqTrebleFreq => P_EQ_TREBLE_FREQ,
+            AmpMix => P_AMP_MIX,
         })
     }
 
@@ -330,6 +341,7 @@ impl FxControl {
             CabType | CabModel | CabReso | CabMic1 | CabMic1X | CabMic1Z | CabMic2 | CabMic2X | CabMic2Z
             | CabBlend => Card::Cab,
             EqBassFreq | EqMidFreq | EqTrebleFreq => Card::Eq,
+            AmpMix => Card::Mix,
         }
     }
 
@@ -367,6 +379,9 @@ fn mod_range() -> std::ops::Range<usize> {
 pub fn card_of(index: usize) -> Option<Card> {
     if EQ_FREQS.iter().any(|&(i, _)| i == index) {
         return Some(Card::Eq);
+    }
+    if index == P_AMP_MIX {
+        return Some(Card::Mix);
     }
     [
         (Card::Delay, delay_range()),
@@ -432,6 +447,11 @@ fn cab_section_ok(raw: &[f32]) -> bool {
 /// above, these values are the only evidence the layout is right).
 fn eq_section_ok(raw: &[f32]) -> bool {
     EQ_FREQS.iter().all(|&(i, (min, max))| raw.get(i).is_some_and(|v| (min..=max).contains(v)))
+}
+
+fn mix_ok(raw: &[f32]) -> bool {
+    let (min, max) = AMP_MIX_RANGE;
+    raw.get(P_AMP_MIX).is_some_and(|v| (min..=max).contains(v))
 }
 
 fn mod_section_ok(raw: &[f32]) -> bool {
@@ -500,6 +520,14 @@ impl FxMirror {
             cards.push(Card::Eq);
         } else if !raw.is_empty() {
             eprintln!("TONEX: EQ frequencies look implausible, not shown");
+        }
+        if mix_ok(raw) {
+            if !self.recent(P_AMP_MIX) {
+                self.values[P_AMP_MIX] = Some(raw[P_AMP_MIX]);
+            }
+            cards.push(Card::Mix);
+        } else if !raw.is_empty() {
+            eprintln!("TONEX: amp mix looks implausible, not shown");
         }
         cards
     }
@@ -697,12 +725,21 @@ pub fn refresh(ui: &AppWindow, m: &FxMirror, card: Card) {
             }
             ui.set_eq_freq_known(known);
         }
+        Card::Mix => match m.get(P_AMP_MIX) {
+            Some(v) => {
+                let (min, max) = AMP_MIX_RANGE;
+                ui.set_amp_mix(snap(v, (min, max, 1.0)));
+                ui.set_amp_mix_known(true);
+            }
+            None => ui.set_amp_mix_known(false),
+        },
     }
 }
 
-/// Points the EQ frequency knobs' double-click reset at the values the
-/// preset was loaded with (in range only).
-pub fn set_eq_defaults(ui: &AppWindow, diff: &PresetDiff) {
+/// Points the double-click reset of the serial-only amp-tab knobs (EQ
+/// frequencies, mix) at the values the preset was loaded with (in range
+/// only).
+pub fn set_loaded_defaults(ui: &AppWindow, diff: &PresetDiff) {
     let setters: [fn(&AppWindow, f32); 3] = [
         AppWindow::set_eq_bass_freq_default,
         AppWindow::set_eq_mid_freq_default,
@@ -712,6 +749,10 @@ pub fn set_eq_defaults(ui: &AppWindow, diff: &PresetDiff) {
         if let Some(v) = diff.baseline(i).filter(|v| (min..=max).contains(v)) {
             set(ui, v);
         }
+    }
+    let (min, max) = AMP_MIX_RANGE;
+    if let Some(v) = diff.baseline(P_AMP_MIX).filter(|v| (min..=max).contains(v)) {
+        ui.set_amp_mix_default(v);
     }
 }
 
@@ -769,11 +810,12 @@ mod tests {
         for eq in [12, 15, 17] {
             assert_eq!(card_of(eq), Some(Card::Eq), "index {eq}");
         }
+        assert_eq!(card_of(22), Some(Card::Mix));
     }
 
     #[test]
     fn ids_roundtrip_and_cards() {
-        for id in (0..=8).chain(10..=16).chain(20..=24).chain(30..=38).chain(40..=44).chain(50..=62) {
+        for id in (0..=8).chain(10..=16).chain(20..=24).chain(30..=38).chain(40..=44).chain(50..=63) {
             let c = FxControl::from_id(id).unwrap();
             let card = match id {
                 0..=8 => Card::Delay,
@@ -782,12 +824,14 @@ mod tests {
                 30..=38 => Card::Mod,
                 40..=44 => Card::Gate,
                 60..=62 => Card::Eq,
+                63 => Card::Mix,
                 _ => Card::Cab,
             };
             assert_eq!(c.card(), card);
         }
         assert_eq!(FxControl::EqMidFreq.param_index(Models::default()), Some(15));
-        for id in [9, 17, 25, 39, 45, 63] {
+        assert_eq!(FxControl::AmpMix.param_index(Models::default()), Some(22));
+        for id in [9, 17, 25, 39, 45, 64] {
             assert_eq!(FxControl::from_id(id), None);
         }
     }
@@ -813,7 +857,7 @@ mod tests {
         let mut m = FxMirror::default();
         assert_eq!(
             m.load(&plausible_raw()),
-            [Card::Delay, Card::Reverb, Card::Comp, Card::Mod, Card::Gate, Card::Cab]
+            [Card::Delay, Card::Reverb, Card::Comp, Card::Mod, Card::Gate, Card::Cab, Card::Mix]
         );
         let idx = FxControl::DelayTime.param_index(Models { delay: 1, ..Models::default() }).unwrap();
         assert_eq!(m.get(idx), Some(320.0));
@@ -826,8 +870,8 @@ mod tests {
         let mut m = FxMirror::default();
         raw[MOD_BLOCKS[2].0] = 0.5;
         raw[P_CAB_MODEL] = 2.5; // not a whole number
-        assert_eq!(m.load(&raw), [Card::Reverb, Card::Comp, Card::Gate]);
-        assert_eq!(m.load(&raw[..80]), [Card::Reverb, Card::Comp, Card::Gate]);
+        assert_eq!(m.load(&raw), [Card::Reverb, Card::Comp, Card::Gate, Card::Mix]);
+        assert_eq!(m.load(&raw[..80]), [Card::Reverb, Card::Comp, Card::Gate, Card::Mix]);
         assert!(m.load(&[]).is_empty());
     }
 
@@ -848,6 +892,22 @@ mod tests {
         raw[P_EQ_TREBLE_FREQ] = 1.0; // shifted layout / junk
         assert!(!FxMirror::default().load(&raw).contains(&Card::Eq));
         assert!(!FxMirror::default().load(&raw[..16]).contains(&Card::Eq));
+    }
+
+    #[test]
+    fn amp_mix_has_its_own_gate() {
+        let mut raw = plausible_raw();
+        raw[P_AMP_MIX] = 100.0; // preset 148
+        let mut m = FxMirror::default();
+        let cards = m.load(&raw);
+        // EQ frequencies are 0 here (implausible), mix still loads.
+        assert!(cards.contains(&Card::Mix) && !cards.contains(&Card::Eq));
+        assert_eq!(m.get(P_AMP_MIX), Some(100.0));
+        for bad in [-1.0, 100.5, f32::NAN] {
+            raw[P_AMP_MIX] = bad;
+            assert!(!FxMirror::default().load(&raw).contains(&Card::Mix), "{bad}");
+        }
+        assert!(!FxMirror::default().load(&raw[..22]).contains(&Card::Mix));
     }
 
     #[test]

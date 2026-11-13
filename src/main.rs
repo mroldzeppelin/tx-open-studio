@@ -573,6 +573,7 @@ fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
     // Until the new preset's details arrive.
     ui.set_preset_level_known(false);
     ui.set_eq_freq_known(false);
+    ui.set_amp_mix_known(false);
     show_preset_meta(ui, names, preset);
     // A (re)loaded preset starts clean.
     ui.set_preset_dirty(false);
@@ -666,6 +667,7 @@ impl SyncCtx {
         ui.set_preset_dirty(false);
         ui.set_preset_level_known(false);
         ui.set_eq_freq_known(false);
+    ui.set_amp_mix_known(false);
         ui.set_tuner_active(false);
     }
 
@@ -884,7 +886,7 @@ impl SyncCtx {
         }
         amp.diff.load(raw);
         ui.set_preset_dirty(amp.diff.dirty());
-        fx::set_eq_defaults(ui, &amp.diff);
+        fx::set_loaded_defaults(ui, &amp.diff);
     }
 
     /// User changed an effect-card control: write it over serial.

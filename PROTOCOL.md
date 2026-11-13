@@ -277,11 +277,38 @@ Reply (type `0x0206`; per Builty possibly also pushed). Body:
 B9 01 B9 02 BA 16  88 <f32> × 22  ... (rest of config)
 ```
 
-| Global idx | Meaning | Range | Default |
+Index map, from a hardware mapping session (FW 1.6.24: each GLOBAL SETUP
+item was changed on the pedal while polling this message and diffing the
+22 values; see the session notes in the repo history):
+
+| Global idx | Meaning | Values / range | Default |
 |---|---|---|---|
+| 0 | Exp. pedal calibration, heel (raw) — unverified, deduced from menu position | | 100 |
+| 1 | Exp. pedal calibration, toe (raw) — unverified, deduced from menu position | | 4000 |
+| 2 | Naming (display format) | 0 Name · 1 PC+Name · 2 Bank+Name | 2 |
+| 3 | User mode | 0 Easy · 1 Advanced | 1 |
+| 4 | Ext. Ctrl type | 0 TRS exp. pedal · 1 RTS exp. pedal | 0 |
+| 5 | Single switch mode | 0 Macro TGL · 1 Tap Tempo · 2 Macro MOM · 3 Tuner | 1 |
+| 6 | Dual switch mode | 0 Bank · 1 Preset · 2 Tune Tap | 1 |
+| 7 | MIDI channel | 1..16 | 1 |
+| 8 | MIDI Thru | 0 off · 1 thru | 0 |
 | 9 | Input trim (dB) | -15..15 | 0 |
 | 10 | Main (master) volume (dB) | -40..+3 | 0 |
-| others | Not identified | | |
+| 11 | Interface (USB) volume (dB) | -40(?)..0 | -10 |
+| 12 | Operation mode | 0 Live · 1 Interface | 0 |
+| 13 | USB Out | 0 Stereo · 1 Dual | 0 |
+| 14 | Not identified (always 0 so far) | | 0 |
+| 15 | Global cab sim | 1 Active · 0 Bypass | 1 |
+| 16 | Tuner mode | 0 Off · 1 Through · 2 Muted | 0 |
+| 17 | Tuner reference (Hz) | ~427..453 | 440 |
+| 18 | Tempo (BPM) | one decimal | |
+| 19 | Tempo mode | 0 Global · 1 Preset | 0 |
+| 20 | MIDI Clock | 0 Off · 1 Master · 2 Slave Mix · 3 Slave USB | 0 |
+| 21 | Bypass mode | 1 Enabled · 0 Disabled | 1 |
+
+Caveat observed during the mapping session: the pedal re-enumerates USB
+(CDC port disappears and returns) while navigating some GLOBAL SETUP
+screens, so a host should expect the serial link to drop around menu use.
 
 Write: there is **no single-global message**. Resend the whole received body with values patched, under a write header with the real body length (`global_write_request`):
 

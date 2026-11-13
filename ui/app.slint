@@ -710,7 +710,15 @@ component StateButton inherits HwButton {
     }
 }
 
+// Window height, for popups deciding whether to open upward (kept in sync
+// by AppWindow).
+global WindowMetrics {
+    in-out property <length> height: 610px;
+}
+
 // Compact selector: ‹ label › cycling through `options` (no wrap-around).
+// Clicking the value opens a list of all options to pick from (e.g. the
+// 64 VIR cab models); it opens upward when there's no room below.
 // The value slot has a fixed width (`value-width`, sized per instance to the
 // longest option; mono 10px = 6px per character), so the stepper never
 // changes width with its value.
@@ -721,6 +729,12 @@ component Stepper inherits Rectangle {
     in property <bool> enabled: true;
     in property <length> value-width: 56px;
     callback picked(int);
+
+    // Option list popup: up to 8 rows, scrolls beyond.
+    property <length> row-h: 24px;
+    property <length> list-h: min(root.options.length, 8) * self.row-h + 8px;
+    property <length> list-w: max(root.width, 104px);
+    property <bool> open-up: root.absolute-position.y + root.height + 2px + self.list-h > WindowMetrics.height - 6px;
 
     opacity: root.enabled ? 1 : 0.45;
 
@@ -756,15 +770,29 @@ component Stepper inherits Rectangle {
                 }
             }
         }
-        Text {
+        // Value: click for the option list.
+        Rectangle {
             width: root.value-width;
-            text: root.index >= 0 && root.index < root.options.length ? root.options[root.index] : "?";
-            color: Theme.ink;
-            font-size: 10px;
-            font-family: Theme.mono-font;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            overflow: elide;
+            border-radius: 4px;
+            background: value-ta.has-hover && value-ta.enabled ? Theme.hover.with-alpha(0.6) : transparent;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: root.index >= 0 && root.index < root.options.length ? root.options[root.index] : "?";
+                color: Theme.ink;
+                font-size: 10px;
+                font-family: Theme.mono-font;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            value-ta := TouchArea {
+                enabled: root.enabled && root.options.length > 1;
+                mouse-cursor: self.enabled ? pointer : default;
+                clicked => {
+                    popup.show();
+                }
+            }
         }
         Rectangle {
             width: 22px;
@@ -784,6 +812,94 @@ component Stepper inherits Rectangle {
                     if (root.index < root.options.length - 1) {
                         root.index += 1;
                         root.picked(root.index);
+                    }
+                }
+            }
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.open-up ? -root.list-h - 2px : root.height + 2px;
+        width: root.list-w;
+        height: root.list-h;
+        // Scrolling the list must not close it; a pick closes it below.
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.edge;
+            border-radius: 8px;
+            drop-shadow-blur: 12px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: #000000aa;
+
+            ListView {
+                x: 4px;
+                y: 4px;
+                width: parent.width - 8px;
+                height: parent.height - 8px;
+
+                // The popup's content is created on each show: bring the
+                // current option to the middle.
+                init => {
+                    let total = root.options.length * root.row-h;
+                    let visible = root.list-h - 8px;
+                    let target = root.index * root.row-h - (visible - root.row-h) / 2;
+                    self.content-y = -clamp(target, 0px, max(0px, total - visible));
+                }
+
+                for option[i] in root.options: Rectangle {
+                    height: root.row-h;
+                    property <bool> current: i == root.index;
+
+                    Rectangle {
+                        y: 1px;
+                        width: parent.width;
+                        height: root.row-h - 2px;
+                        border-radius: 5px;
+                        border-width: 1px;
+                        border-color: current ? Theme.bevel : transparent;
+                        background: current ? Theme.selected : (option-ta.has-hover ? Theme.soft : transparent);
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 6px;
+                            Text {
+                                horizontal-stretch: 1;
+                                text: option;
+                                color: current ? Theme.accent : Theme.secondary-ink;
+                                font-size: 10px;
+                                font-family: Theme.mono-font;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                wrap: no-wrap;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 5px;
+                                    height: 5px;
+                                    border-radius: 2.5px;
+                                    background: current ? Theme.accent : Theme.led-off;
+                                }
+                            }
+                        }
+
+                        option-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                // Same as the arrows: `picked` (and its
+                                // write) only on a real change.
+                                if (i != root.index) {
+                                    root.index = i;
+                                    root.picked(i);
+                                }
+                                popup.close();
+                            }
+                        }
                     }
                 }
             }
@@ -989,6 +1105,12 @@ export component AppWindow inherits Window {
 
     changed preset => {
         list.ensure-selected-visible();
+    }
+    init => {
+        WindowMetrics.height = self.height;
+    }
+    changed height => {
+        WindowMetrics.height = self.height;
     }
     changed selected-row => {
         list.ensure-selected-visible();

@@ -803,8 +803,8 @@ pub fn refresh(ui: &AppWindow, m: &FxMirror, card: Card) {
 }
 
 /// Points the double-click reset of the serial-only amp-tab knobs (EQ
-/// frequencies, mix, mid Q) at the values the preset was loaded with (in
-/// range only).
+/// frequencies, mix, mid Q) and the cab mic pad at the values the preset
+/// was loaded with (in range only).
 pub fn set_loaded_defaults(ui: &AppWindow, diff: &PresetDiff) {
     let setters: [fn(&AppWindow, f32); 3] = [
         AppWindow::set_eq_bass_freq_default,
@@ -823,6 +823,18 @@ pub fn set_loaded_defaults(ui: &AppWindow, diff: &PresetDiff) {
     let (min, max) = EQ_MID_Q_RANGE;
     if let Some(v) = diff.baseline(P_EQ_MID_Q).filter(|v| (min..=max).contains(v)) {
         ui.set_eq_mid_q_default(v);
+    }
+    // Cab mic pad: double-click returns a mic to its loaded position.
+    let mics: [(usize, fn(&AppWindow, f32)); 4] = [
+        (P_CAB_MIC1_X, AppWindow::set_cab_mic1_x_default),
+        (P_CAB_MIC1_Z, AppWindow::set_cab_mic1_z_default),
+        (P_CAB_MIC2_X, AppWindow::set_cab_mic2_x_default),
+        (P_CAB_MIC2_Z, AppWindow::set_cab_mic2_z_default),
+    ];
+    for (i, set) in mics {
+        if let Some(v) = diff.baseline(i).filter(|v| (0.0..=10.0).contains(v)) {
+            set(ui, snap(v, TEN));
+        }
     }
 }
 

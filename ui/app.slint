@@ -49,6 +49,8 @@ export global Theme {
     out property <color> knob-pointer: #f2f3f5;
     // Faceplate trace joining an EQ band's gain and frequency knobs.
     out property <color> trace: #4a4e57;
+    // Mic 2 on the cab mic pad (Mic 1 uses the amber accent).
+    out property <color> mic2: #3aa8a0;
     // Dark text on solid amber.
     out property <color> on-accent: #111111;
     out property <color> ok: #22c55e;
@@ -92,6 +94,11 @@ export global Format {
     // zero-padded to 3 (preset 84 → "083", hardware-checked). Presets
     // 129..150 are PC 0..21 in bank 1 over MIDI; whether the pedal's
     // display wraps there too is unchecked, so this stays continuous.
+    // Always one decimal ("4.2", "0.0", "-1.5"): mic pad readouts.
+    pure public function one(v: float) -> string {
+        let t = round(abs(v) * 10);
+        return (v <= -0.05 ? "-" : "") + "\{floor(t / 10)}.\{mod(t, 10)}";
+    }
     pure public function ordinal(preset: int) -> string {
         let pc = preset - 1;
         return (pc < 10 ? "00" : pc < 100 ? "0" : "") + pc;
@@ -698,6 +705,339 @@ component GlobalGroup inherits Rectangle {
     }
 }
 
+// Mic positions in front of the speaker, as a wedge fanning out of it
+// ("cheese wedge with rays"): Mic 1 amber, Mic 2 teal. Polar mapping
+// around the apex (ax, ay) at the speaker:
+//     angle  = -alpha + X/10 * 2 * alpha   (X 0 upper edge, 10 lower edge)
+//     radius = r0 + Z/10 * (rmax - r0)     (Z 0 at the cone, 10 far arc)
+// inverted with atan2 / hypot when dragging, clamped to the wedge. The
+// apex itself is hidden behind the speaker; r0 keeps X readable even at
+// Z 0. The wedge, speaker and hints are static vector geometry; only the
+// dots and readouts depend on the values.
+component MicPad inherits Rectangle {
+    in property <bool> enabled: true;
+    in-out property <float> m1x;
+    in-out property <float> m1z;
+    in-out property <float> m2x;
+    in-out property <float> m2z;
+    in property <float> m1x-default;
+    in property <float> m1z-default;
+    in property <float> m2x-default;
+    in property <float> m2z-default;
+    // which: 0 mic 1 X, 1 mic 1 Z, 2 mic 2 X, 3 mic 2 Z.
+    callback edited(int, float);
+
+    opacity: root.enabled ? 1 : 0.45;
+
+    // Margin around the figure: a dot's glow ring (9 px) plus the outline
+    // stays inside at every extreme value.
+    property <length> margin: 14px;
+    // Height of the readout lines at the bottom.
+    property <length> readouts-h: 34px;
+    property <angle> alpha: 28deg;
+    property <length> r0: 20px;
+    // Room left of the apex for the speaker.
+    property <length> speaker-w: 26px;
+    property <length> rmax: min(
+        self.width - 2 * self.margin - self.speaker-w,
+        (self.height - self.readouts-h - 2 * self.margin) / 2 / sin(self.alpha));
+    // Figure centred in the area above the readouts.
+    property <length> ax: (self.width - self.speaker-w - self.rmax) / 2 + self.speaker-w;
+    property <length> ay: (self.height - self.readouts-h) / 2;
+
+    pure function theta(x: float) -> angle {
+        return -root.alpha + x / 10 * 2 * root.alpha;
+    }
+    pure function radius(z: float) -> length {
+        return root.r0 + z / 10 * (root.rmax - root.r0);
+    }
+    pure function px(x: float, z: float) -> length {
+        return root.ax + root.radius(z) * cos(root.theta(x));
+    }
+    pure function py(x: float, z: float) -> length {
+        return root.ay + root.radius(z) * sin(root.theta(x));
+    }
+
+    // Pointer position (pad coordinates) → mic position: polar around the
+    // apex, clamped to the wedge, 0.1 steps; writes only what changed.
+    function drag(mic: int, x: length, y: length) {
+        let dx = (x - root.ax) / 1px;
+        let dy = (y - root.ay) / 1px;
+        let r = sqrt(dx * dx + dy * dy) * 1px;
+        let u = clamp((atan2(dy, dx) + root.alpha) / (2 * root.alpha), 0, 1);
+        let v = clamp((r - root.r0) / (root.rmax - root.r0), 0, 1);
+        let nx = round(u * 100) / 10;
+        let nz = round(v * 100) / 10;
+        if (mic == 0) {
+            if (nx != root.m1x) {
+                root.m1x = nx;
+                root.edited(0, nx);
+            }
+            if (nz != root.m1z) {
+                root.m1z = nz;
+                root.edited(1, nz);
+            }
+        } else {
+            if (nx != root.m2x) {
+                root.m2x = nx;
+                root.edited(2, nx);
+            }
+            if (nz != root.m2z) {
+                root.m2z = nz;
+                root.edited(3, nz);
+            }
+        }
+    }
+
+    // Double-click on a dot: back to the preset's loaded position.
+    function reset(mic: int) {
+        if (mic == 0) {
+            root.m1x = root.m1x-default;
+            root.m1z = root.m1z-default;
+            root.edited(0, root.m1x);
+            root.edited(1, root.m1z);
+        } else {
+            root.m2x = root.m2x-default;
+            root.m2z = root.m2z-default;
+            root.edited(2, root.m2x);
+            root.edited(3, root.m2z);
+        }
+    }
+
+    // Wedge fill: 5 ring bands, amber fading with distance from the
+    // speaker (stacked paths render the same in every renderer).
+    for band in 5: Path {
+        property <length> r-in: root.r0 + band / 5 * (root.rmax - root.r0);
+        property <length> r-out: root.r0 + (band + 1) / 5 * (root.rmax - root.r0);
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        fill: Theme.accent.with-alpha([0.22, 0.16, 0.11, 0.07, 0.035][band]);
+        MoveTo {
+            x: (root.ax + r-in * cos(-root.alpha)) / 1px;
+            y: (root.ay + r-in * sin(-root.alpha)) / 1px;
+        }
+        LineTo {
+            x: (root.ax + r-out * cos(-root.alpha)) / 1px;
+            y: (root.ay + r-out * sin(-root.alpha)) / 1px;
+        }
+        ArcTo {
+            x: (root.ax + r-out * cos(root.alpha)) / 1px;
+            y: (root.ay + r-out * sin(root.alpha)) / 1px;
+            radius-x: r-out / 1px;
+            radius-y: r-out / 1px;
+            sweep: true;
+        }
+        LineTo {
+            x: (root.ax + r-in * cos(root.alpha)) / 1px;
+            y: (root.ay + r-in * sin(root.alpha)) / 1px;
+        }
+        ArcTo {
+            x: (root.ax + r-in * cos(-root.alpha)) / 1px;
+            y: (root.ay + r-in * sin(-root.alpha)) / 1px;
+            radius-x: r-in / 1px;
+            radius-y: r-in / 1px;
+            sweep: false;
+        }
+        Close {}
+    }
+
+    // Faint rays and arcs (the "cheese" structure).
+    for k in 3: Path {
+        property <angle> a: -root.alpha + (k + 1) / 4 * 2 * root.alpha;
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        stroke: Theme.accent.with-alpha(0.14);
+        stroke-width: 1px;
+        MoveTo {
+            x: (root.ax + root.r0 * cos(a)) / 1px;
+            y: (root.ay + root.r0 * sin(a)) / 1px;
+        }
+        LineTo {
+            x: (root.ax + root.rmax * cos(a)) / 1px;
+            y: (root.ay + root.rmax * sin(a)) / 1px;
+        }
+    }
+    for k in 2: Path {
+        property <length> r: root.r0 + (k + 1) / 3 * (root.rmax - root.r0);
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        stroke: Theme.accent.with-alpha(0.14);
+        stroke-width: 1px;
+        MoveTo {
+            x: (root.ax + r * cos(-root.alpha)) / 1px;
+            y: (root.ay + r * sin(-root.alpha)) / 1px;
+        }
+        ArcTo {
+            x: (root.ax + r * cos(root.alpha)) / 1px;
+            y: (root.ay + r * sin(root.alpha)) / 1px;
+            radius-x: r / 1px;
+            radius-y: r / 1px;
+            sweep: true;
+        }
+    }
+
+    // Outline: the two straight edges and the far arc.
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        stroke: Theme.accent.with-alpha(0.4);
+        stroke-width: 1px;
+        MoveTo {
+            x: (root.ax + root.r0 * cos(-root.alpha)) / 1px;
+            y: (root.ay + root.r0 * sin(-root.alpha)) / 1px;
+        }
+        LineTo {
+            x: (root.ax + root.rmax * cos(-root.alpha)) / 1px;
+            y: (root.ay + root.rmax * sin(-root.alpha)) / 1px;
+        }
+        ArcTo {
+            x: (root.ax + root.rmax * cos(root.alpha)) / 1px;
+            y: (root.ay + root.rmax * sin(root.alpha)) / 1px;
+            radius-x: root.rmax / 1px;
+            radius-y: root.rmax / 1px;
+            sweep: true;
+        }
+        LineTo {
+            x: (root.ax + root.r0 * cos(root.alpha)) / 1px;
+            y: (root.ay + root.r0 * sin(root.alpha)) / 1px;
+        }
+    }
+
+    // Speaker at the apex: cone seen at an angle as concentric ellipses
+    // (outer rim, cone, dust cap), muted strokes.
+    for ring in 3: Path {
+        property <length> rx: [7px, 5px, 2.5px][ring];
+        property <length> ry: [24px, 16px, 7px][ring];
+        // Cone face at the start of the wedge (radius r0).
+        property <length> cx: root.ax + root.r0 - [12px, 10px, 8px][ring];
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        stroke: ring == 2 ? Theme.muted : Theme.muted.with-alpha(0.7);
+        stroke-width: 1px;
+        fill: ring == 2 ? Theme.muted.with-alpha(0.25) : transparent;
+        MoveTo {
+            x: cx / 1px;
+            y: (root.ay - ry) / 1px;
+        }
+        ArcTo {
+            x: cx / 1px;
+            y: (root.ay + ry) / 1px;
+            radius-x: rx / 1px;
+            radius-y: ry / 1px;
+            sweep: true;
+        }
+        ArcTo {
+            x: cx / 1px;
+            y: (root.ay - ry) / 1px;
+            radius-x: rx / 1px;
+            radius-y: ry / 1px;
+            sweep: true;
+        }
+        Close {}
+    }
+
+    // Mic 2 first, so Mic 1 is on top where they overlap.
+    Rectangle {
+        x: root.px(root.m2x, root.m2z) - 9px;
+        y: root.py(root.m2x, root.m2z) - 9px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: Theme.mic2.with-alpha(0.2);
+    }
+    Rectangle {
+        x: root.px(root.m2x, root.m2z) - 6px;
+        y: root.py(root.m2x, root.m2z) - 6px;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: Theme.mic2;
+        border-width: 1px;
+        border-color: Theme.edge;
+        drop-shadow-blur: 6px;
+        drop-shadow-color: Theme.mic2.with-alpha(0.7);
+    }
+    TouchArea {
+        x: root.px(root.m2x, root.m2z) - 12px;
+        y: root.py(root.m2x, root.m2z) - 12px;
+        width: 24px;
+        height: 24px;
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.move : MouseCursor.default;
+        moved => {
+            if (self.pressed) {
+                root.drag(1, self.x + self.mouse-x, self.y + self.mouse-y);
+            }
+        }
+        double-clicked => { root.reset(1); }
+    }
+
+    Rectangle {
+        x: root.px(root.m1x, root.m1z) - 9px;
+        y: root.py(root.m1x, root.m1z) - 9px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: Theme.accent.with-alpha(0.2);
+    }
+    Rectangle {
+        x: root.px(root.m1x, root.m1z) - 6px;
+        y: root.py(root.m1x, root.m1z) - 6px;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: Theme.accent;
+        border-width: 1px;
+        border-color: Theme.edge;
+        drop-shadow-blur: 6px;
+        drop-shadow-color: Theme.accent.with-alpha(0.7);
+    }
+    TouchArea {
+        x: root.px(root.m1x, root.m1z) - 12px;
+        y: root.py(root.m1x, root.m1z) - 12px;
+        width: 24px;
+        height: 24px;
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.move : MouseCursor.default;
+        moved => {
+            if (self.pressed) {
+                root.drag(0, self.x + self.mouse-x, self.y + self.mouse-y);
+            }
+        }
+        double-clicked => { root.reset(0); }
+    }
+
+    // Readouts, colour-coded per mic.
+    Text {
+        x: 4px;
+        y: root.height - 28px;
+        text: "MIC 1  X \{Format.one(root.m1x)}  Z \{Format.one(root.m1z)}";
+        color: Theme.accent;
+        font-size: 9px;
+        font-family: Theme.mono-font;
+        letter-spacing: 0.5px;
+    }
+    Text {
+        x: 4px;
+        y: root.height - 14px;
+        text: "MIC 2  X \{Format.one(root.m2x)}  Z \{Format.one(root.m2z)}";
+        color: Theme.mic2;
+        font-size: 9px;
+        font-family: Theme.mono-font;
+        letter-spacing: 0.5px;
+    }
+}
+
 // On/Off chip for an effect block header: green dot + "On", muted "Off".
 component OnOffChip inherits Rectangle {
     in-out property <bool> on: true;
@@ -798,12 +1138,17 @@ component Stepper inherits Rectangle {
     // false: shown dimmed, arrows inactive.
     in property <bool> enabled: true;
     in property <length> value-width: 56px;
+    // Value text colour (the cab mic steppers use their pad dot colours).
+    in property <color> value-color: Theme.ink;
+    // Optional longer names for the dropdown rows (same order as
+    // `options`); the compact `options` stay in the value slot.
+    in property <[string]> list-options: [];
     callback picked(int);
 
     // Option list popup: up to 8 rows, scrolls beyond.
     property <length> row-h: 24px;
     property <length> list-h: min(root.options.length, 8) * self.row-h + 8px;
-    property <length> list-w: max(root.width, 104px);
+    property <length> list-w: max(root.width, 124px);
     property <bool> open-up: root.absolute-position.y + root.height + 2px + self.list-h > WindowMetrics.height - 6px;
 
     opacity: root.enabled ? 1 : 0.45;
@@ -849,7 +1194,7 @@ component Stepper inherits Rectangle {
                 width: parent.width;
                 height: parent.height;
                 text: root.index >= 0 && root.index < root.options.length ? root.options[root.index] : "?";
-                color: Theme.ink;
+                color: root.value-color;
                 font-size: 10px;
                 font-family: Theme.mono-font;
                 horizontal-alignment: center;
@@ -920,7 +1265,7 @@ component Stepper inherits Rectangle {
                     self.content-y = -clamp(target, 0px, max(0px, total - visible));
                 }
 
-                for option[i] in root.options: Rectangle {
+                for option[i] in root.list-options.length == root.options.length ? root.list-options : root.options: Rectangle {
                     height: root.row-h;
                     property <bool> current: i == root.index;
 
@@ -1123,6 +1468,11 @@ export component AppWindow inherits Window {
     in-out property <float> cab-mic2-x: 0;
     in-out property <float> cab-mic2-z: 0;
     in-out property <float> cab-blend: 0;
+    // Mic positions as the preset was loaded (mic pad double-click reset).
+    in property <float> cab-mic1-x-default: 0;
+    in property <float> cab-mic1-z-default: 0;
+    in property <float> cab-mic2-x-default: 0;
+    in property <float> cab-mic2-z-default: 0;
     // Chip state derived from cab-type, and the type to restore when the
     // chip turns the cabinet back on.
     property <bool> cab-on: true;
@@ -2459,29 +2809,36 @@ export component AppWindow inherits Window {
                             }
                             Stepper {
                                 enabled: vir;
-                                value-width: 48px; // "M1 Cond"
+                                // Mic 1, tinted like its dot on the mic pad.
+                                value-width: 52px; // "Cond 414"
+                                value-color: Theme.accent;
                                 height: 24px;
-                                options: ["M1 Cond", "M1 Dyn", "M1 Rbn"];
+                                options: ["Cond 414", "Dyn 57", "Rbn 121"];
+                                list-options: ["Condenser 414", "Dynamic 57", "Ribbon 121"];
                                 index <=> root.cab-mic1;
                                 picked(i) => { root.fx-changed(53, i); }
                             }
                             Stepper {
                                 enabled: vir;
-                                value-width: 48px; // "M2 Cond"
+                                // Mic 2, tinted like its dot on the mic pad.
+                                value-width: 52px; // "Cond 414"
+                                value-color: Theme.mic2;
                                 height: 24px;
-                                options: ["M2 Cond", "M2 Dyn", "M2 Rbn"];
+                                options: ["Cond 414", "Dyn 57", "Rbn 121"];
+                                list-options: ["Condenser 414", "Dynamic 57", "Ribbon 121"];
                                 index <=> root.cab-mic2;
                                 picked(i) => { root.fx-changed(56, i); }
                             }
                         }
-                        VerticalLayout {
+                        HorizontalLayout {
                             vertical-stretch: 1;
-                            alignment: center;
-                            spacing: 14px;
-                            HorizontalLayout {
+                            spacing: 12px;
+                            // Non-positional cab controls.
+                            VerticalLayout {
                                 alignment: center;
+                                spacing: 14px;
                                 Knob {
-                                    width: tray.slot;
+                                    width: 80px;
                                     label: "Reso";
                                     size: 52px;
                                     enabled: vir;
@@ -2490,46 +2847,7 @@ export component AppWindow inherits Window {
                                     edited(v) => { root.fx-changed(52, v); }
                                 }
                                 Knob {
-                                    width: tray.slot;
-                                    label: "M1 X";
-                                    size: 52px;
-                                    enabled: vir;
-                                    default-value: 0;
-                                    value <=> root.cab-mic1-x;
-                                    edited(v) => { root.fx-changed(54, v); }
-                                }
-                                Knob {
-                                    width: tray.slot;
-                                    label: "M1 Z";
-                                    size: 52px;
-                                    enabled: vir;
-                                    default-value: 0;
-                                    value <=> root.cab-mic1-z;
-                                    edited(v) => { root.fx-changed(55, v); }
-                                }
-                            }
-                            HorizontalLayout {
-                                alignment: center;
-                                Knob {
-                                    width: tray.slot;
-                                    label: "M2 X";
-                                    size: 52px;
-                                    enabled: vir;
-                                    default-value: 0;
-                                    value <=> root.cab-mic2-x;
-                                    edited(v) => { root.fx-changed(57, v); }
-                                }
-                                Knob {
-                                    width: tray.slot;
-                                    label: "M2 Z";
-                                    size: 52px;
-                                    enabled: vir;
-                                    default-value: 0;
-                                    value <=> root.cab-mic2-z;
-                                    edited(v) => { root.fx-changed(58, v); }
-                                }
-                                Knob {
-                                    width: tray.slot;
+                                    width: 80px;
                                     label: "Blend";
                                     size: 52px;
                                     enabled: vir;
@@ -2540,6 +2858,23 @@ export component AppWindow inherits Window {
                                     default-value: 0;
                                     value <=> root.cab-blend;
                                     edited(v) => { root.fx-changed(59, v); }
+                                }
+                            }
+                            // Mic positions (fx ids 54/55 mic 1 X/Z, 57/58
+                            // mic 2 X/Z; same writes as the former knobs).
+                            MicPad {
+                                horizontal-stretch: 1;
+                                enabled: vir;
+                                m1x <=> root.cab-mic1-x;
+                                m1z <=> root.cab-mic1-z;
+                                m2x <=> root.cab-mic2-x;
+                                m2z <=> root.cab-mic2-z;
+                                m1x-default: root.cab-mic1-x-default;
+                                m1z-default: root.cab-mic1-z-default;
+                                m2x-default: root.cab-mic2-x-default;
+                                m2z-default: root.cab-mic2-z-default;
+                                edited(which, v) => {
+                                    root.fx-changed([54, 55, 57, 58][which], v);
                                 }
                             }
                         }

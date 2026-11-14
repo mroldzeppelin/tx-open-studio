@@ -20,6 +20,7 @@ TX Open Studio is written in Rust with the [Slint](https://slint.dev) UI toolkit
 - Keyboard navigation: Left/Right step through presets. In the search field, Down moves into the list. In the list, Up/Down move the highlight and Enter selects the preset.
 - Preset switching over USB-MIDI (Bank Select CC0 + Program Change, on whatever MIDI channel the pedal is set to — the app reads it from the pedal).
 - When you change presets with the footswitches, the app follows.
+- **Rename presets** on the pedal: right-click a preset in the list → Rename, edit inline, Enter or ✓ to write it.
 - The list's numbering follows the pedal's **Naming** setting (Bank+Name `46C`, 0-based `PC 083`, or names only) — change it on either side and both displays switch.
 
 **Live editing (USB serial)**
@@ -43,6 +44,7 @@ Other details:
 
 - Knobs are dragged vertically. Double-click a knob to reset it to its default value.
 - An **EDITED** indicator shows when the live state differs from the preset as last loaded.
+- **Save edits** to the active preset: hold the floppy button (top right) for 1 s — an amber fill rises as a guard against misclicks. The app writes the preset and verifies it by reading it back.
 - Tuner on/off button (sent as MIDI CC 9).
 - Auto-reconnect: unplug the pedal or power-cycle it and the app shows RECONNECTING, polls every 2 seconds, and resyncs everything (current preset, names, parameters, globals) when it comes back. The status bar also has a manual reconnect button.
 

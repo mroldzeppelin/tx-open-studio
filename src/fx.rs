@@ -1143,6 +1143,18 @@ impl PresetDiff {
         self.current = raw.to_vec();
     }
 
+    /// The live values for a save: the current array and preset volume.
+    pub fn live_values(&self) -> crate::tonex_serial::LiveValues {
+        crate::tonex_serial::LiveValues { params: self.current.clone(), preset_level: self.level_cur }
+    }
+
+    /// After a verified save the current values are the preset's stored
+    /// state: they become the baseline, as after a preset load.
+    pub fn rebaseline(&mut self) {
+        self.baseline = self.current.clone();
+        self.level_base = self.level_cur;
+    }
+
     /// Value of parameter `index` as loaded with the preset (None before
     /// the first read); double-click resets of the EQ frequencies use it.
     pub fn baseline(&self, index: usize) -> Option<f32> {
@@ -1194,6 +1206,24 @@ mod diff_tests {
         raw[FxControl::DelayTime.param_index(Models::default()).unwrap()] = 320.0;
         raw[12] = 300.0; // EQ bass freq, not shown in the app
         raw
+    }
+
+    #[test]
+    fn live_values_and_rebaseline() {
+        let mut d = PresetDiff::default();
+        d.load(&base());
+        d.load_level(5.0);
+        let gain = AmpKnob::Gain.param_index();
+        d.set(gain, 8.0);
+        d.set_level(6.5);
+        assert!(d.dirty());
+        let live = d.live_values();
+        assert_eq!(live.params[gain], 8.0);
+        assert_eq!(live.preset_level, Some(6.5));
+        // A save makes the live values the new baseline.
+        d.rebaseline();
+        assert!(!d.dirty());
+        assert_eq!(d.baseline(gain), Some(8.0));
     }
 
     #[test]

@@ -462,48 +462,75 @@ fn patch_dump_name(body: &[u8], name: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// `~/.local/share/tx-open-studio/backups` (or under `$XDG_DATA_HOME`).
-fn backup_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-    Some(base.join("tx-open-studio").join("backups"))
+/// The current preset's live state as the app knows it, for a save: the
+/// 109-item parameter array as last read, with every edit and pedal push
+/// since (shorter than `PARAM_COUNT`, or empty, if the read was partial or
+/// never happened), and the preset volume if known.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveValues {
+    pub params: Vec<f32>,
+    pub preset_level: Option<f32>,
 }
 
-/// `YYYYmmdd-HHMMSS` (UTC) for Unix time `secs`.
-fn utc_stamp(secs: u64) -> String {
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    // Days since 1970-01-01 → civil date (H. Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+/// Offset of the first item of a dump body's parameter array 0: the first
+/// `BA 6D` after the first `BA 03` past the name buffer, followed by 109
+/// consecutive `88 <f32>` items. (The body holds three such arrays; the
+/// pedal's own quick-save changes only array 0, hardware-diffed.)
+fn array0_offset(body: &[u8]) -> Result<usize, String> {
+    let from = name_buf_offset(body)? + NAME_BUF_LEN;
+    let rest = body.get(from..).ok_or("dump body too short")?;
+    let ba03 = from + find(rest, &[0xBA, 0x03]).ok_or("parameter block (BA 03) not found")?;
+    let ba6d = ba03 + find(&body[ba03..], &[0xBA, 0x6D]).ok_or("parameter array (BA 6D) not found")?;
+    let start = ba6d + 2;
+    let items = body.get(start..start + PARAM_COUNT * PARAM_STRIDE).ok_or("parameter array truncated")?;
+    if !items.chunks_exact(PARAM_STRIDE).all(|c| c[0] == FLOAT_TAG) {
+        return Err("parameter array has non-float items".into());
+    }
+    Ok(start)
 }
 
-/// Backup file name: `<UTC stamp>-<preset id>.bin`.
-fn backup_file_name(secs: u64, label: &str) -> String {
-    format!("{}-{label}.bin", utc_stamp(secs))
+/// The 109 values of parameter array 0.
+fn array0_values(body: &[u8]) -> Result<Vec<f32>, String> {
+    let start = array0_offset(body)?;
+    Ok(body[start..start + PARAM_COUNT * PARAM_STRIDE]
+        .chunks_exact(PARAM_STRIDE)
+        .map(|c| f32::from_le_bytes([c[1], c[2], c[3], c[4]]))
+        .collect())
 }
 
-/// Saves a dump body (the preset as it was before a write).
-fn save_backup(body: &[u8], label: &str) -> Result<PathBuf, String> {
-    let dir = backup_dir().ok_or("no home directory")?;
-    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let path = dir.join(backup_file_name(secs, label));
-    fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(path)
+/// `body` with parameter array 0 set to the live values: only the 4 value
+/// bytes of each item change; arrays 1 and 2 (meaning unknown) and
+/// everything else stay byte-identical, as in the pedal's own quick-save.
+/// Refuses unless all 109 values are known and finite: never write a
+/// partial or default state.
+/// TODO: the preset volume (`values.preset_level`) is not located in the
+/// dump yet; the stored value is left as it is.
+fn patch_live_values(body: &[u8], values: &LiveValues) -> Result<Vec<u8>, String> {
+    if values.params.len() < PARAM_COUNT || !values.params[..PARAM_COUNT].iter().all(|v| v.is_finite()) {
+        return Err("live values incomplete".into());
+    }
+    let start = array0_offset(body)?;
+    let mut out = body.to_vec();
+    for (i, v) in values.params[..PARAM_COUNT].iter().enumerate() {
+        let at = start + i * PARAM_STRIDE + 1;
+        out[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// A save is stored when the re-read array 0 holds exactly (bit for bit)
+/// the values written and the name is unchanged. The rest is not compared:
+/// the active preset's model blob is legitimately re-encoded on write.
+fn verify_saved(written: &[u8], stored: &[u8], values: &LiveValues) -> Result<(), String> {
+    let got = array0_values(stored)?;
+    let want = values.params.get(..PARAM_COUNT).ok_or("live values incomplete")?;
+    if got.iter().zip(want).any(|(g, w)| g.to_bits() != w.to_bits()) {
+        return Err("the pedal did not store the parameter values".into());
+    }
+    if name_buffer(written)? != name_buffer(stored)? {
+        return Err("the preset name changed".into());
+    }
+    Ok(())
 }
 
 /// Single-parameter write (Builty `usb_tonex_send_single_parameter`, big
@@ -1126,6 +1153,9 @@ pub enum Event {
     /// as stored and verified, or why nothing (or nothing verified) was
     /// written. Always sent, also when the session ends mid-operation.
     Renamed { preset_idx: u8, result: Result<String, String> },
+    /// Result of `Pedal::save_preset` (0-based preset index); always sent,
+    /// also when the session ends mid-operation.
+    Saved { preset_idx: u8, result: Result<(), String> },
     /// The pedal switched preset by itself (footswitch); carries the new
     /// preset's amp params when they parsed, and its raw parameter array.
     PresetChanged { preset_idx: u8, params: Option<AmpParams>, raw: Vec<f32> },
@@ -1187,8 +1217,10 @@ enum Request {
     SetParam(u8, u8, f32),
     Globals,
     SetGlobal(usize, f32),
-    /// Rename a preset (index, new name, id for the backup file name).
-    Rename(u8, String, String),
+    /// Rename a preset (index, new name).
+    Rename(u8, String),
+    /// Save the live values into a preset (index, snapshot).
+    Save(u8, LiveValues),
 }
 
 /// Handle to the session thread that owns the serial port. Dropping it ends
@@ -1259,14 +1291,24 @@ impl Pedal {
     }
 
     /// Renames preset `idx` (0-based): reads a fresh full dump, validates
-    /// it, saves it as a backup, writes it back with the new name and
-    /// verifies by re-reading. Answered with `Event::Renamed`. `label` is
-    /// the preset id used in the backup file name.
-    pub fn rename_preset(&self, idx: u8, name: &str, label: &str) -> Result<(), String> {
+    /// it, writes it back with the new name and verifies by re-reading.
+    /// Answered with `Event::Renamed`.
+    pub fn rename_preset(&self, idx: u8, name: &str) -> Result<(), String> {
         if usize::from(idx) >= PRESET_COUNT {
             return Err(format!("preset index {idx} out of range"));
         }
-        self.send(Request::Rename(idx, name.to_string(), label.to_string()))
+        self.send(Request::Rename(idx, name.to_string()))
+    }
+
+    /// Saves the live values into preset `idx` (0-based): fresh full dump,
+    /// validated, patched with `values`, written, verified by re-reading.
+    /// Answered with `Event::Saved`. The patch step is a stub for now, so
+    /// this always fails without writing.
+    pub fn save_preset(&self, idx: u8, values: LiveValues) -> Result<(), String> {
+        if usize::from(idx) >= PRESET_COUNT {
+            return Err(format!("preset index {idx} out of range"));
+        }
+        self.send(Request::Save(idx, values))
     }
 
     /// Reads the global config; answered with `Event::Globals`.
@@ -1404,6 +1446,7 @@ impl<F: Fn(Event)> Session<'_, F> {
         let mut read_globals = false;
         let mut latest_read = None;
         let mut renames = Vec::new();
+        let mut saves = Vec::new();
         let mut rest = VecDeque::new();
         for r in std::mem::take(&mut self.queue) {
             match r {
@@ -1421,7 +1464,8 @@ impl<F: Fn(Event)> Session<'_, F> {
                 },
                 Request::Globals => read_globals = true,
                 Request::AmpParams(idx) => latest_read = Some(idx),
-                Request::Rename(idx, name, label) => renames.push((idx, name, label)),
+                Request::Rename(idx, name) => renames.push((idx, name)),
+                Request::Save(idx, values) => saves.push((idx, values)),
                 other => rest.push_back(other),
             }
         }
@@ -1448,12 +1492,22 @@ impl<F: Fn(Event)> Session<'_, F> {
             }
             served = true;
         }
-        for (idx, name, label) in renames {
-            match self.rename_preset(idx, &name, &label) {
+        for (idx, name) in renames {
+            match self.rename_preset(idx, &name) {
                 Ok(result) => (self.on_event)(Event::Renamed { preset_idx: idx, result }),
                 Err(e) => {
                     // Link failure: report it, then end the session.
                     (self.on_event)(Event::Renamed { preset_idx: idx, result: Err(e.clone()) });
+                    return Err(e);
+                }
+            }
+            served = true;
+        }
+        for (idx, values) in saves {
+            match self.save_preset(idx, &values) {
+                Ok(result) => (self.on_event)(Event::Saved { preset_idx: idx, result }),
+                Err(e) => {
+                    (self.on_event)(Event::Saved { preset_idx: idx, result: Err(e.clone()) });
                     return Err(e);
                 }
             }
@@ -1492,7 +1546,7 @@ impl<F: Fn(Event)> Session<'_, F> {
 
     /// The rename operation (see `Pedal::rename_preset`). Inner Err: not
     /// written or not verified; outer Err: link failure.
-    fn rename_preset(&mut self, idx: u8, name: &str, label: &str) -> Result<Result<String, String>, String> {
+    fn rename_preset(&mut self, idx: u8, name: &str) -> Result<Result<String, String>, String> {
         // 1. A fresh dump, validated.
         let dump = match self.fetch_dump(idx)? {
             Ok(d) => d,
@@ -1511,24 +1565,12 @@ impl<F: Fn(Event)> Session<'_, F> {
             Ok(r) => r,
             Err(e) => return Ok(Err(e)),
         };
-        // 3. Backup first; no backup, no write.
-        match save_backup(&body, label) {
-            Ok(path) => eprintln!("TONEX: preset {label} backed up to {}", path.display()),
-            Err(e) => return Ok(Err(format!("backup failed, nothing written: {e}"))),
-        }
-        // 4. Write, let it settle, re-read and compare the name buffer only
-        // (the active preset's model data is stored in another, benign
-        // form, so the rest may differ).
-        self.link.send(&request)?;
-        let settle = Instant::now() + WRITE_SETTLE;
-        while let Some(payload) = self.link.read_frame(settle.saturating_duration_since(Instant::now()), settle)? {
-            if frame_type(&payload) != Some(TYPE_PRESET_DETAILS) {
-                self.dispatch(&payload, false);
-            }
-        }
-        let after = match self.fetch_dump(idx)? {
+        // 3. Write, re-read and compare the name buffer only (the active
+        // preset's model data is stored in another, benign form, so the
+        // rest may differ).
+        let after = match self.write_and_reread(idx, &request)? {
             Ok(d) => d,
-            Err(e) => return Ok(Err(format!("verifying the write: {e}"))),
+            Err(e) => return Ok(Err(e)),
         };
         let stored = dump_body(&after, idx).and_then(name_buffer);
         match (name_buffer(&patched), stored) {
@@ -1536,6 +1578,53 @@ impl<F: Fn(Event)> Session<'_, F> {
             (Ok(_), Ok(_)) => Ok(Err("the pedal did not store the new name".into())),
             (Err(e), _) | (_, Err(e)) => Ok(Err(e)),
         }
+    }
+
+    /// Sends a preset write, lets the pedal store it (handling other frames
+    /// meanwhile, dropping preset pushes), then reads the preset back.
+    fn write_and_reread(&mut self, idx: u8, request: &[u8]) -> Result<Result<Vec<u8>, String>, String> {
+        self.link.send(request)?;
+        let settle = Instant::now() + WRITE_SETTLE;
+        while let Some(payload) = self.link.read_frame(settle.saturating_duration_since(Instant::now()), settle)? {
+            if frame_type(&payload) != Some(TYPE_PRESET_DETAILS) {
+                self.dispatch(&payload, false);
+            }
+        }
+        Ok(self.fetch_dump(idx)?.map_err(|e| format!("verifying the write: {e}")))
+    }
+
+    /// The save operation (see `Pedal::save_preset`), same shape as a
+    /// rename. Inner Err: not written or not verified; outer Err: link
+    /// failure.
+    fn save_preset(&mut self, idx: u8, values: &LiveValues) -> Result<Result<(), String>, String> {
+        // 1. A fresh dump, validated.
+        let dump = match self.fetch_dump(idx)? {
+            Ok(d) => d,
+            Err(e) => return Ok(Err(format!("reading the preset: {e}"))),
+        };
+        let body = match dump_body(&dump, idx) {
+            Ok(b) => b.to_vec(),
+            Err(e) => return Ok(Err(e)),
+        };
+        // 2. Patch the live values (stub: refuses, so nothing is written).
+        let patched = match patch_live_values(&body, values) {
+            Ok(p) => p,
+            Err(e) => return Ok(Err(e)),
+        };
+        let request = match preset_write_request(&patched) {
+            Ok(r) => r,
+            Err(e) => return Ok(Err(e)),
+        };
+        // 3. Write, re-read, verify (rule pending with the patch rules).
+        let after = match self.write_and_reread(idx, &request)? {
+            Ok(d) => d,
+            Err(e) => return Ok(Err(e)),
+        };
+        let stored = match dump_body(&after, idx) {
+            Ok(b) => b,
+            Err(e) => return Ok(Err(e)),
+        };
+        Ok(verify_saved(&patched, stored, values))
     }
 
     /// Removes all queued names requests; true if there was one.
@@ -1806,6 +1895,99 @@ mod tests {
         assert!(dump_body(&p, 42).is_err());
     }
 
+    /// Synthetic dump body with the save-relevant layout: `B9 04 01 00
+    /// <idx> B9 02 BC 21 <name>`, filler, `BA 03`, three `BA 6D` arrays of
+    /// 109 floats (array k holds k*1000 + i), tail. No real dump bytes.
+    fn synthetic_save_body(idx: u8) -> Vec<u8> {
+        let mut body = vec![0xB9, 0x04, 0x01, 0x00, idx, 0xB9, 0x02, 0xBC, 0x21];
+        let mut name = [0u8; NAME_BUF_LEN];
+        name[..4].copy_from_slice(b"NAME");
+        body.extend_from_slice(&name);
+        body.extend_from_slice(&[0x11; 12]);
+        body.extend_from_slice(&[0xBA, 0x03]);
+        for k in 0..3 {
+            body.extend_from_slice(&[0xBA, 0x6D]);
+            for i in 0..PARAM_COUNT {
+                body.push(FLOAT_TAG);
+                body.extend_from_slice(&((k * 1000 + i) as f32).to_le_bytes());
+            }
+        }
+        body.extend_from_slice(&[0xBC, 0x81, 0xC8, 0x35, 1, 2, 3]);
+        body
+    }
+
+    fn live(v: f32) -> LiveValues {
+        LiveValues { params: vec![v; PARAM_COUNT], preset_level: Some(6.0) }
+    }
+
+    #[test]
+    fn save_patch_touches_only_array0_values() {
+        let body = synthetic_save_body(3);
+        let mut values = live(0.0);
+        for (i, v) in values.params.iter_mut().enumerate() {
+            *v = i as f32 + 0.5;
+        }
+        let patched = patch_live_values(&body, &values).unwrap();
+        assert_eq!(patched.len(), body.len());
+        let start = array0_offset(&body).unwrap();
+        for (k, (a, b)) in body.iter().zip(&patched).enumerate() {
+            let in_value = k >= start && k < start + PARAM_COUNT * PARAM_STRIDE && (k - start) % PARAM_STRIDE != 0;
+            if !in_value {
+                assert_eq!(a, b, "byte {k} outside array 0's value slots changed");
+            }
+        }
+        assert_eq!(array0_values(&patched).unwrap(), values.params);
+        // Arrays 1 and 2 untouched (array 1 starts right after array 0).
+        let a1 = start + PARAM_COUNT * PARAM_STRIDE + 2;
+        assert_eq!(f32::from_le_bytes(patched[a1 + 1..a1 + 5].try_into().unwrap()), 1000.0);
+    }
+
+    #[test]
+    fn save_patch_refuses_bad_input() {
+        let body = synthetic_save_body(3);
+        // Incomplete or non-finite live values: never written.
+        assert!(patch_live_values(&body, &LiveValues::default()).is_err());
+        assert!(patch_live_values(&body, &LiveValues { params: vec![1.0; 50], preset_level: None }).is_err());
+        let mut nan = live(1.0);
+        nan.params[20] = f32::NAN;
+        assert!(patch_live_values(&body, &nan).is_err());
+        // Malformed array 0 (a non-float item) or no parameter block.
+        let mut bad = body.clone();
+        let start = array0_offset(&body).unwrap();
+        bad[start + 7 * PARAM_STRIDE] = 0x00;
+        assert!(patch_live_values(&bad, &live(1.0)).is_err());
+        let mut no_block = body.clone();
+        let ba03 = find(&no_block[50..], &[0xBA, 0x03]).unwrap() + 50;
+        no_block[ba03 + 1] = 0x00;
+        assert!(patch_live_values(&no_block, &live(1.0)).is_err());
+        // Truncated array.
+        assert!(patch_live_values(&body[..start + 40 * PARAM_STRIDE], &live(1.0)).is_err());
+    }
+
+    #[test]
+    fn save_verification() {
+        let body = synthetic_save_body(3);
+        let values = live(7.25);
+        let written = patch_live_values(&body, &values).unwrap();
+        // Stored as written (model region re-encoded: not compared).
+        let mut stored = written.clone();
+        let n = stored.len();
+        stored[n - 1] ^= 0xFF;
+        assert!(verify_saved(&written, &stored, &values).is_ok());
+        // One value not stored.
+        let start = array0_offset(&body).unwrap();
+        let mut off = written.clone();
+        off[start + 20 * PARAM_STRIDE + 1] ^= 0x01;
+        assert!(verify_saved(&written, &off, &values).is_err());
+        // Name changed.
+        let mut renamed = written.clone();
+        let nb = name_buf_offset(&renamed).unwrap();
+        renamed[nb] = b'X';
+        assert!(verify_saved(&written, &renamed, &values).is_err());
+        // The unpatched body does not verify.
+        assert!(verify_saved(&written, &body, &values).is_err());
+    }
+
     #[test]
     fn name_patching() {
         let dump = synthetic_dump(7, "A MUCH LONGER OLD NAME", 100);
@@ -1826,18 +2008,6 @@ mod tests {
         assert_eq!(filter_name("Caf\u{e9} \u{2713} ok\ttab"), "Caf  oktab");
         assert_eq!(clean_name("  Crunch 1  "), "Crunch 1");
         assert!(patch_dump_name(body, " \u{e9} ").is_err(), "empty after cleaning");
-    }
-
-    #[test]
-    fn backup_names() {
-        assert_eq!(utc_stamp(0), "19700101-000000");
-        assert_eq!(utc_stamp(1_700_000_000), "20231114-221320");
-        assert_eq!(utc_stamp(951_782_400), "20000229-000000");
-        assert_eq!(utc_stamp(4_102_444_799), "20991231-235959");
-        assert_eq!(backup_file_name(1_700_000_000, "43C"), "20231114-221320-43C.bin");
-        if let Some(dir) = backup_dir() {
-            assert!(dir.ends_with("tx-open-studio/backups"));
-        }
     }
 
     #[test]

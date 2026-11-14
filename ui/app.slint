@@ -1038,6 +1038,98 @@ component MicPad inherits Rectangle {
     }
 }
 
+// Hold-to-save button (floppy icon), enabled only while the preset is
+// EDITED. Holding it fills it with amber from the bottom over 1 s;
+// released early, the fill drops back and nothing happens; reaching the
+// top fires `save` once and flashes. While a save is in flight (`busy`)
+// the icon pulses and input is ignored.
+component SaveButton inherits Rectangle {
+    in property <bool> armed;
+    in property <bool> busy;
+    callback save();
+
+    // Latched when a hold fires; cleared on release (one save per hold).
+    property <bool> fired: false;
+    property <bool> pressing: btn.down;
+    property <bool> held: self.pressing && root.armed && !root.busy && !self.fired;
+    property <bool> flash: false;
+    property <bool> pulse: false;
+
+    width: 26px;
+    height: 26px;
+
+    changed pressing => {
+        if (!self.pressing) {
+            root.fired = false;
+        }
+    }
+
+    btn := HwButton {
+        width: 100%;
+        height: 100%;
+        radius: 5px;
+        enabled: root.armed || root.busy;
+
+        // Hold progress: amber rising from the bottom.
+        Rectangle {
+            y: parent.height - self.height;
+            width: parent.width;
+            height: root.held ? parent.height : 0px;
+            animate height {
+                duration: root.held ? 1000ms : 250ms;
+                easing: linear;
+            }
+            border-radius: 4px;
+            background: Theme.accent.with-alpha(0.35);
+            drop-shadow-blur: 6px;
+            drop-shadow-color: Theme.amber-glow;
+        }
+        if root.flash: Rectangle {
+            border-radius: 4px;
+            background: Theme.accent.with-alpha(0.6);
+        }
+
+        // Floppy disk: body with a clipped corner, shutter, label.
+        Path {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            stroke: root.busy ? (root.pulse ? Theme.accent : Theme.hw-ink)
+                : (btn.hover && root.armed ? Theme.hw-ink-hover : Theme.hw-ink);
+            stroke-width: 1.3px;
+            commands: "M 1.5 1.5 L 11.5 1.5 L 14.5 4.5 L 14.5 14.5 L 1.5 14.5 Z M 4.5 1.5 L 4.5 5.5 L 10.5 5.5 L 10.5 1.5 M 4 14.5 L 4 9.5 L 12 9.5 L 12 14.5";
+        }
+    }
+
+    // Fires when the fill reaches the top.
+    Timer {
+        interval: 1000ms;
+        running: root.held;
+        triggered => {
+            root.fired = true;
+            root.flash = true;
+            root.save();
+        }
+    }
+    Timer {
+        interval: 180ms;
+        running: root.flash;
+        triggered => {
+            root.flash = false;
+        }
+    }
+    Timer {
+        interval: 400ms;
+        running: root.busy;
+        triggered => {
+            root.pulse = !root.pulse;
+        }
+    }
+}
+
 // On/Off chip for an effect block header: green dot + "On", muted "Off".
 component OnOffChip inherits Rectangle {
     in-out property <bool> on: true;
@@ -1527,6 +1619,9 @@ export component AppWindow inherits Window {
     // (Rust); name-filter keeps the field to printable ASCII, 32 bytes.
     in-out property <int> rename-edit: 0;
     in property <int> rename-busy: 0;
+    // Save of the current preset's live values in flight (Rust).
+    in property <bool> save-busy: false;
+    callback save-preset();
     callback rename-preset(int, string);
     pure callback name-filter(string) -> string;
     // Short status bar message (e.g. "RENAME FAILED"), cleared after 4 s.
@@ -1683,6 +1778,13 @@ export component AppWindow inherits Window {
                 letter-spacing: 2px;
                 vertical-alignment: center;
             }
+            // Save the current preset: hold 1 s, only while EDITED.
+            SaveButton {
+                armed: root.preset-dirty;
+                busy: root.save-busy;
+                save => { root.save-preset(); }
+            }
+
             // Tuner on/off (MIDI CC9). The pedal reports no tuner state, so
             // this shows what the app set; the OLED label reads TUNER ON.
             tuner-btn := HwButton {

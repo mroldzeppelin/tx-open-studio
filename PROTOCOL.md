@@ -245,9 +245,13 @@ B9 03 81 03 02 82 <len lo> <len hi> 80 10 03 | <body>
 - Rename = read a fresh full dump, set the name buffer (zero-fill the rest of the 33 bytes), write it back. Reading the dump back afterwards shows the new name and no other byte changed, **if the preset is not the active one**.
 - When the target **is** the active preset, the pedal stores the model blob in a different but benign form (~10 KB differ, sounds identical; the official editor shows the same). So a write is verified by comparing the **name buffer only**, never the whole body.
 - No acknowledgement frame was seen for the app's writes (the editor saw a `0x0204` push); verify by re-reading the dump. The app ignores `0x0204` pushes for the renamed preset while it reads/writes, and for 3 s after.
-- The app validates the dump before patching (type `0x0203`, `len` == body length, body starts `B9 04 01 00 <idx>`, name tag near the start) and saves it to `~/.local/share/tx-open-studio/backups/<UTC YYYYmmdd-HHMMSS>-<preset id>.bin` first; no valid dump or no backup → no write.
+- The app validates a fresh dump before patching (type `0x0203`, `len` == body length, body starts `B9 04 01 00 <idx>`, name tag near the start); no valid dump → no write.
 
-Writing edited parameters (saving a preset) would use the same message but is not implemented.
+#### Saving edited parameters
+
+Same message. Hardware diff of the pedal's own quick-save (Gain 5 → 10): exactly 2 bytes changed, the f32 of param 20 in the **first** of the body's three parameter arrays. After the name/metadata the body has `BA 03` followed by three `BA 6D` arrays of 109 × (`88` + f32 LE) (on one preset at body offsets 64, 611, 1158; locate them by marker, the offsets are not fixed). Array 0 is the preset's parameter array (§5); arrays 1 and 2 are of unknown meaning and left untouched.
+
+The app saves by reading a fresh full dump, writing all 109 live values into array 0's float slots (only those 4-byte slots change), sending the body back, re-reading, and requiring array 0 to be bit-identical to what was written and the name unchanged. It refuses to write unless all 109 live values are known. The preset volume's place in the dump is not identified yet, so the stored preset volume is left as it is.
 
 ### 4.3.2 Preset select over serial (not used by the app)
 
@@ -540,7 +544,8 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 | Topic | Status |
 |---|---|
 | Preset rename | **Supported**: full dump → patch the name buffer → write (`0x0203`, §4.3.1), verified on hardware. |
-| Preset save (parameters) / upload | Not implemented. Saving edits would use the same write message with a modified body, but where the live parameters go in the body is not mapped; no `.tonex` upload path is known. |
+| Preset save (parameters) | **Supported** (§4.3.1): array 0 of the full dump patched with the live values. The preset volume is not included yet (its place in the dump is unknown); arrays 1 and 2 are not understood and left untouched. |
+| Preset upload / `.tonex` captures | Not implemented; no upload path is known. |
 | Preset volume at load | Not readable. The summary reply does not contain it in any identified place; the full dump holds a saved copy at unstable offsets inside the model blob. It is only known once the pedal pushes a `0x0207` section `03` change or the host writes it. (The code still range-checks one candidate, element 0 of the 2nd array in `BA 03`, and logs all candidates under `TX_DEBUG_SERIAL=1` — unverified.) |
 | "Sections" in `0x0207` | Hypothesis: `<section> 00 <idx>` addresses float arrays in document order (Builty's old preset-tempo write `01 00 01`; `02` = 109-array confirmed; `03` = preset volume confirmed). How `03` maps onto the summary's arrays is not established. |
 | Name-group float | `B9 02 [BC 21 …] BA 01 88 <f32>` after the name (from vit3k's capture): meaning unknown; it is **not** the preset volume. |

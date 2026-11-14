@@ -885,8 +885,9 @@ impl SyncCtx {
         self.amp().clear();
         *self.global_guard() = GlobalGuard::default();
         ui.set_globals_known(false);
-        // A rename in flight on the lost session never reports back.
+        // A rename/save in flight on the lost session never reports back.
         ui.set_rename_busy(0);
+        ui.set_save_busy(false);
         ui.set_preset_dirty(false);
         ui.set_preset_level_known(false);
         ui.set_eq_freq_known(false);
@@ -1089,6 +1090,24 @@ impl SyncCtx {
                     }
                 }
             }
+            Event::Saved { preset_idx, result } => {
+                ui.set_save_busy(false);
+                match result {
+                    // Saved: the live values are now the preset's stored
+                    // state (EDITED clears, double-click resets follow).
+                    Ok(()) if ui.get_preset() == i32::from(preset_idx) + 1 => {
+                        let mut amp = self.amp();
+                        amp.diff.rebaseline();
+                        ui.set_preset_dirty(amp.diff.dirty());
+                        fx::set_loaded_defaults(ui, &amp.diff);
+                    }
+                    Ok(()) => {} // the UI moved on to another preset meanwhile
+                    Err(e) => {
+                        eprintln!("TONEX: save failed: {e}");
+                        ui.set_status_note("SAVE FAILED".into());
+                    }
+                }
+            }
             Event::PresetChanged { preset_idx, params, raw } => {
                 let preset = i32::from(preset_idx) + 1;
                 let echo = *self.rename_echo.lock().unwrap_or_else(|e| e.into_inner());
@@ -1219,6 +1238,28 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_name_filter(|text| tonex_serial::filter_name(&text).into());
 
     {
+        // Save the current preset's live values (hold-to-save button, only
+        // while EDITED). The patch step is still a stub: reports SAVE FAILED.
+        let ui_weak = ui.as_weak();
+        let ctx = ctx.clone();
+        ui.on_save_preset(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if ui.get_save_busy() || !ui.get_preset_dirty() {
+                return;
+            }
+            let preset = ui.get_preset();
+            let values = ctx.amp().diff.live_values();
+            match ctx.with_serial(|p| p.save_preset((clamp_preset(preset) - 1) as u8, values)) {
+                Ok(()) => ui.set_save_busy(true),
+                Err(e) => {
+                    eprintln!("TONEX: save not started: {e}");
+                    ui.set_status_note("SAVE FAILED".into());
+                }
+            }
+        });
+    }
+
+    {
         // Preset rename (list context menu). Only one at a time; the row
         // shows "saving…" until Event::Renamed.
         let ui_weak = ui.as_weak();
@@ -1233,7 +1274,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 return; // nothing to write: same as cancel
             }
             let idx = (preset - 1) as u8;
-            match ctx.with_serial(|p| p.rename_preset(idx, &name, &preset_id(preset))) {
+            match ctx.with_serial(|p| p.rename_preset(idx, &name)) {
                 Ok(()) => ui.set_rename_busy(preset),
                 Err(e) => {
                     eprintln!("TONEX: rename not started: {e}");

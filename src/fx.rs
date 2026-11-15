@@ -1143,11 +1143,6 @@ impl PresetDiff {
         self.current = raw.to_vec();
     }
 
-    /// The live values for a save: the current array and preset volume.
-    pub fn live_values(&self) -> crate::tonex_serial::LiveValues {
-        crate::tonex_serial::LiveValues { params: self.current.clone(), preset_level: self.level_cur }
-    }
-
     /// After a verified save the current values are the preset's stored
     /// state: they become the baseline, as after a preset load.
     pub fn rebaseline(&mut self) {
@@ -1209,7 +1204,7 @@ mod diff_tests {
     }
 
     #[test]
-    fn live_values_and_rebaseline() {
+    fn rebaseline_after_save() {
         let mut d = PresetDiff::default();
         d.load(&base());
         d.load_level(5.0);
@@ -1217,10 +1212,7 @@ mod diff_tests {
         d.set(gain, 8.0);
         d.set_level(6.5);
         assert!(d.dirty());
-        let live = d.live_values();
-        assert_eq!(live.params[gain], 8.0);
-        assert_eq!(live.preset_level, Some(6.5));
-        // A save makes the live values the new baseline.
+        // A save makes the current values the new baseline.
         d.rebaseline();
         assert!(!d.dirty());
         assert_eq!(d.baseline(gain), Some(8.0));

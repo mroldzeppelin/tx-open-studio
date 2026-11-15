@@ -1619,7 +1619,7 @@ export component AppWindow inherits Window {
     // (Rust); name-filter keeps the field to printable ASCII, 32 bytes.
     in-out property <int> rename-edit: 0;
     in property <int> rename-busy: 0;
-    // Save of the current preset's live values in flight (Rust).
+    // Save of the current preset (live edit buffer → stored) in flight.
     in property <bool> save-busy: false;
     // Amp model / cab slot names from the current preset's full dump
     // ("" until read); cab-slot-type: 0 model cab, 3 IR, 4 borrowed cab,

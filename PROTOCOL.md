@@ -282,11 +282,35 @@ B9 03 81 03 02 82 <len lo> <len hi> 80 10 03 | <body>
 - No acknowledgement frame was seen for the app's writes (the editor saw a `0x0204` push); verify by re-reading the dump. The app ignores `0x0204` pushes for the renamed preset while it reads/writes, and for 3 s after.
 - The app validates a fresh dump before patching (type `0x0203`, `len` == body length, body starts `B9 04 01 00 <idx>`, name tag near the start); no valid dump → no write.
 
-#### Saving edited parameters
+#### Live edit buffer and saving
 
-Same message. Hardware diff of the pedal's own quick-save (Gain 5 → 10): exactly 2 bytes changed, the f32 of param 20 in the **first** of the body's three parameter arrays. After the name/metadata the body has `BA 03` followed by three `BA 6D` arrays of 109 × (`88` + f32 LE) (on one preset at body offsets 64, 611, 1158; locate them by marker, the offsets are not fixed). Array 0 is the preset's parameter array (§5); arrays 1 and 2 are of unknown meaning and left untouched.
+The pedal's live edit buffer (the active preset including unsaved edits) is read like a full dump, with `10 00 00 01`:
 
-The app saves by reading a fresh full dump, writing all 109 live values into array 0's float slots (only those 4-byte slots change), sending the body back, re-reading, and requiring array 0 to be bit-identical to what was written and the name unchanged. It refuses to write unless all 109 live values are known. The preset volume's place in the dump is not identified yet, so the stored preset volume is left as it is.
+```
+B9 03 81 00 02 82 06 00 80 10 03 | B9 04 10 00 00 01
+```
+
+Reply type `0x0203`, same header form as a stored dump; body `B9 04 00 <dirty> <idx> <contents>`:
+
+| Field | Value |
+|---|---|
+| 1 | `00` = live buffer (stored dumps have `01`) |
+| 2 | **dirty** flag: `00` clean, `01` after any live edit (the pedal's own "edited" state) |
+| 3 | the active preset index (§3 encoding, `80 xx` for ≥ 128) |
+| contents | the same tree as a stored dump (details, AMP slot, int, CAB slot; "Body tree" in §4.3) |
+
+Verified on hardware: the live buffer shows unsaved edits (e.g. Gain 7.0) while the stored dump still has the old value (5.0).
+
+**Saving** (as the official editor does it): write the live buffer back with the write message above, the body changed only in fields 1 and 2 to `01 00` (stored, clean). The app:
+
+1. reads the live buffer and checks it (type, length field, the whole body parses, field 1 = `00`) and that its index is the preset being saved;
+2. sets the two header bytes, writes, waits 300 ms;
+3. re-reads the stored dump and requires the details subtree (`/3/0`: name, the three parameter arrays, metadata) to be byte-identical to what was written, and the AMP and CAB slots' id blob, name buffers and content kind to match. The slots' big data blobs are not compared (the active preset's model data is re-encoded on write);
+4. re-reads the live buffer and logs if the dirty flag is still set (not a failure).
+
+Hardware note, still true: for a parameter edit, the pedal's own quick-save changes only the edited value in the **first** of the body's three parameter arrays (after `BA 03`, three `BA 6D` arrays of 109 × `88` + f32; Gain 5 → 10 changed exactly the 2 bytes of param 20's f32). Arrays 1 and 2 are of unknown meaning.
+
+The preset volume is not part of the preset data written here; a save keeps the volume stored on the pedal.
 
 ### 4.3.2 Preset select over serial (not used by the app)
 
@@ -579,7 +603,7 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 | Topic | Status |
 |---|---|
 | Preset rename | **Supported**: full dump → patch the name buffer → write (`0x0203`, §4.3.1), verified on hardware. |
-| Preset save (parameters) | **Supported** (§4.3.1): array 0 of the full dump patched with the live values. The preset volume is not included yet (its place in the dump is unknown); arrays 1 and 2 are not understood and left untouched. |
+| Preset save (parameters) | **Supported** (§4.3.1): the pedal's live edit buffer written back as the stored preset. The preset volume is not part of that data, so a save keeps the stored volume. |
 | Preset upload / `.tonex` captures | Not implemented; no upload path is known. |
 | Preset volume at load | Not readable. The summary reply does not contain it in any identified place; the full dump holds a saved copy at unstable offsets inside the model blob. It is only known once the pedal pushes a `0x0207` section `03` change or the host writes it. (The code still range-checks one candidate, element 0 of the 2nd array in `BA 03`, and logs all candidates under `TX_DEBUG_SERIAL=1` — unverified.) |
 | "Sections" in `0x0207` | Hypothesis: `<section> 00 <idx>` addresses float arrays in document order (Builty's old preset-tempo write `01 00 01`; `02` = 109-array confirmed; `03` = preset volume confirmed). How `03` maps onto the summary's arrays is not established. |

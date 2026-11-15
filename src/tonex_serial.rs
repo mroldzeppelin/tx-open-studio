@@ -417,17 +417,7 @@ fn name_buffer(body: &[u8]) -> Result<&[u8], String> {
 /// a write relies on: type 0x0203, header size == body length, body starts
 /// `B9 04 01 00 <idx>`, name field near the start. Anything else: Err.
 fn dump_body(payload: &[u8], idx: u8) -> Result<&[u8], String> {
-    if frame_type(payload) != Some(TYPE_PRESET_DUMP) {
-        return Err("not a preset dump".into());
-    }
-    let mut pos = 2;
-    read_u16_value(payload, &mut pos).ok_or("bad dump header")?; // type
-    let size = read_u16_value(payload, &mut pos).ok_or("bad dump header size")?;
-    read_u16_value(payload, &mut pos).ok_or("bad dump header")?; // `10`
-    let body = payload.get(pos..).ok_or("dump too short")?;
-    if body.len() != usize::from(size) {
-        return Err(format!("dump body is {} bytes, header says {size}", body.len()));
-    }
+    let body = reply_body(payload)?;
     let mut start = vec![0xB9, 0x04, 0x01, 0x00];
     start.extend(index_bytes(idx));
     if !body.starts_with(&start) {
@@ -640,73 +630,114 @@ pub fn tone_info(body: &[u8]) -> Option<ToneInfo> {
     Some(ToneInfo { amp, cab })
 }
 
-/// The current preset's live state as the app knows it, for a save: the
-/// 109-item parameter array as last read, with every edit and pedal push
-/// since (shorter than `PARAM_COUNT`, or empty, if the read was partial or
-/// never happened), and the preset volume if known.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct LiveValues {
-    pub params: Vec<f32>,
-    pub preset_level: Option<f32>,
+/// Read of the pedal's live edit buffer (the active preset with unsaved
+/// edits): like a full dump request, but `10 00 00 01`.
+fn live_buffer_request() -> Vec<u8> {
+    let body = [0xB9, 0x04, 0x10, 0x00, 0x00, 0x01];
+    let mut req = vec![0xB9, 0x03, 0x81, 0x00, 0x02, 0x82];
+    req.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    req.extend_from_slice(&[0x80, 0x10, 0x03]);
+    req.extend_from_slice(&body);
+    req
 }
 
-/// Offset of the first item of a dump body's parameter array 0: the first
-/// `BA 6D` after the first `BA 03` past the name buffer, followed by 109
-/// consecutive `88 <f32>` items. (The body holds three such arrays; the
-/// pedal's own quick-save changes only array 0, hardware-diffed.)
-fn array0_offset(body: &[u8]) -> Result<usize, String> {
-    let from = name_buf_offset(body)? + NAME_BUF_LEN;
-    let rest = body.get(from..).ok_or("dump body too short")?;
-    let ba03 = from + find(rest, &[0xBA, 0x03]).ok_or("parameter block (BA 03) not found")?;
-    let ba6d = ba03 + find(&body[ba03..], &[0xBA, 0x6D]).ok_or("parameter array (BA 6D) not found")?;
-    let start = ba6d + 2;
-    let items = body.get(start..start + PARAM_COUNT * PARAM_STRIDE).ok_or("parameter array truncated")?;
-    if !items.chunks_exact(PARAM_STRIDE).all(|c| c[0] == FLOAT_TAG) {
-        return Err("parameter array has non-float items".into());
+/// Body of a type-0x0203 reply whose header size matches its length.
+fn reply_body(payload: &[u8]) -> Result<&[u8], String> {
+    if frame_type(payload) != Some(TYPE_PRESET_DUMP) {
+        return Err("not a preset dump".into());
     }
-    Ok(start)
+    let mut pos = 2;
+    read_u16_value(payload, &mut pos).ok_or("bad dump header")?; // type
+    let size = read_u16_value(payload, &mut pos).ok_or("bad dump header size")?;
+    read_u16_value(payload, &mut pos).ok_or("bad dump header")?; // `10`
+    let body = payload.get(pos..).ok_or("dump too short")?;
+    if body.len() != usize::from(size) {
+        return Err(format!("dump body is {} bytes, header says {size}", body.len()));
+    }
+    Ok(body)
 }
 
-/// The 109 values of parameter array 0.
-fn array0_values(body: &[u8]) -> Result<Vec<f32>, String> {
-    let start = array0_offset(body)?;
-    Ok(body[start..start + PARAM_COUNT * PARAM_STRIDE]
-        .chunks_exact(PARAM_STRIDE)
-        .map(|c| f32::from_le_bytes([c[1], c[2], c[3], c[4]]))
-        .collect())
+/// The live edit buffer read: body `B9 04 00 <dirty> <idx> <contents>`
+/// (field 1 = 00 live, 01 in stored dumps; field 2 = the pedal's dirty
+/// flag). Returns the body, the active preset index and the dirty flag,
+/// after checking the whole body parses as one tree.
+fn live_body(payload: &[u8]) -> Result<(&[u8], u8, bool), String> {
+    let body = reply_body(payload)?;
+    let mut pos = 0;
+    let tree = parse_node(body, &mut pos, 0).ok_or("live buffer does not parse")?;
+    if pos != body.len() {
+        return Err("live buffer has trailing bytes".into());
+    }
+    let field = |i: usize| tree.at(&[i]).and_then(|n| n.int());
+    if field(0) != Some(0) {
+        return Err("not the live edit buffer".into());
+    }
+    let dirty = match field(1) {
+        Some(0) => false,
+        Some(1) => true,
+        _ => return Err("live buffer dirty flag unreadable".into()),
+    };
+    let idx = field(2).filter(|&i| usize::from(i) < PRESET_COUNT).ok_or("live buffer preset index unreadable")?;
+    tree.at(&[3]).and_then(|n| n.items()).ok_or("live buffer contents missing")?;
+    Ok((body, idx as u8, dirty))
 }
 
-/// `body` with parameter array 0 set to the live values: only the 4 value
-/// bytes of each item change; arrays 1 and 2 (meaning unknown) and
-/// everything else stay byte-identical, as in the pedal's own quick-save.
-/// Refuses unless all 109 values are known and finite: never write a
-/// partial or default state.
-/// TODO: the preset volume (`values.preset_level`) is not located in the
-/// dump yet; the stored value is left as it is.
-fn patch_live_values(body: &[u8], values: &LiveValues) -> Result<Vec<u8>, String> {
-    if values.params.len() < PARAM_COUNT || !values.params[..PARAM_COUNT].iter().all(|v| v.is_finite()) {
-        return Err("live values incomplete".into());
+/// Body to write for a save: the live buffer body with field 1 = 01
+/// (stored) and field 2 = 00 (clean), as the official editor writes it.
+/// Both are single-byte literals at body offsets 2 and 3; index and
+/// contents stay untouched.
+fn stored_body_from_live(live: &[u8]) -> Result<Vec<u8>, String> {
+    match live {
+        [0xB9, 0x04, 0x00, 0x00 | 0x01, ..] => {
+            let mut out = live.to_vec();
+            out[2] = 0x01;
+            out[3] = 0x00;
+            Ok(out)
+        }
+        _ => Err("unexpected live buffer header".into()),
     }
-    let start = array0_offset(body)?;
-    let mut out = body.to_vec();
-    for (i, v) in values.params[..PARAM_COUNT].iter().enumerate() {
-        let at = start + i * PARAM_STRIDE + 1;
-        out[at..at + 4].copy_from_slice(&v.to_le_bytes());
-    }
-    Ok(out)
 }
 
-/// A save is stored when the re-read array 0 holds exactly (bit for bit)
-/// the values written and the name is unchanged. The rest is not compared:
-/// the active preset's model blob is legitimately re-encoded on write.
-fn verify_saved(written: &[u8], stored: &[u8], values: &LiveValues) -> Result<(), String> {
-    let got = array0_values(stored)?;
-    let want = values.params.get(..PARAM_COUNT).ok_or("live values incomplete")?;
-    if got.iter().zip(want).any(|(g, w)| g.to_bits() != w.to_bits()) {
-        return Err("the pedal did not store the parameter values".into());
+/// Byte range of the node at `path` (list indices) in `p`.
+fn span_at(p: &[u8], path: &[usize]) -> Option<std::ops::Range<usize>> {
+    let mut pos = 0;
+    for &i in path {
+        if !matches!(*p.get(pos)?, 0xB9 | 0xBA) {
+            return None;
+        }
+        pos += 1;
+        if usize::from(read_u16_value(p, &mut pos)?) <= i {
+            return None;
+        }
+        for _ in 0..i {
+            parse_node(p, &mut pos, 1)?;
+        }
     }
-    if name_buffer(written)? != name_buffer(stored)? {
-        return Err("the preset name changed".into());
+    let start = pos;
+    parse_node(p, &mut pos, 1)?;
+    Some(start..pos)
+}
+
+/// A save is stored when the re-read stored body has, byte for byte, the
+/// written details subtree (/3/0: name, the three parameter arrays,
+/// metadata) and the same id blob, name buffers and content kind in the
+/// AMP and CAB slots. The slots' data blobs are not compared: the active
+/// preset's model data is legitimately re-encoded on write.
+fn verify_saved(written: &[u8], stored: &[u8]) -> Result<(), String> {
+    let same = |path: &[usize], what: &str| -> Result<(), String> {
+        let w = span_at(written, path).ok_or_else(|| format!("{what}: not found in the written preset"))?;
+        let s = span_at(stored, path).ok_or_else(|| format!("{what}: not found in the stored preset"))?;
+        if written[w] == stored[s] {
+            Ok(())
+        } else {
+            Err(format!("the pedal did not store the {what}"))
+        }
+    };
+    same(&[3, 0], "preset details")?;
+    for (slot, name) in [(1, "amp slot"), (3, "cab slot")] {
+        for (part, what) in [(0, "id"), (1, "names"), (2, "kind")] {
+            same(&[3, slot, part], &format!("{name} {what}"))?;
+        }
     }
     Ok(())
 }
@@ -1400,8 +1431,8 @@ enum Request {
     SetGlobal(usize, f32),
     /// Rename a preset (index, new name).
     Rename(u8, String),
-    /// Save the live values into a preset (index, snapshot).
-    Save(u8, LiveValues),
+    /// Save the pedal's live edit buffer into its preset (index).
+    Save(u8),
     /// Read a preset's amp/cab slot names (index).
     ToneInfo(u8),
 }
@@ -1483,15 +1514,15 @@ impl Pedal {
         self.send(Request::Rename(idx, name.to_string()))
     }
 
-    /// Saves the live values into preset `idx` (0-based): fresh full dump,
-    /// validated, patched with `values`, written, verified by re-reading.
-    /// Answered with `Event::Saved`. The patch step is a stub for now, so
-    /// this always fails without writing.
-    pub fn save_preset(&self, idx: u8, values: LiveValues) -> Result<(), String> {
+    /// Saves preset `idx` (0-based, the active preset): reads the pedal's
+    /// live edit buffer, writes it back as the stored preset (as the
+    /// official editor does) and verifies by re-reading the stored dump.
+    /// Answered with `Event::Saved`.
+    pub fn save_preset(&self, idx: u8) -> Result<(), String> {
         if usize::from(idx) >= PRESET_COUNT {
             return Err(format!("preset index {idx} out of range"));
         }
-        self.send(Request::Save(idx, values))
+        self.send(Request::Save(idx))
     }
 
     /// Reads the amp model / cab source names of preset `idx` (0-based)
@@ -1655,7 +1686,7 @@ impl<F: Fn(Event)> Session<'_, F> {
                 Request::Globals => read_globals = true,
                 Request::AmpParams(idx) => latest_read = Some(idx),
                 Request::Rename(idx, name) => renames.push((idx, name)),
-                Request::Save(idx, values) => saves.push((idx, values)),
+                Request::Save(idx) => saves.push(idx),
                 Request::ToneInfo(idx) => latest_tone = Some(idx),
                 other => rest.push_back(other),
             }
@@ -1709,8 +1740,8 @@ impl<F: Fn(Event)> Session<'_, F> {
             }
             served = true;
         }
-        for (idx, values) in saves {
-            match self.save_preset(idx, &values) {
+        for idx in saves {
+            match self.save_preset(idx) {
                 Ok(result) => (self.on_event)(Event::Saved { preset_idx: idx, result }),
                 Err(e) => {
                     (self.on_event)(Event::Saved { preset_idx: idx, result: Err(e.clone()) });
@@ -1729,13 +1760,25 @@ impl<F: Fn(Event)> Session<'_, F> {
     /// Inner Err: no valid dump (with the last layout problem seen); outer
     /// Err: link failure.
     fn fetch_dump(&mut self, idx: u8, drop_pushes: bool) -> Result<Result<Vec<u8>, String>, String> {
-        self.link.send(&full_dump_request(idx))?;
+        self.fetch_0203(&full_dump_request(idx), |p| dump_body(p, idx).map(|_| ()), drop_pushes)
+    }
+
+    /// Sends `request` and returns the first type-0x0203 reply `accept`
+    /// takes (other 0x0203 frames: their problem is kept for the error),
+    /// handling other frames as `fetch_dump` describes.
+    fn fetch_0203(
+        &mut self,
+        request: &[u8],
+        accept: impl Fn(&[u8]) -> Result<(), String>,
+        drop_pushes: bool,
+    ) -> Result<Result<Vec<u8>, String>, String> {
+        self.link.send(request)?;
         let until = Instant::now() + DUMP_TIMEOUT;
         let mut problem = "no preset dump received".to_string();
         while let Some(payload) = self.link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
             match frame_type(&payload) {
-                Some(TYPE_PRESET_DUMP) => match dump_body(&payload, idx) {
-                    Ok(_) => return Ok(Ok(payload)),
+                Some(TYPE_PRESET_DUMP) => match accept(&payload) {
+                    Ok(()) => return Ok(Ok(payload)),
                     Err(e) => problem = e,
                 },
                 Some(TYPE_PRESET_DETAILS) if drop_pushes => {
@@ -1800,29 +1843,36 @@ impl<F: Fn(Event)> Session<'_, F> {
         Ok(self.fetch_dump(idx, true)?.map_err(|e| format!("verifying the write: {e}")))
     }
 
-    /// The save operation (see `Pedal::save_preset`), same shape as a
-    /// rename. Inner Err: not written or not verified; outer Err: link
-    /// failure.
-    fn save_preset(&mut self, idx: u8, values: &LiveValues) -> Result<Result<(), String>, String> {
-        // 1. A fresh dump, validated.
-        let dump = match self.fetch_dump(idx, true)? {
-            Ok(d) => d,
-            Err(e) => return Ok(Err(format!("reading the preset: {e}"))),
-        };
-        let body = match dump_body(&dump, idx) {
-            Ok(b) => b.to_vec(),
-            Err(e) => return Ok(Err(e)),
-        };
-        // 2. Patch the live values (stub: refuses, so nothing is written).
-        let patched = match patch_live_values(&body, values) {
+    /// Reads the live edit buffer: (payload, active preset index, dirty).
+    fn fetch_live(&mut self) -> Result<Result<(Vec<u8>, u8, bool), String>, String> {
+        let payload = match self.fetch_0203(&live_buffer_request(), |p| live_body(p).map(|_| ()), true)? {
             Ok(p) => p,
             Err(e) => return Ok(Err(e)),
         };
-        let request = match preset_write_request(&patched) {
+        Ok(live_body(&payload).map(|(_, idx, dirty)| (payload.clone(), idx, dirty)))
+    }
+
+    /// The save operation (see `Pedal::save_preset`). Inner Err: not
+    /// written or not verified; outer Err: link failure.
+    fn save_preset(&mut self, idx: u8) -> Result<Result<(), String>, String> {
+        // 1. The live edit buffer, validated, for the preset being saved.
+        let (live, active, _) = match self.fetch_live()? {
+            Ok(l) => l,
+            Err(e) => return Ok(Err(format!("reading the live buffer: {e}"))),
+        };
+        if active != idx {
+            return Ok(Err(format!("the pedal's active preset ({active}) is not the one being saved ({idx})")));
+        }
+        // 2. Written back as the stored preset (01 stored, 00 clean).
+        let written = match live_body(&live).and_then(|(body, ..)| stored_body_from_live(body)) {
+            Ok(b) => b,
+            Err(e) => return Ok(Err(e)),
+        };
+        let request = match preset_write_request(&written) {
             Ok(r) => r,
             Err(e) => return Ok(Err(e)),
         };
-        // 3. Write, re-read, verify (rule pending with the patch rules).
+        // 3. Write, re-read the stored dump, verify.
         let after = match self.write_and_reread(idx, &request)? {
             Ok(d) => d,
             Err(e) => return Ok(Err(e)),
@@ -1831,7 +1881,16 @@ impl<F: Fn(Event)> Session<'_, F> {
             Ok(b) => b,
             Err(e) => return Ok(Err(e)),
         };
-        Ok(verify_saved(&patched, stored, values))
+        if let Err(e) = verify_saved(&written, stored) {
+            return Ok(Err(e));
+        }
+        // 4. The pedal's own EDITED flag should be clear now (log only).
+        match self.fetch_live()? {
+            Ok((_, _, true)) => eprintln!("TONEX: saved, but the pedal still reports unsaved edits"),
+            Ok(_) => {}
+            Err(e) => eprintln!("TONEX: saved; live buffer re-read failed: {e}"),
+        }
+        Ok(Ok(()))
     }
 
     /// Removes all queued names requests; true if there was one.
@@ -2078,10 +2137,91 @@ mod tests {
         d
     }
     fn enc_body(idx: u16, amp: Vec<u8>, cab: Vec<u8>) -> Vec<u8> {
+        enc_body_with(1, 0, idx, amp, cab)
+    }
+    /// Body `[mode, dirty, idx, contents]` (mode 1 stored, 0 live buffer).
+    fn enc_body_with(mode: u16, dirty: u16, idx: u16, amp: Vec<u8>, cab: Vec<u8>) -> Vec<u8> {
         let floats = enc_list(0xBA, (0..5).map(|i| { let mut f = vec![FLOAT_TAG]; f.extend((i as f32).to_le_bytes()); f }).collect());
         let details = enc_list(0xB9, vec![enc_name("PRESET"), enc_list(0xBA, vec![floats.clone(), floats.clone(), floats])]);
         let contents = enc_list(0xB9, vec![details, amp, enc_int(2), cab]);
-        enc_list(0xB9, vec![enc_int(1), enc_int(0), enc_int(idx), contents])
+        enc_list(0xB9, vec![enc_int(mode), enc_int(dirty), enc_int(idx), contents])
+    }
+    /// A type-0x0203 reply around `body`.
+    fn wrap_0203(body: &[u8]) -> Vec<u8> {
+        let mut p = vec![0xB9, 0x03, 0x81, 0x03, 0x02, 0x81];
+        p.extend((body.len() as u16).to_le_bytes());
+        p.push(0x10);
+        p.extend_from_slice(body);
+        p
+    }
+    fn cab_slot() -> Vec<u8> {
+        enc_slot("51st Hi", 4, &slot_data(b"\0\0\0\0Peavey 5150", 300))
+    }
+
+    #[test]
+    fn live_buffer_request_and_header_rewrite() {
+        assert_eq!(
+            live_buffer_request(),
+            [0xB9, 0x03, 0x81, 0x00, 0x02, 0x82, 0x06, 0x00, 0x80, 0x10, 0x03, 0xB9, 0x04, 0x10, 0x00, 0x00, 0x01]
+        );
+        for (idx, dirty) in [(5u16, 1u16), (140, 0)] {
+            let live = enc_body_with(0, dirty, idx, amp_slot(), cab_slot());
+            let payload = wrap_0203(&live);
+            let (body, active, d) = live_body(&payload).unwrap();
+            assert_eq!((active as u16, d), (idx, dirty == 1));
+            // Rewrite: stored + clean, index (incl. `80 xx`) and contents untouched.
+            let out = stored_body_from_live(body).unwrap();
+            assert_eq!(&out[..4], &[0xB9, 0x04, 0x01, 0x00]);
+            assert_eq!(&out[4..], &body[4..]);
+            assert!(dump_body(&wrap_0203(&out), idx as u8).is_ok(), "reads as the stored preset");
+        }
+    }
+
+    #[test]
+    fn live_buffer_validation() {
+        // A stored dump is not the live buffer.
+        assert!(live_body(&wrap_0203(&enc_body(5, amp_slot(), cab_slot()))).is_err());
+        // Length field mismatch.
+        let mut p = wrap_0203(&enc_body_with(0, 1, 5, amp_slot(), cab_slot()));
+        p.pop();
+        assert!(live_body(&p).is_err());
+        // Malformed tree (unknown tag inside) or trailing bytes.
+        let mut body = enc_body_with(0, 1, 5, amp_slot(), cab_slot());
+        let at = body.len() - 1;
+        body[at] = 0x99;
+        assert!(live_body(&wrap_0203(&body)).is_err());
+        let mut trailing = enc_body_with(0, 1, 5, amp_slot(), cab_slot());
+        trailing.push(0x00);
+        assert!(live_body(&wrap_0203(&trailing)).is_err());
+        // Dirty flag other than 0/1, preset index out of range.
+        assert!(live_body(&wrap_0203(&enc_body_with(0, 2, 5, amp_slot(), cab_slot()))).is_err());
+        assert!(live_body(&wrap_0203(&enc_body_with(0, 0, 150, amp_slot(), cab_slot()))).is_err());
+        assert!(stored_body_from_live(&[0xB9, 0x04, 0x01, 0x00, 5]).is_err());
+    }
+
+    #[test]
+    fn save_verification() {
+        let live = enc_body_with(0, 1, 5, amp_slot(), cab_slot());
+        let written = stored_body_from_live(&live).unwrap();
+        // Stored as written.
+        assert!(verify_saved(&written, &written).is_ok());
+        // Model data re-encoded (inside the slots' data blobs): still fine.
+        let mut reencoded = written.clone();
+        let at = find(&reencoded, b"ProCo Rat").unwrap();
+        reencoded[at] = b'X';
+        assert!(verify_saved(&written, &reencoded).is_ok());
+        // A parameter value not stored (details subtree differs).
+        let mut param = written.clone();
+        let at = find(&param, &3.0f32.to_le_bytes()).unwrap();
+        param[at + 3] ^= 0x01;
+        assert!(verify_saved(&written, &param).is_err());
+        // A slot's kind or name differs.
+        let other_kind = stored_body_from_live(&enc_body_with(0, 1, 5, amp_slot(), enc_slot("51st Hi", 1, &slot_data(b"\0\0\0\0Peavey 5150", 300)))).unwrap();
+        assert!(verify_saved(&written, &other_kind).is_err());
+        let other_name = stored_body_from_live(&enc_body_with(0, 1, 5, enc_slot("Ratfisx", 1, &slot_data(b"\x01\x02\x03\x04ProCo Rat", 300)), cab_slot())).unwrap();
+        assert!(verify_saved(&written, &other_name).is_err());
+        // Unparseable stored body.
+        assert!(verify_saved(&written, &written[..20]).is_err());
     }
     fn amp_slot() -> Vec<u8> {
         enc_slot("Ratfish", 1, &slot_data(b"\x01\x02\x03\x04ProCo Rat", 300))
@@ -2232,99 +2372,6 @@ mod tests {
         let mut p = vec![0xB9, 0x03, 0x81, 0x03, 0x02, 0x81, 10, 0, 0x10];
         p.extend_from_slice(&[0xB9, 0x04, 0x01, 0x00, 42, 0xB9, 0x02, 0xBC, 0x21, 0x41]);
         assert!(dump_body(&p, 42).is_err());
-    }
-
-    /// Synthetic dump body with the save-relevant layout: `B9 04 01 00
-    /// <idx> B9 02 BC 21 <name>`, filler, `BA 03`, three `BA 6D` arrays of
-    /// 109 floats (array k holds k*1000 + i), tail. No real dump bytes.
-    fn synthetic_save_body(idx: u8) -> Vec<u8> {
-        let mut body = vec![0xB9, 0x04, 0x01, 0x00, idx, 0xB9, 0x02, 0xBC, 0x21];
-        let mut name = [0u8; NAME_BUF_LEN];
-        name[..4].copy_from_slice(b"NAME");
-        body.extend_from_slice(&name);
-        body.extend_from_slice(&[0x11; 12]);
-        body.extend_from_slice(&[0xBA, 0x03]);
-        for k in 0..3 {
-            body.extend_from_slice(&[0xBA, 0x6D]);
-            for i in 0..PARAM_COUNT {
-                body.push(FLOAT_TAG);
-                body.extend_from_slice(&((k * 1000 + i) as f32).to_le_bytes());
-            }
-        }
-        body.extend_from_slice(&[0xBC, 0x81, 0xC8, 0x35, 1, 2, 3]);
-        body
-    }
-
-    fn live(v: f32) -> LiveValues {
-        LiveValues { params: vec![v; PARAM_COUNT], preset_level: Some(6.0) }
-    }
-
-    #[test]
-    fn save_patch_touches_only_array0_values() {
-        let body = synthetic_save_body(3);
-        let mut values = live(0.0);
-        for (i, v) in values.params.iter_mut().enumerate() {
-            *v = i as f32 + 0.5;
-        }
-        let patched = patch_live_values(&body, &values).unwrap();
-        assert_eq!(patched.len(), body.len());
-        let start = array0_offset(&body).unwrap();
-        for (k, (a, b)) in body.iter().zip(&patched).enumerate() {
-            let in_value = k >= start && k < start + PARAM_COUNT * PARAM_STRIDE && (k - start) % PARAM_STRIDE != 0;
-            if !in_value {
-                assert_eq!(a, b, "byte {k} outside array 0's value slots changed");
-            }
-        }
-        assert_eq!(array0_values(&patched).unwrap(), values.params);
-        // Arrays 1 and 2 untouched (array 1 starts right after array 0).
-        let a1 = start + PARAM_COUNT * PARAM_STRIDE + 2;
-        assert_eq!(f32::from_le_bytes(patched[a1 + 1..a1 + 5].try_into().unwrap()), 1000.0);
-    }
-
-    #[test]
-    fn save_patch_refuses_bad_input() {
-        let body = synthetic_save_body(3);
-        // Incomplete or non-finite live values: never written.
-        assert!(patch_live_values(&body, &LiveValues::default()).is_err());
-        assert!(patch_live_values(&body, &LiveValues { params: vec![1.0; 50], preset_level: None }).is_err());
-        let mut nan = live(1.0);
-        nan.params[20] = f32::NAN;
-        assert!(patch_live_values(&body, &nan).is_err());
-        // Malformed array 0 (a non-float item) or no parameter block.
-        let mut bad = body.clone();
-        let start = array0_offset(&body).unwrap();
-        bad[start + 7 * PARAM_STRIDE] = 0x00;
-        assert!(patch_live_values(&bad, &live(1.0)).is_err());
-        let mut no_block = body.clone();
-        let ba03 = find(&no_block[50..], &[0xBA, 0x03]).unwrap() + 50;
-        no_block[ba03 + 1] = 0x00;
-        assert!(patch_live_values(&no_block, &live(1.0)).is_err());
-        // Truncated array.
-        assert!(patch_live_values(&body[..start + 40 * PARAM_STRIDE], &live(1.0)).is_err());
-    }
-
-    #[test]
-    fn save_verification() {
-        let body = synthetic_save_body(3);
-        let values = live(7.25);
-        let written = patch_live_values(&body, &values).unwrap();
-        // Stored as written (model region re-encoded: not compared).
-        let mut stored = written.clone();
-        let n = stored.len();
-        stored[n - 1] ^= 0xFF;
-        assert!(verify_saved(&written, &stored, &values).is_ok());
-        // One value not stored.
-        let start = array0_offset(&body).unwrap();
-        let mut off = written.clone();
-        off[start + 20 * PARAM_STRIDE + 1] ^= 0x01;
-        assert!(verify_saved(&written, &off, &values).is_err());
-        // Name changed.
-        let mut renamed = written.clone();
-        let nb = name_buf_offset(&renamed).unwrap();
-        renamed[nb] = b'X';
-        assert!(verify_saved(&written, &renamed, &values).is_err());
-        // The unpatched body does not verify.
-        assert!(verify_saved(&written, &body, &values).is_err());
     }
 
     #[test]

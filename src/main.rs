@@ -1124,7 +1124,7 @@ impl SyncCtx {
             Event::Saved { preset_idx, result } => {
                 ui.set_save_busy(false);
                 match result {
-                    // Saved: the live values are now the preset's stored
+                    // Saved: the current values are now the preset's stored
                     // state (EDITED clears, double-click resets follow).
                     Ok(()) if ui.get_preset() == i32::from(preset_idx) + 1 => {
                         {
@@ -1289,8 +1289,8 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_name_filter(|text| tonex_serial::filter_name(&text).into());
 
     {
-        // Save the current preset's live values (hold-to-save button, only
-        // while EDITED). The patch step is still a stub: reports SAVE FAILED.
+        // Save the current preset (hold-to-save button, only while EDITED):
+        // the pedal's live edit buffer is written back as the stored preset.
         let ui_weak = ui.as_weak();
         let ctx = ctx.clone();
         ui.on_save_preset(move || {
@@ -1299,8 +1299,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             }
             let preset = ui.get_preset();
-            let values = ctx.amp().diff.live_values();
-            match ctx.with_serial(|p| p.save_preset((clamp_preset(preset) - 1) as u8, values)) {
+            match ctx.with_serial(|p| p.save_preset((clamp_preset(preset) - 1) as u8)) {
                 Ok(()) => ui.set_save_busy(true),
                 Err(e) => {
                     eprintln!("TONEX: save not started: {e}");

@@ -13,6 +13,9 @@ use super::*;
 pub struct PresetDiff {
     baseline: Vec<f32>,
     current: Vec<f32>,
+    /// The pedal reports unsaved edits after a model/cab load or on-pedal
+    /// browsing (its own dirty flag; slots are not in the arrays).
+    slot_edited: bool,
 }
 
 /// Largest difference treated as "unchanged" for parameter `index`: half the
@@ -52,6 +55,12 @@ impl PresetDiff {
     /// state: they become the baseline, as after a preset load.
     pub fn rebaseline(&mut self) {
         self.baseline = self.current.clone();
+        self.slot_edited = false;
+    }
+
+    /// The pedal's dirty flag read after a model/cab load or browsing.
+    pub fn set_slot_edited(&mut self, edited: bool) {
+        self.slot_edited = edited;
     }
 
     /// Value of parameter `index` as loaded with the preset (None before
@@ -63,6 +72,9 @@ impl PresetDiff {
     /// What makes the preset dirty, for the debug log: the first parameter
     /// whose current value differs from the baseline.
     pub fn first_difference(&self) -> Option<String> {
+        if self.slot_edited {
+            return Some("model/cab slot (pedal dirty flag)".into());
+        }
         self.baseline
             .iter()
             .zip(&self.current)
@@ -79,7 +91,9 @@ impl PresetDiff {
     }
 
     pub fn dirty(&self) -> bool {
-        self.baseline
+        self.slot_edited
+            || self
+                .baseline
             .iter()
             .zip(&self.current)
             .enumerate()
@@ -145,6 +159,17 @@ mod tests {
         assert!(!d.dirty());
         d.set(12, 310.0);
         assert!(d.dirty());
+    }
+
+    #[test]
+    fn slot_edit_is_dirty_until_saved() {
+        let mut d = PresetDiff::default();
+        d.load(&base());
+        d.set_slot_edited(true);
+        assert!(d.dirty());
+        assert!(d.first_difference().unwrap().contains("slot"));
+        d.rebaseline();
+        assert!(!d.dirty());
     }
 
     #[test]

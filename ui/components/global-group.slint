@@ -1,3 +1,4 @@
+import { StateButton } from "buttons.slint";
 import { Theme } from "../theme.slint";
 
 // A titled group on the GLOBAL tab: thin border with the title sitting on
@@ -10,6 +11,16 @@ export component GlobalGroup inherits Rectangle {
     // space-between pushes the outer children toward the group's edges
     // (used by the EQ group so Bass/Treble sit near the borders).
     in property <LayoutAlignment> content-alignment: LayoutAlignment.center;
+    // Optional on/off switch on the top border's right end, mirroring the
+    // title on the left (the AMP tab's EQ Pre/Post amp). It hangs 8 px
+    // above the line (the layout spacing above the group) and ends 16 px
+    // below it: content needs that much top padding plus its own margin.
+    in property <bool> has-switch: false;
+    in-out property <bool> switch-on;
+    in property <bool> switch-enabled: true;
+    in property <string> switch-on-text;
+    in property <string> switch-off-text;
+    callback switch-toggled(bool);
 
     border-width: 1px;
     border-color: Theme.border;
@@ -23,6 +34,19 @@ export component GlobalGroup inherits Rectangle {
         spacing: 6px;
         alignment: root.content-alignment;
         @children
+    }
+
+    if root.has-switch: StateButton {
+        x: parent.width - 8px - self.width;
+        y: -8px;
+        width: 76px;
+        height: 24px;
+        horizontal-stretch: 0;
+        enabled: root.switch-enabled;
+        on <=> root.switch-on;
+        on-text: root.switch-on-text;
+        off-text: root.switch-off-text;
+        toggled(on) => { root.switch-toggled(on); }
     }
 
     Rectangle {

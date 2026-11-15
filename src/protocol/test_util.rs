@@ -4,13 +4,7 @@ use super::*;
 
 // Synthetic encoder for tree tests (the pedal's value encoding).
 pub(crate) fn enc_int(n: u16) -> Vec<u8> {
-    if n < 0x80 {
-        vec![n as u8]
-    } else if n < 0x100 {
-        vec![0x80, n as u8]
-    } else {
-        vec![0x81, n as u8, (n >> 8) as u8]
-    }
+    encode_int(n)
 }
 
 pub(crate) fn enc_list(tag: u8, items: Vec<Vec<u8>>) -> Vec<u8> {

@@ -74,6 +74,8 @@ export struct PresetRow {
     name: string,
     character: string,
     kind: int,
+    // "amp · cab" (muted after the name; "" = not known yet).
+    tone: string,
 }
 
 // Value formatting shared by knobs and labels (exported so Rust tests can
@@ -120,5 +122,6 @@ export global CharacterColors {
 // Window height, for popups deciding whether to open upward (kept in sync
 // by AppWindow).
 export global WindowMetrics {
-    in-out property <length> height: 610px;
+    in-out property <length> height: 634px;
+    in-out property <length> width: 900px;
 }

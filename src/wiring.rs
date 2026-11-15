@@ -4,7 +4,7 @@ use crate::*;
 use std::time::Instant;
 
 /// Registers the window's callbacks: rename/save, search, preset changes, knobs
-/// and switches, globals, tuner, tap tempo, reconnect.
+/// and switches, globals, tuner, tap tempo.
 pub(crate) fn wire(ui: &AppWindow, ctx: &SyncCtx) {
     let engine = ctx.midi.clone();
 
@@ -222,18 +222,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &SyncCtx) {
         });
     }
 
-    {
-        let ui_weak = ui.as_weak();
-        let ctx = ctx.clone();
-        // Manual reconnect: drop both links and poll right away. No program
-        // change: the pedal's current preset wins and arrives from the
-        // serial state reply (CurrentPreset).
-        ui.on_reconnect(move || {
-            let Some(ui) = ui_weak.upgrade() else { return };
-            ctx.lose_pedal(&ui, "reconnect requested");
-            ctx.poll(&ui);
-        });
-    }
+    tone_select::wire(ui, ctx);
 }
 
 #[cfg(test)]

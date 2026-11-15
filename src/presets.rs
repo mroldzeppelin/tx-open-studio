@@ -28,6 +28,10 @@ pub(crate) struct PresetNames {
     pub(crate) names: Arc<Mutex<Vec<PresetMeta>>>,
     /// Current preset-list search query (as typed).
     pub(crate) query: Arc<Mutex<String>>,
+    /// "amp · cab" line per preset (index 0 = preset 1; "" = unknown).
+    pub(crate) tones: Arc<Mutex<Vec<String>>>,
+    /// Search-only words per preset (what its models are based on).
+    pub(crate) tone_search: Arc<Mutex<Vec<String>>>,
 }
 
 pub(crate) fn bank_number(preset_num: i32) -> i32 {
@@ -45,14 +49,14 @@ pub(crate) fn preset_id(preset_num: i32) -> String {
 }
 
 /// Search: every whitespace-separated token of `query` (case-insensitive)
-/// must occur in "id program-number ordinal bank slot name character" (e.g.
-/// "46c", "140" (PC, as the pedal shows it), "141",
-/// "dg solo", "clean", "bank 14"), whatever id style the list shows (the
-/// Naming global). An empty query matches everything.
-pub(crate) fn preset_matches(preset_num: i32, meta: &PresetMeta, query: &str) -> bool {
+/// must occur in "id program-number ordinal bank slot name character
+/// amp·cab" (e.g. "46c", "140" (PC, as the pedal shows it), "141",
+/// "dg solo", "clean", "bank 14", "twin"), whatever id style the list
+/// shows (the Naming global). An empty query matches everything.
+pub(crate) fn preset_matches(preset_num: i32, meta: &PresetMeta, tone: &str, query: &str) -> bool {
     let bank = bank_number(preset_num);
     let hay = format!(
-        "{} {:03} {preset_num:03} bank {bank:02} {bank} slot {} {} {}",
+        "{} {:03} {preset_num:03} bank {bank:02} {bank} slot {} {} {} {tone}",
         preset_id(preset_num),
         preset_num - 1,
         slot_letter(preset_num),
@@ -104,13 +108,34 @@ impl PresetNames {
             .unwrap_or_default()
     }
 
-    pub(crate) fn row(preset_num: i32, meta: &PresetMeta) -> PresetRow {
+    pub(crate) fn row(preset_num: i32, meta: &PresetMeta, tone: &str) -> PresetRow {
         PresetRow {
             preset: preset_num,
             id: preset_id(preset_num).into(),
             name: meta.name.clone().into(),
             character: meta.character.clone().into(),
             kind: character_kind(&meta.character),
+            tone: tone.into(),
+        }
+    }
+
+    pub(crate) fn tone(&self, preset_num: i32) -> String {
+        let tones = self.tones.lock().unwrap_or_else(|e| e.into_inner());
+        usize::try_from(preset_num - 1).ok().and_then(|i| tones.get(i)).cloned().unwrap_or_default()
+    }
+
+    /// Stores every preset's "amp · cab" line and updates the shown rows
+    /// whose line changed, in place (the list keeps its scroll position).
+    pub(crate) fn set_tones(&self, ui: &AppWindow, lines: Vec<String>, search: Vec<String>) {
+        *self.tones.lock().unwrap_or_else(|e| e.into_inner()) = lines;
+        *self.tone_search.lock().unwrap_or_else(|e| e.into_inner()) = search;
+        let model = ui.get_preset_names();
+        for row in 0..model.row_count() {
+            let Some(data) = model.row_data(row) else { continue };
+            let tone = self.tone(data.preset);
+            if data.tone.as_str() != tone {
+                model.set_row_data(row, PresetRow { tone: tone.into(), ..data });
+            }
         }
     }
 
@@ -127,11 +152,15 @@ impl PresetNames {
     pub(crate) fn list_model(&self) -> ModelRc<PresetRow> {
         let query = self.query.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let names = self.lock();
+        let tones = self.tones.lock().unwrap_or_else(|e| e.into_inner());
+        let search = self.tone_search.lock().unwrap_or_else(|e| e.into_inner());
         let empty = PresetMeta::default();
         let rows: Vec<PresetRow> = (MIN_PRESET..=MAX_PRESET)
             .filter_map(|p| {
                 let meta = names.get((p - 1) as usize).unwrap_or(&empty);
-                preset_matches(p, meta, &query).then(|| Self::row(p, meta))
+                let tone = tones.get((p - 1) as usize).map_or("", String::as_str);
+                let extra = search.get((p - 1) as usize).map_or("", String::as_str);
+                preset_matches(p, meta, &format!("{tone} {extra}"), &query).then(|| Self::row(p, meta, tone))
             })
             .collect();
         ModelRc::new(VecModel::from(rows))
@@ -156,7 +185,7 @@ impl PresetNames {
         let model = ui.get_preset_names();
         let preset = i as i32 + 1;
         if let Some(row) = model.iter().position(|r| r.preset == preset) {
-            model.set_row_data(row, Self::row(preset, &meta));
+            model.set_row_data(row, Self::row(preset, &meta, &self.tone(preset)));
         }
         true
     }
@@ -176,7 +205,7 @@ impl PresetNames {
         let model = ui.get_preset_names();
         let preset = i as i32 + 1;
         if let Some(row) = model.iter().position(|r| r.preset == preset) {
-            model.set_row_data(row, Self::row(preset, &meta));
+            model.set_row_data(row, Self::row(preset, &meta, &self.tone(preset)));
         }
     }
 
@@ -191,13 +220,14 @@ pub(crate) fn amp_model_text(amp: &protocol::AmpModel) -> String {
     amp.based_on.clone().unwrap_or_else(|| amp.name.clone())
 }
 
-/// CAB tab header line: the tone model whose cab plays ("Polite Twin"),
-/// "IR: <name>", or a borrowed cab's "<model> · <based on>".
+/// CAB selector text for the cab slot: "Polite Twin" (the AMP model's own
+/// cab, "Model cab" while its name is unknown), "IR · <name>", or a borrowed cab's "<model> ·
+/// <based on>".
 pub(crate) fn cab_source_text(cab: &protocol::CabSource, amp: Option<&protocol::AmpModel>) -> String {
     use protocol::CabSource::*;
     match cab {
-        ModelCab => amp.map(|a| a.name.clone()).unwrap_or_default(),
-        Ir(name) => format!("IR: {name}"),
+        ModelCab => amp.map_or_else(|| "Model cab".into(), |a| a.name.clone()),
+        Ir(name) => format!("IR · {name}"),
         Borrowed { name, based_on: Some(b) } => format!("{name} · {b}"),
         Borrowed { name, based_on: None } => name.clone(),
     }
@@ -292,17 +322,20 @@ mod tests {
     fn search_matches_all_tokens_case_insensitively() {
         let meta = PresetMeta { name: "DG Comfortably solo LPR".into(), character: "DRIVE".into() };
         // Preset 141 = bank 46, slot C.
-        assert!(preset_matches(141, &meta, ""));
-        assert!(preset_matches(141, &meta, "46c"));
-        assert!(preset_matches(141, &meta, "141"));
-        assert!(preset_matches(7, &meta, "007"));
+        assert!(preset_matches(141, &meta, "", ""));
+        assert!(preset_matches(141, &meta, "", "46c"));
+        assert!(preset_matches(141, &meta, "", "141"));
+        assert!(preset_matches(7, &meta, "", "007"));
         // PC number as the pedal shows it in PC+Name mode (0-based).
-        assert!(preset_matches(84, &meta, "083"));
-        assert!(preset_matches(1, &meta, "000"));
-        assert!(preset_matches(141, &meta, "dg SOLO"));
-        assert!(preset_matches(141, &meta, "  drive  bank 46 "));
-        assert!(!preset_matches(141, &meta, "dg clean"));
-        assert!(!preset_matches(141, &meta, "45c"));
+        assert!(preset_matches(84, &meta, "", "083"));
+        assert!(preset_matches(1, &meta, "", "000"));
+        assert!(preset_matches(141, &meta, "", "dg SOLO"));
+        assert!(preset_matches(141, &meta, "", "  drive  bank 46 "));
+        assert!(!preset_matches(141, &meta, "", "dg clean"));
+        assert!(!preset_matches(141, &meta, "", "45c"));
+        // The "amp · cab" line is searchable too.
+        assert!(preset_matches(141, &meta, "Fender Twin Reverb · Polite Twin", "twin dg"));
+        assert!(!preset_matches(141, &meta, "", "twin"));
     }
 
     #[test]
@@ -313,10 +346,10 @@ mod tests {
             "ProCo Rat"
         );
         assert_eq!(amp_model_text(&AmpModel { name: "Solo".into(), based_on: None }), "Solo");
-        assert_eq!(cab_source_text(&CabSource::ModelCab, None), "");
+        assert_eq!(cab_source_text(&CabSource::ModelCab, None), "Model cab");
         let twin = protocol::AmpModel { name: "Polite Twin".into(), based_on: Some("Fender Twin Reverb".into()) };
         assert_eq!(cab_source_text(&CabSource::ModelCab, Some(&twin)), "Polite Twin");
-        assert_eq!(cab_source_text(&CabSource::Ir("B.Alnico 2".into()), None), "IR: B.Alnico 2");
+        assert_eq!(cab_source_text(&CabSource::Ir("B.Alnico 2".into()), None), "IR · B.Alnico 2");
         assert_eq!(
             cab_source_text(&CabSource::Borrowed { name: "51st Hi".into(), based_on: Some("Peavey 5150".into()) }, None),
             "51st Hi · Peavey 5150"

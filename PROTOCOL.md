@@ -259,15 +259,25 @@ The slot's `/2` int is the **kind of content**, with the same meaning in either 
 | 1, 4 | Tone model (1 seen for a stomp capture, 4 for amp captures; the exact difference is unknown; 2 is treated the same, unseen) | Name = name buffer 0 up to NUL (e.g. "Ratfish", "Polite Twin"); based on = data blob after 4 header bytes, ASCII up to NUL (e.g. "ProCo Rat", "Fender Twin Reverb") |
 | 3 | Custom IR (seen in the CAB slot only) | IR name = data blob from byte 0, ASCII up to NUL; name buffer empty |
 
-The app shows the AMP slot only when it holds a tone model, and the CAB slot as "Model cab" (empty), "IR: name" (3), or "Cab: name · based on" (a tone model's cab).
+The app shows the AMP slot only when it holds a tone model, and the CAB slot as the AMP model's name (empty: its own cab), "IR · name" (3), or "name · based on" (a tone model's cab).
+
+Contents `/2` (the int between the slots) is `1` while the CAB slot is in use (the official editor sets it when it puts a cab into the slot) and `0` when the AMP model plays its own cab (CAB slot kind 0). Which cab plays is decided by param 24 (§5): `0` the CAB slot / the model's own cab, `1` VIR (model = param 25), `2` off.
 
 Strings are printable ASCII terminated by NUL, with garbage after the NUL. The app parses the tree, picks the slots by path, and shows nothing for unknown types or anything that doesn't parse.
 
-Edit buffer (documented, unused by the app): `B9 04 00 00 00` addresses the live edit buffer in writes; `B9 04 10 00 00 01` reads it.
+Edit buffer: `B9 04 00 00 00` addresses the live edit buffer in writes (§4.3.3); `B9 04 10 00 00 01` reads it (§4.3.1).
 
-#### Library list `0x0208` (documented, unused)
+#### Library list `0x0208`
 
-Request `B9 03 00 82 06 00 80 10 03 | B9 02 81 08 02 10`; reply type `0x0208` containing `BA 81 2C 01` = an array of 300 × 16-byte ids. The amp and IR slot ids (slot `/0`) appear in it.
+Request `B9 03 00 82 06 00 80 10 03 | B9 02 81 08 02 10`; reply type `0x0208` containing `BA 81 2C 01` = an array of 300 × 16-byte ids: the pedal's **internal library** of tone models and IRs (192 used on the test pedal; unused entries are all `00`, the app also skips all-`FF`). The AMP and CAB slot ids (slot `/0`) appear in it. Read at every connect (`parse_library_list`).
+
+#### Browse push `0x020B`
+
+```
+B9 03 81 0B 02 03 02 | B9 01 01
+```
+
+Pushed per step of the pedal's MODEL encoder, without any index. Afterwards the **live buffer** holds the newly selected item, loaded from the internal library (verified: "SOLDANO 100 14" / "Rasping Voice", which are in no preset). The app reads the live buffer 300 ms after the last push and shows the new names. A browse push right after the app's own live write is ignored (it may answer the write).
 
 ### 4.3.1 Preset write (rename) `0x0203`
 
@@ -321,6 +331,33 @@ idx 142:  B9 03 81 01 02 82 05 00 80 10 03 | B9 02 80 8E 00
 ```
 
 `<idx>` in the value encoding (§3); the size field is the body length (4, or 5 with `80 xx`). The pedal pushes a `0x0204` summary of the selected preset afterwards; the app ignores that push for 2 s after its own select (its load reads cover it) so it isn't taken as a footswitch change.
+
+### 4.3.3 Loading library items by id (live buffer)
+
+Verified on hardware: a live-buffer write (`0x0203` write, §4.3.1, with body head `B9 04 00 00 00` + the contents of a live-buffer read, as the official editor sends previews) whose AMP or CAB slot holds **only a library id** — id blob `/0` set, both name buffers zeroed, the data blob zeroed (length kept, `BC 81 C8 35` + 13768 × `00`), content kind set — makes the pedal **fill in the name and the full model data from its internal library**. Read back: name "Breaking Thunder", data "…Orange Thunderverb 200…" after sending only its id; the same for "Polite Twin". So slots are resolved by library id; the app never stores or sends model data.
+
+The app's loads (`Pedal::apply_slot`, `with_library_slot` / `model_cab_body`):
+
+| Choice | Live buffer write | Then |
+|---|---|---|
+| AMP model | AMP slot → id-only slot (kind from the catalog, else 4); nothing else changed | — |
+| Tone model cab / IR | CAB slot → id-only slot (kind 4 / 3), contents `/2` = 1 | param 24 = 0 |
+| Model cab | contents `/2` = 0, CAB slot kind = 0 | param 24 = 0 |
+| VIR, Off | (no live write) | param 24 = 1 (+ 25 = model) / 2 |
+
+Slot items after `/3` (`/4` …) are kept from the slot being replaced. After the write the app polls the live buffer (every 120 ms, up to 1.5 s) until the slot holds the id with data no longer zero, and checks that the active preset didn't change; then it shows the names and the pedal's dirty flag (EDITED). Saving works as before (§4.3.1, live buffer → stored preset).
+
+#### Catalog scan
+
+To name every library item without storing model data, the app probes the ids the 0x0208 list has and its catalog doesn't (`src/protocol/catalog.rs`):
+
+1. Save what the scan touches (CAB slot, contents `/2`, param 24) from a live read; set param 24 = 2 (cab off) so the probes are not heard.
+2. Per id: write the live buffer with the CAB slot = that id (kind 4), contents `/2` = 1; poll the live buffer until the slot is filled; take name / based-on / kind. An IR comes back with an empty name buffer and its name at the data's start (the app classifies it as kind 3 whatever kind the pedal reports; the reported kind is logged under `TX_DEBUG_SERIAL=1`, together with the fill time per item).
+3. At the end, or before serving any other request, or after on-pedal browsing: read the live buffer again and put back the saved CAB slot, `/2` and param 24 in one live write (everything else stays as the pedal has it now), then param 24 again by `0x0207`. Pedal-side parameter changes during the scan are patched into the probes. If the active preset changed (footswitch), nothing is restored. Cancelling (status bar ×) or closing the app restores too; after a disconnect the probe stays in the live buffer until the next preset change.
+
+Open: whether the restore clears the pedal's dirty flag.
+
+Names also come for free from every full dump and live read. A background pass reads all 150 full dumps once per session (user requests first) for the preset list's "amp · cab" lines; it runs before the catalog scan, which then only probes the ids still unnamed.
 
 ### 4.4 Parameter change `0x0207`
 
@@ -620,7 +657,7 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 |---|---|
 | Preset rename | **Supported**: full dump → patch the name buffer → write (`0x0203`, §4.3.1), verified on hardware. |
 | Preset save (parameters) | **Supported** (§4.3.1): the pedal's live edit buffer written back as the stored preset. |
-| Preset upload / `.tonex` captures | Not implemented; no upload path is known. |
+| Preset upload / `.tonex` captures | Not implemented; no upload path is known. Items already in the pedal's library can be loaded into the AMP/CAB slots by id (§4.3.3). |
 | "Sections" in `0x0207` | Hypothesis: `<section> 00 <idx>` addresses float arrays in document order (Builty's old preset-tempo write `01 00 01`; `02` = 109-array confirmed; `03` = front-panel VOLUME confirmed). `03` is not preset data, so it does not map onto the summary's arrays. |
 | Name-group float | `B9 02 [BC 21 …] BA 01 88 <f32>` after the name (from vit3k's capture): meaning unknown; it is **not** the VOLUME knob. |
 | Full dump `full = 01` | Reply type `0x0203` (§4.3); the app reads the header, body start and name buffer only. The model blob (~30 KB) is not decoded; offsets inside it vary between presets. |

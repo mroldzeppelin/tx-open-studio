@@ -14,14 +14,16 @@ import { ReverbTab } from "tabs/reverb.slint";
 import { Stage } from "stage.slint";
 import { TitleRow } from "title-row.slint";
 import { StatusBar } from "status-bar.slint";
+import { MenuTop, MenuMid, MenuLeaf } from "components/cascade-menu.slint";
 
 // Re-exported for Rust (PresetRow, Format, ...).
 export { Theme, PresetRow, Format, CharacterColors } from "theme.slint";
+export { MenuTop, MenuMid, MenuLeaf } from "components/cascade-menu.slint";
 export component AppWindow inherits Window {
     title: "TX Open Studio";
     icon: @image-url("../assets/icon.png");
     preferred-width: 560px;
-    preferred-height: 610px;
+    preferred-height: 634px;
     min-width: 540px;
     background: Theme.page;
 
@@ -86,7 +88,6 @@ export component AppWindow inherits Window {
     out property <bool> knob-active: amp-tab.knob-active;
 
     callback preset-changed(int);
-    callback reconnect();
     // User turned an amp knob. id: 0 gain, 1 volume, 2 presence, 3 depth,
     // 4 bass, 5 mid, 6 treble (matches knob_from_id in src/amp.rs).
     callback amp-param-changed(int, float);
@@ -230,6 +231,18 @@ export component AppWindow inherits Window {
     // ("" until read); cab-slot-type: 0 model cab, 3 IR, 4 borrowed cab,
     // -1 unknown.
     in property <string> amp-model-text;
+    // Model/cab pickers fed from the catalog (src/tone_select.rs).
+    in property <[string]> amp-model-options;
+    in property <[MenuTop]> amp-model-menu;
+    in-out property <int> amp-model-index: -1;
+    callback amp-model-picked(int);
+    in property <[MenuTop]> cab-menu;
+    callback cab-menu-picked(int);
+    in property <bool> slot-busy: false;
+    in property <string> library-text;
+    in property <bool> library-scanning: false;
+    callback library-rescan();
+    callback library-cancel();
     in property <string> cab-source-text;
     in property <int> cab-slot-type: -1;
     callback save-preset();
@@ -247,9 +260,13 @@ export component AppWindow inherits Window {
 
     init => {
         WindowMetrics.height = self.height;
+        WindowMetrics.width = self.width;
     }
     changed height => {
         WindowMetrics.height = self.height;
+    }
+    changed width => {
+        WindowMetrics.width = self.width;
     }
 
     // Previous/next preset with wrap-around (1 <-> 150).
@@ -410,8 +427,8 @@ export component AppWindow inherits Window {
             // bindings stay alive; the tray's size never depends on the page.
             tray := Rectangle {
                 vertical-stretch: 1;
-                min-height: 320px;
-                preferred-height: 320px;
+                min-height: 344px;
+                preferred-height: 344px;
                 background: Theme.surface;
                 border-width: 1px;
                 border-color: Theme.edge;
@@ -528,7 +545,11 @@ export component AppWindow inherits Window {
                     height: parent.height - 2 * tray.pad;
                     visible: root.tab == 4;
                     slot: tray.slot;
-                    amp-model-text: root.amp-model-text;
+                    amp-model-options: root.amp-model-options;
+                    amp-model-menu: root.amp-model-menu;
+                    amp-model-index <=> root.amp-model-index;
+                    amp-model-picked(a0) => { root.amp-model-picked(a0); }
+                    slot-busy: root.slot-busy;
                     eq-post-known: root.eq-post-known;
                     eq-post <=> root.eq-post;
                     fx-changed(a0, a1) => { root.fx-changed(a0, a1); }
@@ -573,6 +594,9 @@ export component AppWindow inherits Window {
                     cab-on <=> root.cab-on;
                     cab-last-on <=> root.cab-last-on;
                     cab-model-names: root.cab-model-names;
+                    cab-menu: root.cab-menu;
+                    cab-menu-picked(a0) => { root.cab-menu-picked(a0); }
+                    slot-busy: root.slot-busy;
                     cab-model <=> root.cab-model;
                     cab-mic1 <=> root.cab-mic1;
                     cab-mic2 <=> root.cab-mic2;
@@ -650,7 +674,7 @@ export component AppWindow inherits Window {
             }
         }
 
-        // Status bar: LED + status on the left, port name + reconnect right.
+        // Status bar: LED + status on the left, library + update chip right.
         StatusBar {
             connected: root.connected;
             reconnecting: root.reconnecting;
@@ -659,8 +683,11 @@ export component AppWindow inherits Window {
             status-note <=> root.status-note;
             status-text: root.status-text;
             update-version: root.update-version;
+            library-text: root.library-text;
+            library-scanning: root.library-scanning;
+            library-rescan => { root.library-rescan(); }
+            library-cancel => { root.library-cancel(); }
             open-releases => { root.open-releases(); }
-            reconnect => { root.reconnect(); }
         }
     }
 }

@@ -1,7 +1,6 @@
-import { StyledButton } from "components/buttons.slint";
 import { Theme } from "theme.slint";
 
-// Status bar: LED + status on the left, update chip + reconnect right.
+// Status bar: LED + status on the left, library + update chip right.
 export component StatusBar inherits Rectangle {
     in property <bool> connected;
     in property <bool> reconnecting;
@@ -10,8 +9,12 @@ export component StatusBar inherits Rectangle {
     in-out property <string> status-note;
     in property <string> status-text;
     in property <string> update-version;
+    // "LIBRARY 57/192" ("" = hidden); a scan can be cancelled, else rerun.
+    in property <string> library-text;
+    in property <bool> library-scanning;
+    callback library-rescan;
+    callback library-cancel;
     callback open-releases;
-    callback reconnect;
 
         background: Theme.status-bg;
         // Follows the chassis' rounded bottom corners.
@@ -66,6 +69,37 @@ export component StatusBar inherits Rectangle {
                     overflow: elide;
                 }
 
+                if root.library-text != "": HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: root.library-text;
+                        color: root.library-scanning ? Theme.accent : Theme.status-ink;
+                        font-size: 9px;
+                        font-weight: 500;
+                        font-family: Theme.mono-font;
+                        letter-spacing: 0.8px;
+                        vertical-alignment: center;
+                        wrap: no-wrap;
+                    }
+                    // Unobtrusive: × stops a scan, ↻ learns all names again.
+                    Text {
+                        text: root.library-scanning ? "×" : "↻";
+                        color: lib-ta.has-hover ? Theme.accent : Theme.muted;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        lib-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if (root.library-scanning) {
+                                    root.library-cancel();
+                                } else {
+                                    root.library-rescan();
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if root.update-version != "": VerticalLayout {
                     alignment: center;
                     Rectangle {
@@ -93,21 +127,6 @@ export component StatusBar inherits Rectangle {
                             clicked => {
                                 root.open-releases();
                             }
-                        }
-                    }
-                }
-
-                VerticalLayout {
-                    alignment: center;
-                    StyledButton {
-                        width: 22px;
-                        height: 22px;
-                        radius: 5px;
-                        text: "⟳";
-                        font-size: 13px;
-                        font-weight: 500;
-                        clicked => {
-                            root.reconnect();
                         }
                     }
                 }

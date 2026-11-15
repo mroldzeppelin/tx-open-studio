@@ -1,7 +1,8 @@
-import { ModuleTitle, OnOffChip, StateButton } from "../components/buttons.slint";
+import { ModuleTitle, OnOffChip } from "../components/buttons.slint";
 import { EqPair } from "../components/eq-pair.slint";
 import { GlobalGroup } from "../components/global-group.slint";
 import { Knob } from "../components/knob.slint";
+import { MenuStepper, MenuTop } from "../components/cascade-menu.slint";
 import { Theme } from "../theme.slint";
 
 // AMP: gain/volume/presence/depth and the EQ band gains are
@@ -10,7 +11,15 @@ import { Theme } from "../theme.slint";
 // current preset over USB serial. Groups: GAIN | MODEL, EQ.
 export component AmpTab inherits Rectangle {
     in property <length> slot;
-    in property <string> amp-model-text;
+    // Tone models of the pedal's library (catalog, src/tone_select.rs):
+    // names for the value, "brand · name" rows; -1 = current unknown.
+    in property <[string]> amp-model-options;
+    // The same choices grouped by brand (ids = option indices).
+    in property <[MenuTop]> amp-model-menu;
+    in-out property <int> amp-model-index;
+    callback amp-model-picked(int);
+    // A model/cab load is in progress.
+    in property <bool> slot-busy;
     in property <bool> eq-post-known;
     in-out property <bool> eq-post;
     callback fx-changed(int, float);
@@ -50,28 +59,20 @@ export component AmpTab inherits Rectangle {
                     horizontal-stretch: 0;
                     text: "AMPLIFIER";
                 }
-                // Tone model name · what it's based on.
-                Text {
+                Rectangle {
                     horizontal-stretch: 1;
-                    min-width: 0px;
-                    text: root.amp-model-text;
-                    color: Theme.muted;
-                    font-size: 10px;
-                    font-family: Theme.mono-font;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    wrap: no-wrap;
                 }
-                // EQ before or after the amp model (param 10).
-                StateButton {
-                    horizontal-stretch: 0;
-                    width: 76px;
+                // Tone model: arrows step through the sorted list, the
+                // value opens it by brand; loads the item by id.
+                MenuStepper {
+                    enabled: !root.slot-busy && root.amp-model-options.length > 0;
+                    value-width: 140px;
                     height: 24px;
-                    enabled: root.eq-post-known;
-                    on <=> root.eq-post;
-                    on-text: "Post amp";
-                    off-text: "Pre amp";
-                    toggled(on) => { root.fx-changed(65, on ? 1 : 0); }
+                    options: root.amp-model-options;
+                    menu: root.amp-model-menu;
+                    levels: 2; // brand ▸ model
+                    index <=> root.amp-model-index;
+                    picked(i) => { root.amp-model-picked(i); }
                 }
                 // Amp enable/bypass toggle (written over USB serial).
                 OnOffChip {
@@ -80,7 +81,7 @@ export component AmpTab inherits Rectangle {
                 }
             }
             // Group borders cost height: trimmed paddings keep
-            // the knob sizes within the 320 px tray.
+            // the knob sizes within the 344 px tray.
             HorizontalLayout {
                 spacing: 8px;
                 GlobalGroup {
@@ -143,14 +144,26 @@ export component AmpTab inherits Rectangle {
                     }
                 }
             }
+            // Extra room: the EQ group's Pre/Post switch rises 8 px above
+            // its border and must clear the MODEL group's bottom border.
+            Rectangle {
+                height: 6px;
+            }
             // EQ bands: gain knob (MIDI CC) with its frequency
             // knob (serial, fx ids 60..62) up-right; the mid band
             // also has Q (fx id 64) up-left (EqPair).
             GlobalGroup {
                 title: "EQ";
+                // EQ before or after the amp model (param 10).
+                has-switch: true;
+                switch-enabled: root.eq-post-known;
+                switch-on <=> root.eq-post;
+                switch-on-text: "Post amp";
+                switch-off-text: "Pre amp";
+                switch-toggled(on) => { root.fx-changed(65, on ? 1 : 0); }
                 // Extra top padding keeps the small knobs' labels
                 // clear of the group's border line.
-                pad-top: 18px;
+                pad-top: 34px;
                 pad-bottom: 4px;
                 content-alignment: LayoutAlignment.space-between;
                     k-bass := EqPair {

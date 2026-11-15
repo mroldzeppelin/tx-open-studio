@@ -258,13 +258,27 @@ export component PresetsTab inherits Rectangle {
                                     wrap: no-wrap;
                                 }
                                 // Muted placeholder until names load.
+                                // The name keeps its width (at least
+                                // 110 px); the "amp · cab" line gets the
+                                // rest and elides first.
                                 Text {
-                                    horizontal-stretch: 1;
-                                    min-width: 0px;
+                                    horizontal-stretch: 0;
+                                    min-width: min(self.preferred-width, 110px);
                                     text: row.name == "" ? "Preset \{row.preset}" : row.name;
                                     color: row.name == "" ? Theme.muted : Theme.secondary-ink;
                                     font-size: 12px;
                                     font-weight: row.name == "" ? 400 : 500;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    wrap: no-wrap;
+                                }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    min-width: 0px;
+                                    preferred-width: 0px;
+                                    text: row.tone;
+                                    color: Theme.muted;
+                                    font-size: 10px;
                                     vertical-alignment: center;
                                     overflow: elide;
                                     wrap: no-wrap;

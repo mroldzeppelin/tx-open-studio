@@ -1,0 +1,393 @@
+import { ListView } from "std-widgets.slint";
+import { Theme, WindowMetrics } from "../theme.slint";
+
+// Three-level menu data (built in Rust, src/catalog/menu.rs): an entry
+// with `id` >= 0 is picked by its id; one with children opens the next
+// column on hover (or click).
+export struct MenuLeaf {
+    label: string,
+    id: int,
+}
+
+export struct MenuMid {
+    label: string,
+    id: int,
+    children: [MenuLeaf],
+}
+
+export struct MenuTop {
+    label: string,
+    id: int,
+    children: [MenuMid],
+}
+
+component MenuRow inherits Rectangle {
+    in property <string> label;
+    in property <bool> has-children;
+    // On the open path (its column to the right is shown).
+    in property <bool> open;
+    callback hovered();
+    callback clicked();
+
+    height: 24px;
+
+    Rectangle {
+        y: 1px;
+        height: parent.height - 2px;
+        border-radius: 5px;
+        border-width: 1px;
+        border-color: root.open ? Theme.bevel : transparent;
+        background: root.open ? Theme.selected : (ta.has-hover ? Theme.soft : transparent);
+
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 6px;
+            Text {
+                horizontal-stretch: 1;
+                text: root.label;
+                color: root.open ? Theme.accent : Theme.secondary-ink;
+                font-size: 10px;
+                font-family: Theme.mono-font;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+            if root.has-children: Text {
+                text: "›";
+                color: Theme.muted;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        changed has-hover => {
+            if (self.has-hover) {
+                root.hovered();
+            }
+        }
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component MenuColumn inherits Rectangle {
+    in property <length> list-h;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.edge;
+    border-radius: 8px;
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: #000000aa;
+    height: self.list-h;
+}
+
+// The cascading menu popup, opened by `open()` from the control it is
+// placed in (at its top-left, zero size). The first column drops down
+// under the control, exactly as wide as it and left-aligned (above it when
+// there's no room below). Submenus cascade to the right; to the left when
+// the right lacks room; when neither side has room for both, they line up
+// against the window's right edge (over the first column).
+component CascadePopup {
+    in property <[MenuTop]> menu;
+    // Size of the control it opens from.
+    in property <length> anchor-h;
+    in property <length> anchor-w;
+    // Menu depth (2: top ▸ items, 3: top ▸ group ▸ items): how many
+    // submenu columns need room beside the control.
+    in property <int> levels: 3;
+    callback picked(int);
+
+    property <int> top-open: -1;
+    property <int> mid-open: -1;
+    property <length> row-h: 24px;
+    property <length> col-w: 132px;
+    property <length> gap: 4px;
+    property <int> max-rows: 12;
+    property <[MenuMid]> mids: root.top-open >= 0 && root.top-open < root.menu.length ? root.menu[root.top-open].children : [];
+    property <[MenuLeaf]> leaves: root.mid-open >= 0 && root.mid-open < root.mids.length ? root.mids[root.mid-open].children : [];
+    property <length> popup-h: root.max-rows * root.row-h + 8px;
+    property <bool> open-up: root.absolute-position.y + root.anchor-h + 2px + root.popup-h > WindowMetrics.height - 6px;
+    // Room beside the control (window-relative, 6 px margin).
+    property <length> subs-w: (root.levels - 1) * (root.col-w + root.gap);
+    property <length> room-right: WindowMetrics.width - 6px - root.absolute-position.x - root.anchor-w;
+    property <length> room-left: root.absolute-position.x - 6px;
+    // Submenu placement: 0 right, 1 left, 2 against the window's right edge.
+    property <int> side: root.room-right >= root.subs-w ? 0 : root.room-left >= root.subs-w ? 1 : 2;
+    // Left edge of the window's usable area, relative to the control.
+    property <length> right-edge: WindowMetrics.width - 6px - root.absolute-position.x;
+
+    // x of submenu column k (1, 2), relative to the control.
+    pure function sub-x(k: int) -> length {
+        return root.side == 0 ? root.anchor-w + root.gap + (k - 1) * (root.col-w + root.gap)
+            : root.side == 1 ? -k * (root.col-w + root.gap)
+            : root.right-edge - (3 - k) * root.col-w - (2 - k) * root.gap;
+    }
+
+    // The popup spans the first column and the submenu columns in use.
+    property <length> last-x: root.levels >= 3 ? root.sub-x(2) : root.sub-x(1);
+    property <length> popup-x: min(0px, root.sub-x(1), root.last-x);
+    property <length> popup-w: max(root.anchor-w, root.sub-x(1) + root.col-w, root.last-x + root.col-w) - root.popup-x;
+
+    pure function list-h(n: int) -> length {
+        return min(n, root.max-rows) * root.row-h + 8px;
+    }
+
+    function pick(id: int) {
+        if (id >= 0) {
+            root.picked(id);
+            popup.close();
+        }
+    }
+
+    public function open() {
+        root.top-open = -1;
+        root.mid-open = -1;
+        popup.show();
+    }
+
+    popup := PopupWindow {
+        x: root.popup-x;
+        y: root.open-up ? -root.popup-h - 2px : root.anchor-h + 2px;
+        width: root.popup-w;
+        height: root.popup-h;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            MenuColumn {
+                x: -root.popup-x;
+                y: root.open-up ? root.popup-h - self.list-h : 0px;
+                width: root.anchor-w;
+                list-h: root.list-h(root.menu.length);
+                ListView {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+                    for item[i] in root.menu: MenuRow {
+                        label: item.label;
+                        has-children: item.children.length > 0;
+                        open: i == root.top-open && item.children.length > 0;
+                        hovered => {
+                            root.top-open = i;
+                            root.mid-open = -1;
+                        }
+                        clicked => {
+                            root.top-open = i;
+                            root.mid-open = -1;
+                            root.pick(item.id);
+                        }
+                    }
+                }
+            }
+
+            if root.mids.length > 0: MenuColumn {
+                x: root.sub-x(1) - root.popup-x;
+                y: root.open-up ? root.popup-h - self.list-h : 0px;
+                width: root.col-w;
+                list-h: root.list-h(root.mids.length);
+                ListView {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+                    for item[i] in root.mids: MenuRow {
+                        label: item.label;
+                        has-children: item.children.length > 0;
+                        open: i == root.mid-open && item.children.length > 0;
+                        hovered => {
+                            root.mid-open = i;
+                        }
+                        clicked => {
+                            root.mid-open = i;
+                            root.pick(item.id);
+                        }
+                    }
+                }
+            }
+
+            if root.leaves.length > 0: MenuColumn {
+                x: root.sub-x(2) - root.popup-x;
+                y: root.open-up ? root.popup-h - self.list-h : 0px;
+                width: root.col-w;
+                list-h: root.list-h(root.leaves.length);
+                ListView {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+                    for item in root.leaves: MenuRow {
+                        label: item.label;
+                        clicked => {
+                            root.pick(item.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Selector showing `text`; a click opens the cascading menu.
+export component CascadeSelector inherits Rectangle {
+    in property <string> text;
+    in property <[MenuTop]> menu;
+    in property <int> levels: 3;
+    in property <bool> enabled: true;
+    callback picked(int);
+
+    opacity: root.enabled ? 1 : 0.45;
+    height: 24px;
+    min-width: 120px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: value-ta.has-hover && root.enabled ? Theme.bevel : Theme.border;
+    background: Theme.field;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 4px;
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: Theme.ink;
+            font-size: 10px;
+            font-family: Theme.mono-font;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+        Text {
+            text: "▾";
+            color: Theme.muted;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+
+    value-ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: self.enabled ? pointer : default;
+        clicked => {
+            menu-popup.open();
+        }
+    }
+
+    menu-popup := CascadePopup {
+        x: 0px;
+        y: 0px;
+        width: 0px;
+        height: 0px;
+        menu: root.menu;
+        anchor-h: root.height;
+        anchor-w: root.width;
+        levels: root.levels;
+        picked(id) => { root.picked(id); }
+    }
+}
+
+// ‹ value › stepper (like Stepper) whose value click opens a cascading
+// menu instead of a flat list. The arrows step through `options`; menu
+// entries' ids are option indices.
+export component MenuStepper inherits Rectangle {
+    in property <[string]> options;
+    in-out property <int> index;
+    in property <[MenuTop]> menu;
+    in property <int> levels: 3;
+    in property <bool> enabled: true;
+    in property <length> value-width: 56px;
+    callback picked(int);
+
+    function go(i: int) {
+        if (i >= 0 && i < root.options.length && i != root.index) {
+            root.index = i;
+            root.picked(i);
+        }
+    }
+
+    opacity: root.enabled ? 1 : 0.45;
+    height: 26px;
+    min-width: 44px + root.value-width;
+    max-width: 44px + root.value-width;
+    horizontal-stretch: 0;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.field;
+
+    HorizontalLayout {
+        Rectangle {
+            width: 22px;
+            border-radius: 7px;
+            background: prev-ta.has-hover && root.index > 0 ? Theme.hover : transparent;
+            Text {
+                text: "‹";
+                color: root.index > 0 ? Theme.ink : Theme.muted.with-alpha(0.4);
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            prev-ta := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: root.index > 0 ? pointer : default;
+                clicked => { root.go(root.index - 1); }
+            }
+        }
+        Rectangle {
+            width: root.value-width;
+            border-radius: 4px;
+            background: value-ta.has-hover && value-ta.enabled ? Theme.hover.with-alpha(0.6) : transparent;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: root.index >= 0 && root.index < root.options.length ? root.options[root.index] : "?";
+                color: Theme.ink;
+                font-size: 10px;
+                font-family: Theme.mono-font;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            value-ta := TouchArea {
+                enabled: root.enabled && root.menu.length > 0;
+                mouse-cursor: self.enabled ? pointer : default;
+                clicked => { menu-popup.open(); }
+            }
+        }
+        Rectangle {
+            width: 22px;
+            border-radius: 7px;
+            background: next-ta.has-hover && root.index < root.options.length - 1 ? Theme.hover : transparent;
+            Text {
+                text: "›";
+                color: root.index < root.options.length - 1 ? Theme.ink : Theme.muted.with-alpha(0.4);
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            next-ta := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: root.index < root.options.length - 1 ? pointer : default;
+                clicked => { root.go(root.index + 1); }
+            }
+        }
+    }
+
+    menu-popup := CascadePopup {
+        x: 0px;
+        y: 0px;
+        width: 0px;
+        height: 0px;
+        menu: root.menu;
+        anchor-h: root.height;
+        anchor-w: root.width;
+        levels: root.levels;
+        picked(id) => { root.go(id); }
+    }
+}

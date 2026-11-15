@@ -100,20 +100,31 @@ pub(crate) enum SlotContent {
 pub struct ToneInfo {
     pub amp: Option<AmpModel>,
     pub cab: Option<CabSource>,
+    /// Library ids of the AMP model and of the CAB slot's content (None
+    /// for an empty slot).
+    pub amp_id: Option<LibraryId>,
+    pub cab_id: Option<LibraryId>,
 }
 
-/// Longest slot string read (names are short; garbage follows the NUL).
+/// Longest slot string read, in characters (names are short; garbage
+/// follows the NUL).
 pub(crate) const SLOT_TEXT_MAX: usize = 64;
 
-/// ASCII text up to the first NUL (at most `SLOT_TEXT_MAX` bytes), trimmed;
-/// None if empty or not printable ASCII.
+/// Bytes searched for the NUL (UTF-8: up to 4 bytes per character).
+const SLOT_TEXT_SCAN: usize = 4 * SLOT_TEXT_MAX;
+
+/// UTF-8 text up to the first NUL (lossy on invalid sequences, at most
+/// `SLOT_TEXT_MAX` characters), trimmed; None if empty or containing a
+/// control character. Library names use UTF-8 ("Plæxi Driver").
 pub(crate) fn slot_text(bytes: &[u8]) -> Option<String> {
-    let head = &bytes[..bytes.len().min(SLOT_TEXT_MAX)];
-    let text = &head[..head.iter().position(|&b| b == 0).unwrap_or(head.len())];
-    if !text.iter().all(|b| (0x20..=0x7E).contains(b)) {
+    let head = &bytes[..bytes.len().min(SLOT_TEXT_SCAN)];
+    let raw = &head[..head.iter().position(|&b| b == 0).unwrap_or(head.len())];
+    let decoded = String::from_utf8_lossy(raw);
+    let text: String = decoded.chars().take(SLOT_TEXT_MAX).collect();
+    if text.chars().any(char::is_control) {
         return None;
     }
-    let text = String::from_utf8_lossy(text).trim().to_string();
+    let text = text.trim().to_string();
     (!text.is_empty()).then_some(text)
 }
 
@@ -154,7 +165,12 @@ pub fn tone_info(body: &[u8]) -> Option<ToneInfo> {
         SlotContent::Ir(name) => CabSource::Ir(name),
         SlotContent::Model { name, based_on } => CabSource::Borrowed { name, based_on },
     });
-    Some(ToneInfo { amp, cab })
+    let amp_id = amp.as_ref().and(contents.at(&[1])).and_then(slot_id);
+    let cab_id = match cab {
+        Some(CabSource::ModelCab) | None => None,
+        Some(_) => contents.at(&[3]).and_then(slot_id),
+    };
+    Some(ToneInfo { amp, cab, amp_id, cab_id })
 }
 
 /// Body of a type-0x0203 reply whose header size matches its length.
@@ -343,6 +359,7 @@ mod tests {
         let info = tone_info(&body).unwrap();
         assert_eq!(info.amp, Some(AmpModel { name: "Ratfish".into(), based_on: Some("ProCo Rat".into()) }));
         assert_eq!(info.cab, Some(CabSource::ModelCab));
+        assert_eq!((info.amp_id, info.cab_id), (Some([7; 16]), None), "no id for an empty cab slot");
         // Custom IR (type 3): name from the data blob, garbage after NUL.
         let ir = enc_slot("", 3, &slot_data(b"B.Alnico 2 Liveplayrock", 200));
         assert_eq!(tone_info(&enc_body(130, amp_slot(), ir)).unwrap().cab, Some(CabSource::Ir("B.Alnico 2 Liveplayrock".into())));
@@ -385,6 +402,19 @@ mod tests {
         assert_eq!(slot_text(b"\0Ratfish"), None, "empty before the NUL");
         assert_eq!(slot_text(b"Bad\x01name\0"), None, "non-printable");
         assert_eq!(slot_text(&[b'A'; 100]).map(|t| t.len()), Some(SLOT_TEXT_MAX), "capped");
+        // UTF-8 names (hardware: "Plæxi Driver"), capped in characters.
+        assert_eq!(slot_text(b"Pl\xc3\xa6xi Driver\0junk").as_deref(), Some("Plæxi Driver"));
+        assert_eq!(slot_text(&"æ".repeat(100).into_bytes()).map(|t| t.chars().count()), Some(SLOT_TEXT_MAX));
+        // Invalid sequences are replaced, not refused; DEL is a control.
+        assert_eq!(slot_text(b"Bad\xffname\0").as_deref(), Some("Bad\u{fffd}name"));
+        assert_eq!(slot_text(b"Bad\x7fname\0"), None);
+        // A UTF-8 name through tone info.
+        let plaexi = enc_slot("", 4, &slot_data(b"\0\0\0\0Marshall Super Lead MKII", 300));
+        let mut plaexi = plaexi;
+        let at = find(&plaexi, &[0xBC, 0x21]).unwrap() + 2;
+        plaexi[at..at + 14].copy_from_slice(b"Pl\xc3\xa6xi Driver\0");
+        let info = tone_info(&enc_body(3, plaexi, enc_slot("", 0, &[0; 8]))).unwrap();
+        assert_eq!(info.amp.unwrap().name, "Plæxi Driver");
         // A body that doesn't parse gives no names at all.
         let body = enc_body(1, amp_slot(), enc_slot("", 0, &[0; 8]));
         assert_eq!(tone_info(&body[..body.len() - 3]), None);

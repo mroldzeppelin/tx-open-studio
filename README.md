@@ -16,7 +16,8 @@ TX Open Studio is written in Rust with the [Slint](https://slint.dev) UI toolkit
 **Presets**
 
 - Lists all 150 presets with the names and "character" tags (CLEAN, DRIVE, STOMP - OVERDRIVE, ...) read from the pedal, labelled by bank and slot the way the pedal's display shows them (for example `46C`).
-- Search field: every word you type must match the preset id, bank, slot, name or character (`46c`, `bank 14`, `clean`, `dg solo`). Escape clears the search.
+- Each preset shows a muted **amp · cab** line after its name by model name, as the pickers show them (for example `Polite Twin` when the model plays its own cab, `Polite Twin · Breaking Thunder`, `… · IR Alnico 412`, `… · 412 GRN`, `… · no cab`), cached and refreshed in the background.
+- Search field: every word you type must match the preset id, bank, slot, name, character, amp · cab line or what the models are based on (`46c`, `bank 14`, `clean`, `dg solo`, `twin`, `fender`). Escape clears the search.
 - Keyboard navigation: Left/Right step through presets. In the search field, Down moves into the list. In the list, Up/Down move the highlight and Enter selects the preset.
 - Preset switching over USB serial (the same select message IK's editor uses).
 - When you change presets with the footswitches, the app follows.
@@ -27,28 +28,31 @@ TX Open Studio is written in Rust with the [Slint](https://slint.dev) UI toolkit
 
 Changes are sent to the pedal as you turn a knob in the app. Sync goes both ways: turn a knob on the pedal and the app updates. The tabs mirror the pedal's signal chain:
 
-- **Amp**: on/off, Gain, Volume, Mix (dry/wet of the model), Presence, Depth, EQ pre/post position — and a Two-Notes-style EQ: Bass, Mid and Treble gain knobs with small frequency knobs (75–600 Hz / 150 Hz–5 kHz / 1–4 kHz) plus Q on the mid band.
+- **Amp**: tone model choice from the pedal's own library (arrows or click for the list, sorted by brand: `Fender · Polite Twin`), on/off, Gain, Volume, Mix (dry/wet of the model), Presence, Depth, EQ pre/post position — and a Two-Notes-style EQ: Bass, Mid and Treble gain knobs with small frequency knobs (75–600 Hz / 150 Hz–5 kHz / 1–4 kHz) plus Q on the mid band.
 - **Noise gate**: on/off, pre/post amp, Threshold, Release, Depth.
 - **Compressor**: on/off, pre/post amp, Threshold, Gain, Attack.
-- **Cabinet**: Tone Model (the captured cab), VIR or Off; all 40 VIR cabs by their real names (412 GRN, 212 TWIN, …), resonance, two mics (Condenser 414 / Dynamic 57 / Ribbon 121) dragged on an interactive position pad fanning out of the speaker, and mic blend.
+- **Cabinet**: one menu for the cab — the model's own cab, VIR ▸ size ▸ cab (all 40 VIR cabs by their real names: 412 GRN, 212 TWIN, …), another tone model's cab from the pedal's Hardware Lib (by brand), an IR from the pedal's library, or Off; for VIR: resonance, two mics (Condenser 414 / Dynamic 57 / Ribbon 121) dragged on an interactive position pad fanning out of the speaker, and mic blend.
 
-![Cabinet tab](docs/screenshot-cab.png)
 - **Modulation**: on/off, pre/post, Chorus / Tremolo / Phaser / Flanger / Rotary with tempo sync and per-model controls.
 - **Delay**: on/off, pre/post, Digital / Tape, sync or time, feedback, normal/ping-pong, mix.
 - **Reverb**: on/off, pre/post, Spring 1-4 / Room / Plate, time, pre-delay, color, mix.
 - **Global**: the pedal's GLOBAL SETUP without the menu diving — levels: Volume (the front-panel master VOLUME knob, the same for every preset; per-preset level is the AMP tab's Volume), In Trim, Master (MAIN VOL) and Interface (USB, -40..+3 dB); tuner mode (Off / Through / Muted) and reference pitch; tap tempo (button or the T key) with the pedal's **actual BPM** read back, writable as a number, and the Global/Preset tempo mode; global cab-sim bypass; display Naming; MIDI channel, MIDI Thru and MIDI Clock mode.
 
+![Amp tab](docs/screenshot-amp.png)
+
+![Cabinet tab](docs/screenshot-cab.png)
+
 ![Global tab](docs/screenshot-global.png)
 
 Other details:
+
+- **Model and cab choice from your pedal's library**: the app loads library items by id — the pedal fills in the model data itself, so nothing is copied or stored but names. On first connect the app learns the names in the background (status bar `LIBRARY 57/192`; × stops, ↻ learns them again). While it does, the cab is switched off and restored afterwards; everything stays pickable meanwhile ("Amp 7" / "Cab 7" until named). Browsing models on the pedal's MODEL encoder updates the app's names live. Names and the per-preset lines are cached as JSON in `~/.local/share/tx-open-studio/`.
 
 - Knobs are dragged vertically. Double-click a knob to reset it to its default value.
 - An **EDITED** indicator shows when the live state differs from the preset as last loaded.
 - **Save edits** to the active preset: hold the floppy button (top right) for 1 s — an amber fill rises as a guard against misclicks. The app writes the preset and verifies it by reading it back.
 - Tuner on/off button (sent as MIDI CC 9 — the only MIDI message the app uses; without a MIDI port the button is disabled).
-- Auto-reconnect: unplug the pedal or power-cycle it and the app shows RECONNECTING, polls every 2 seconds, and resyncs everything (current preset, names, parameters, globals) when it comes back. The status bar also has a manual reconnect button.
-
-![Amp tab](docs/screenshot-amp.png)
+- Auto-reconnect: unplug the pedal or power-cycle it and the app shows RECONNECTING, polls every 2 seconds, and resyncs everything (current preset, names, parameters, globals) when it comes back.
 
 ## Supported hardware
 

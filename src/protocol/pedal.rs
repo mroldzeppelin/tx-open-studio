@@ -51,6 +51,25 @@ pub enum Event {
     /// The pedal switched preset by itself (footswitch); carries the new
     /// preset's amp params when they parsed, and its raw parameter array.
     PresetChanged { preset_idx: u8, params: Option<AmpParams>, raw: Vec<f32> },
+    /// The pedal's library list (`0x0208`): used items in list order.
+    LibraryList(Result<Vec<LibraryItem>, String>),
+    /// Library items seen filled in a slot (any dump or live read, a
+    /// catalog probe): names for the catalog.
+    Slots(Vec<SlotInfo>),
+    /// Slot summary of preset `preset_idx` (stored dump, or the live
+    /// buffer of the active preset).
+    PresetSlots { preset_idx: u8, slots: PresetSlots },
+    /// The live buffer after an apply or an on-pedal browse: the active
+    /// preset, the pedal's dirty flag and the slot names.
+    Live { preset_idx: u8, dirty: bool, info: Option<ToneInfo> },
+    /// Result of `Pedal::apply_slot`; always sent.
+    SlotApplied { target: SlotTarget, result: Result<(), String> },
+    /// A catalog scan started or ended (`running` false once finished or
+    /// cancelled; the live buffer is restored by then). `completed`: every
+    /// id was probed (not cancelled or stopped).
+    CatalogScan { running: bool, completed: bool },
+    /// The background preset pass started or ended.
+    PresetPass { running: bool },
 }
 
 pub(crate) enum Request {
@@ -68,8 +87,17 @@ pub(crate) enum Request {
     ToneInfo(u8),
     /// Make preset `idx` the active one.
     Select(u8),
-    /// Read the active preset's volume at load (its index, for matching).
+    /// Read the front-panel VOLUME.
     ReadVolume,
+    /// Read the library list (`0x0208`).
+    LibraryList,
+    /// Load a library item (or the model cab) into a slot of the live buffer.
+    ApplySlot(SlotTarget, SlotChoice),
+    /// Learn these library items' names by probing (background).
+    ScanCatalog(Vec<LibraryId>),
+    CancelScan,
+    /// Read every preset's full dump for its slot summary (background).
+    PresetPass,
 }
 
 /// Handle to the session thread that owns the serial port. Dropping it ends
@@ -106,6 +134,12 @@ impl Pedal {
                 debug: debug_enabled(),
                 globals: None,
                 globals_seen: 0,
+                browse_due: None,
+                scan: CatalogScan::default(),
+                pass: None,
+                quiet_until: None,
+                own_write: false,
+                scan_echo_until: None,
             };
             let reason = session.run();
             on_event(Event::Disconnected(reason));
@@ -181,6 +215,39 @@ impl Pedal {
     /// from its full dump; answered with `Event::ToneInfo`. Read-only.
     pub fn request_tone_info(&self, idx: u8) -> Result<(), String> {
         self.send(Request::ToneInfo(idx))
+    }
+
+    /// Reads the library list; answered with `Event::LibraryList`.
+    pub fn request_library_list(&self) -> Result<(), String> {
+        self.send(Request::LibraryList)
+    }
+
+    /// Loads a library item by id (the pedal fills in names and data) or,
+    /// for the CAB slot, the model's own cab into the live edit buffer of
+    /// the active preset; a CAB load also sets the cab type (param 24) to
+    /// 0. Verified by re-reading the live buffer; answered with
+    /// `Event::SlotApplied` (and `Event::Live` on success).
+    pub fn apply_slot(&self, target: SlotTarget, choice: SlotChoice) -> Result<(), String> {
+        self.send(Request::ApplySlot(target, choice))
+    }
+
+    /// Learns the names of `ids` in the background (one probe each, user
+    /// requests first); replaces a running scan. Reports
+    /// `Event::Slots` per item and `Event::CatalogScan` progress.
+    pub fn scan_catalog(&self, ids: Vec<LibraryId>) -> Result<(), String> {
+        self.send(Request::ScanCatalog(ids))
+    }
+
+    /// Stops a catalog scan (the live buffer is restored).
+    pub fn cancel_scan(&self) -> Result<(), String> {
+        self.send(Request::CancelScan)
+    }
+
+    /// Reads every preset's full dump in the background (user requests
+    /// first): `Event::PresetSlots` + `Event::Slots` per preset,
+    /// `Event::PresetPass` progress.
+    pub fn preset_pass(&self) -> Result<(), String> {
+        self.send(Request::PresetPass)
     }
 
     /// Reads the global config; answered with `Event::Globals`.

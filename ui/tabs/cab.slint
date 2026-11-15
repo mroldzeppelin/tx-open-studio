@@ -1,12 +1,14 @@
 import { ModuleTitle, OnOffChip } from "../components/buttons.slint";
+import { CascadeSelector, MenuTop } from "../components/cascade-menu.slint";
 import { Knob } from "../components/knob.slint";
 import { MicPad } from "../components/mic-pad.slint";
 import { Stepper } from "../components/stepper.slint";
 import { Theme } from "../theme.slint";
 
-// CAB. The chip switches the cab off (type 2) or back to the
-// last non-off type; VIR controls are active only in VIR mode
-// (dimmed otherwise, layout unchanged).
+// CAB. One selector for the cab (model cab, VIR, a tone model's cab, an
+// IR, off; menu built in Rust from the catalog). The chip switches the
+// cab off (type 2) or back to the last non-off type; VIR controls are
+// active only in VIR mode (dimmed otherwise, layout unchanged).
 export component CabTab inherits Rectangle {
     in-out property <int> cab-type;
     in property <string> cab-source-text;
@@ -15,6 +17,10 @@ export component CabTab inherits Rectangle {
     in-out property <bool> cab-on;
     in-out property <int> cab-last-on;
     in property <[string]> cab-model-names;
+    in property <[MenuTop]> cab-menu;
+    callback cab-menu-picked(int);
+    // A model/cab load is in progress.
+    in property <bool> slot-busy;
     in-out property <int> cab-model;
     in-out property <int> cab-mic1;
     in-out property <int> cab-mic2;
@@ -40,29 +46,22 @@ export component CabTab inherits Rectangle {
                     horizontal-stretch: 0;
                     text: "CABINET";
                 }
-                // What the preset's cab slot holds; dimmed while
-                // VIR or Off is selected (it plays when switched
-                // back to the slot option).
-                Text {
+                // The cab that plays: VIR model, Off, or what the
+                // preset's cab slot holds (cab type 0).
+                Rectangle {
                     horizontal-stretch: 1;
-                    min-width: 0px;
-                    text: root.cab-source-text;
-                    color: Theme.muted;
-                    opacity: root.cab-type == 0 ? 1 : 0.5;
-                    font-size: 10px;
-                    font-family: Theme.mono-font;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    wrap: no-wrap;
                 }
-                // Option 0 is the preset's cab slot, named after
-                // what it holds.
-                Stepper {
-                    value-width: 36px; // "Model"
-                    height: 24px;
-                    options: [root.cab-slot-type == 3 ? "IR" : root.cab-slot-type == 4 ? "Cab" : "Model", "VIR", "Off"];
-                    index <=> root.cab-type;
-                    picked(i) => { root.fx-changed(50, i); }
+                // Same width as the AMP tab's model stepper (44 + 140 px).
+                CascadeSelector {
+                    width: 184px;
+                    horizontal-stretch: 0;
+                    enabled: !root.slot-busy;
+                    text: root.cab-type == 1
+                        ? "VIR · " + (root.cab-model >= 0 && root.cab-model < root.cab-model-names.length ? root.cab-model-names[root.cab-model] : "?")
+                        : root.cab-type == 2 ? "Off"
+                        : root.cab-source-text != "" ? root.cab-source-text : "Model cab";
+                    menu: root.cab-menu;
+                    picked(id) => { root.cab-menu-picked(id); }
                 }
                 OnOffChip {
                     on <=> root.cab-on;
@@ -72,19 +71,11 @@ export component CabTab inherits Rectangle {
                     }
                 }
             }
-            // VIR cab model and mics: too wide for the header.
+            // VIR mics (the VIR cab model is chosen in the menu).
             HorizontalLayout {
                 height: 24px;
                 spacing: 6px;
                 alignment: start;
-                Stepper {
-                    enabled: vir;
-                    value-width: 58px; // "412 B8000"
-                    height: 24px;
-                    options: root.cab-model-names;
-                    index <=> root.cab-model;
-                    picked(i) => { root.fx-changed(51, i); }
-                }
                 Stepper {
                     enabled: vir;
                     // Mic 1, tinted like its dot on the mic pad.

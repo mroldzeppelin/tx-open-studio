@@ -11,6 +11,18 @@ pub(crate) fn index_bytes(idx: u8) -> Vec<u8> {
     }
 }
 
+/// An integer in the value encoding: literal below 128, `80 xx` below 256,
+/// else `81 lo hi`.
+pub(crate) fn encode_int(n: u16) -> Vec<u8> {
+    if n < 0x80 {
+        vec![n as u8]
+    } else if n < 0x100 {
+        vec![0x80, n as u8]
+    } else {
+        vec![0x81, n as u8, (n >> 8) as u8]
+    }
+}
+
 /// One node of a payload in the pedal's value encoding: `B9 n` / `BA n` =
 /// list / array of n nodes, `BC n` = blob of n bytes, `88` = f32 LE,
 /// anything else = an integer (literal < 0x80, `80 xx`, `81`/`82` u16 LE).

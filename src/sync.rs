@@ -28,6 +28,8 @@ pub(crate) struct SyncCtx {
     pub(crate) select_echo: Arc<Mutex<Option<(u8, Instant)>>>,
     /// When the user last turned the front-panel VOLUME knob (echo guard).
     pub(crate) volume_touched: Arc<Mutex<Option<Instant>>>,
+    /// Catalog, preset lines and the model/cab pickers.
+    pub(crate) tone: Arc<Mutex<tone_select::ToneState>>,
 }
 
 impl SyncCtx {
@@ -115,6 +117,10 @@ impl SyncCtx {
         let _ = pedal.request_globals();
         // Pedal-wide: once per session; later changes arrive as pushes.
         let _ = pedal.request_volume();
+        let _ = pedal.request_library_list();
+        // Background: every preset's slots for the list lines (after the
+        // name scan; user requests first).
+        let _ = pedal.preset_pass();
         if !self.names.loaded() {
             let _ = pedal.request_names();
         }
@@ -129,6 +135,9 @@ impl SyncCtx {
         self.amp().clear();
         *self.global_guard() = GlobalGuard::default();
         *self.volume_touched.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.tone().reset_session();
+        ui.set_slot_busy(false);
+        ui.set_library_scanning(false);
         ui.set_globals_known(false);
         // A rename/save in flight on the lost session never reports back.
         ui.set_rename_busy(0);
@@ -390,18 +399,15 @@ impl SyncCtx {
                 if ui.get_preset() != i32::from(preset_idx) + 1 {
                     return; // stale: the UI moved on to another preset
                 }
-                let info = info.unwrap_or_default();
-                ui.set_amp_model_text(info.amp.as_ref().map(amp_model_text).unwrap_or_default().into());
-                ui.set_cab_source_text(
-                    info.cab.as_ref().map(|c| cab_source_text(c, info.amp.as_ref())).unwrap_or_default().into(),
-                );
-                ui.set_cab_slot_type(match info.cab {
-                    Some(protocol::CabSource::ModelCab) => 0,
-                    Some(protocol::CabSource::Ir(_)) => 3,
-                    Some(protocol::CabSource::Borrowed { .. }) => 4,
-                    None => -1,
-                });
+                self.show_tone_info(ui, info);
             }
+            Event::LibraryList(list) => self.on_library_list(ui, list),
+            Event::Slots(infos) => self.on_slots(ui, &infos),
+            Event::PresetSlots { preset_idx, slots } => self.on_preset_slots(ui, preset_idx, &slots),
+            Event::Live { preset_idx, dirty, info } => self.on_live(ui, preset_idx, dirty, info),
+            Event::SlotApplied { target, result } => self.on_slot_applied(ui, target, result),
+            Event::CatalogScan { running, completed } => self.on_catalog_scan(ui, running, completed),
+            Event::PresetPass { running, .. } => self.on_preset_pass(running),
         }
     }
 

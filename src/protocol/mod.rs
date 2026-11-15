@@ -123,6 +123,8 @@ mod preset;
 mod globals;
 mod pedal;
 mod session;
+mod slots;
+mod catalog;
 #[cfg(test)]
 mod test_util;
 
@@ -135,3 +137,5 @@ pub(crate) use preset::*;
 pub(crate) use globals::*;
 pub(crate) use pedal::*;
 pub(crate) use session::*;
+pub(crate) use slots::*;
+pub(crate) use catalog::*;

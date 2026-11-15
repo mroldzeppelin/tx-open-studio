@@ -1,12 +1,16 @@
 mod amp;
+mod catalog;
 mod fx;
 mod global_controls;
 mod link;
 mod midi;
+mod preset_tones;
 mod presets;
 mod protocol;
+mod store;
 mod sync;
 mod tempo;
+mod tone_select;
 mod update;
 mod wiring;
 #[cfg(test)]
@@ -55,6 +59,7 @@ fn main() -> Result<(), slint::PlatformError> {
     show_list(&ui, &ctx.names);
 
     wiring::wire(&ui, &ctx);
+    ctx.load_tone_cache(&ui);
     start_update_check(ui.as_weak());
 
     // Connect now (pedal present: same as a normal start), then keep

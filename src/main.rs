@@ -892,6 +892,7 @@ impl SyncCtx {
         });
         // Params first: the knobs shouldn't wait for the ~10 s name scan.
         let _ = pedal.request_amp_params((clamp_preset(preset) - 1) as u8);
+        let _ = pedal.request_preset_level((clamp_preset(preset) - 1) as u8);
         let _ = pedal.request_tone_info((clamp_preset(preset) - 1) as u8);
         let _ = pedal.request_globals();
         if !self.names.loaded() {
@@ -1018,6 +1019,14 @@ impl SyncCtx {
         }
     }
 
+    /// Preset volume of the (active) `preset` at load: answered as its
+    /// loaded value (baseline, no EDITED); stale answers are dropped.
+    fn request_preset_level(&self, preset: i32) {
+        if let Err(e) = self.with_serial(|p| p.request_preset_level((clamp_preset(preset) - 1) as u8)) {
+            eprintln!("TONEX preset volume request failed: {e}");
+        }
+    }
+
     /// Amp model / cab source names of `preset` (read after its params).
     fn request_tone_info(&self, preset: i32) {
         if let Err(e) = self.with_serial(|p| p.request_tone_info((clamp_preset(preset) - 1) as u8)) {
@@ -1101,6 +1110,7 @@ impl SyncCtx {
                     show_preset(ui, &self.names, preset);
                     self.amp().clear();
                     self.request_amp_params(preset);
+                    self.request_preset_level(preset);
                     self.request_tone_info(preset);
                 }
             }
@@ -1161,6 +1171,7 @@ impl SyncCtx {
                     Some(p) => self.apply_amp_params(ui, &p),
                     None => self.request_amp_params(preset),
                 }
+                self.request_preset_level(preset);
                 self.request_tone_info(preset);
             }
             Event::ToneInfo { preset_idx, info } => {
@@ -1378,6 +1389,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
             }
             ctx.request_amp_params(preset);
+            ctx.request_preset_level(preset);
             ctx.request_tone_info(preset);
         });
     }

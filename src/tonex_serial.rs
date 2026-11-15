@@ -873,6 +873,24 @@ fn preset_level_candidates(payload: &[u8]) -> String {
     )
 }
 
+/// "Get parameter" request (type 0x020C, from the official editor):
+/// `B9 03 81 0C 02 82 <len LE> 80 10 03 | B9 03 <section> 00 <idx>`, size
+/// field = body length. The pedal answers with an ordinary `0x0207`
+/// parameter frame holding the LIVE value. Not for verifying our own
+/// writes: right after a write it may still return the previous value.
+fn get_param_request(section: u8, index: u8) -> Vec<u8> {
+    let mut body = vec![0xB9, 0x03, section, 0x00];
+    body.extend(index_bytes(index));
+    let mut req = vec![0xB9, 0x03, 0x81, 0x0C, 0x02, 0x82];
+    req.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    req.extend_from_slice(&[0x80, 0x10, 0x03]);
+    req.extend(body);
+    req
+}
+
+/// How long to wait for the answer to a get-parameter request.
+const GET_PARAM_TIMEOUT: Duration = Duration::from_millis(1000);
+
 /// A live change of the preset volume: `0x0207` with body
 /// `B9 04 03 00 00 88 <f32>` (captured on hardware while turning the knob:
 /// `B9 03 81 07 02 0A 02 B9 04 03 00 00 88 <f32>`).
@@ -1435,6 +1453,8 @@ enum Request {
     Save(u8),
     /// Read a preset's amp/cab slot names (index).
     ToneInfo(u8),
+    /// Read the active preset's volume at load (its index, for matching).
+    PresetLevel(u8),
 }
 
 /// Handle to the session thread that owns the serial port. Dropping it ends
@@ -1523,6 +1543,14 @@ impl Pedal {
             return Err(format!("preset index {idx} out of range"));
         }
         self.send(Request::Save(idx))
+    }
+
+    /// Reads the preset volume of the active preset `idx` (0-based) at
+    /// load (get-parameter, section 03 index 0); answered with
+    /// `Event::PresetLevel { preset_idx: Some(idx), .. }`, i.e. as the
+    /// loaded value. Only for preset load / reconnect, not to verify writes.
+    pub fn request_preset_level(&self, idx: u8) -> Result<(), String> {
+        self.send(Request::PresetLevel(idx))
     }
 
     /// Reads the amp model / cab source names of preset `idx` (0-based)
@@ -1668,6 +1696,7 @@ impl<F: Fn(Event)> Session<'_, F> {
         let mut renames = Vec::new();
         let mut saves = Vec::new();
         let mut latest_tone = None;
+        let mut latest_level = None;
         let mut rest = VecDeque::new();
         for r in std::mem::take(&mut self.queue) {
             match r {
@@ -1688,6 +1717,7 @@ impl<F: Fn(Event)> Session<'_, F> {
                 Request::Rename(idx, name) => renames.push((idx, name)),
                 Request::Save(idx) => saves.push(idx),
                 Request::ToneInfo(idx) => latest_tone = Some(idx),
+                Request::PresetLevel(idx) => latest_level = Some(idx),
                 other => rest.push_back(other),
             }
         }
@@ -1711,6 +1741,17 @@ impl<F: Fn(Event)> Session<'_, F> {
             }
             if let Some(value) = read.level {
                 (self.on_event)(Event::PresetLevel { preset_idx: Some(idx), value });
+            }
+            served = true;
+        }
+        // Preset volume at load: only the newest request; the answer is a
+        // 0x0207 frame taken here (as the loaded value), not dispatched as
+        // a live change.
+        if let Some(idx) = latest_level {
+            if let Some(value) = self.read_preset_level()? {
+                (self.on_event)(Event::PresetLevel { preset_idx: Some(idx), value });
+            } else if self.debug {
+                eprintln!("TONEX serial: no answer to the preset volume read");
             }
             served = true;
         }
@@ -1841,6 +1882,22 @@ impl<F: Fn(Event)> Session<'_, F> {
             }
         }
         Ok(self.fetch_dump(idx, true)?.map_err(|e| format!("verifying the write: {e}")))
+    }
+
+    /// Sends the preset volume get-parameter request and returns the value
+    /// from its `0x0207` answer (None on timeout), handling other frames.
+    fn read_preset_level(&mut self) -> Result<Option<f32>, String> {
+        self.link.send(&get_param_request(LEVEL_SECTION, 0))?;
+        let until = Instant::now() + GET_PARAM_TIMEOUT;
+        while let Some(payload) = self.link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
+            if frame_type(&payload) == Some(TYPE_PARAM_CHANGED) {
+                if let Some(value) = extract_level_change(&payload) {
+                    return Ok(Some(value));
+                }
+            }
+            self.dispatch(&payload, false);
+        }
+        Ok(None)
     }
 
     /// Reads the live edit buffer: (payload, active preset index, dirty).
@@ -2325,6 +2382,23 @@ mod tests {
         p.push(0x10);
         p.extend(body);
         p
+    }
+
+    #[test]
+    fn get_param_request_bytes() {
+        // Preset volume: section 03, index 0; size field = body length.
+        assert_eq!(
+            get_param_request(LEVEL_SECTION, 0),
+            [0xB9, 0x03, 0x81, 0x0C, 0x02, 0x82, 0x05, 0x00, 0x80, 0x10, 0x03, 0xB9, 0x03, 0x03, 0x00, 0x00]
+        );
+        let long = get_param_request(0x02, 0x90);
+        assert_eq!(&long[6..8], &[0x06, 0x00]);
+        assert_eq!(&long[11..], &[0xB9, 0x03, 0x02, 0x00, 0x80, 0x90]);
+        // The answer is an ordinary 0x0207 level frame.
+        let mut answer = vec![0xB9, 0x03, 0x81, 0x07, 0x02, 0x0A, 0x02, 0xB9, 0x04, 0x03, 0x00, 0x00, FLOAT_TAG];
+        answer.extend(9.0f32.to_le_bytes());
+        assert_eq!(frame_type(&answer), Some(TYPE_PARAM_CHANGED));
+        assert_eq!(extract_level_change(&answer), Some(9.0));
     }
 
     #[test]

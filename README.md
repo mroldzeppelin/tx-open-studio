@@ -162,7 +162,6 @@ These are not on a to-do list waiting for time. Each one is either an unknown pa
 - **Saving edits doesn't include the preset volume yet.** Presets can be renamed (right-click a preset in the list → Rename) and edits saved (hold the floppy button for 1 s while the preset shows EDITED). The preset volume is not part of the stored preset data the app writes, so a save keeps the volume stored on the pedal.
 - **No upload or download of `.tonex` captures / presets.** The full preset dump is an undecoded binary blob, and no upload path is known.
 - **The amp model (capture) cannot be changed.** Only the parameters around it can. Its name (and the cab source: model cab, IR or another model's cab) is shown read-only in the AMP and CAB tabs.
-- **Preset volume is unknown until first touched.** The pedal does not include it in any identified place of the preset data. The app learns the value once you move it in the app or on the pedal.
 - **The tuner shows no pitch.** The pedal sends no pitch data over USB. It also does not report tuner on/off when toggled on the pedal, so the app's tuner button only reflects what the app last sent.
 - Only In Trim and Master are known among the pedal's global settings.
 

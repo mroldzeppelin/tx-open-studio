@@ -1219,6 +1219,24 @@ mod diff_tests {
     }
 
     #[test]
+    fn preset_volume_read_at_load_is_the_baseline() {
+        let mut d = PresetDiff::default();
+        d.load(&base());
+        // The load-time read (Event::PresetLevel with an index) is the
+        // loaded value: not an edit.
+        d.load_level(10.0);
+        assert!(!d.dirty());
+        // A later push or app edit is.
+        d.set_level(9.0);
+        assert!(d.dirty());
+        d.set_level(10.0);
+        assert!(!d.dirty());
+        // A second load-time read keeps the first as the baseline.
+        d.load_level(9.0);
+        assert!(d.dirty());
+    }
+
+    #[test]
     fn clean_after_load_and_after_return_to_baseline() {
         let mut d = PresetDiff::default();
         assert!(!d.dirty());

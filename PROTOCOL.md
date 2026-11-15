@@ -360,6 +360,19 @@ Notes:
 - The pedal echoes changes back; the app ignores reports for a value it wrote in the last 600 ms (`ECHO_GUARD`).
 - Requires a firmware with IK Editor support (per Builty).
 
+### 4.4.1 Get parameter `0x020C`
+
+Seen in the official editor's traffic, verified on hardware:
+
+```
+B9 03 81 0C 02 82 <len LE> 80 10 03 | B9 03 <section> 00 <idx>
+preset volume:  B9 03 81 0C 02 82 05 00 80 10 03 | B9 03 03 00 00
+```
+
+The size field is the body length. The pedal answers with an ordinary `0x0207` parameter frame (§4.4), for the preset volume `B9 03 81 07 02 0A 02 | B9 04 03 00 00 88 <f32>`, the same frame it pushes when the volume changes. It returns the **live** value (changed live 10 → 9: read 9 while the stored value was 10).
+
+Caveat: once, a read right after the host's own write returned the previous value (a read 1 s later had the new one). The app therefore uses this read only at preset load and reconnect, never to verify its writes.
+
 ### 4.5 Global config `0x0206`
 
 Pedal-wide settings, not per preset.
@@ -530,7 +543,7 @@ All effect parameters (gate, comp, cab, mod, delay, reverb) are written by the a
 
 | Value | Where |
 |---|---|
-| Preset volume (0..10) | `0x0207` section `03` idx `00`; MIDI CC 12. Not located in the summary reply (§9). |
+| Preset volume (0..10) | `0x0207` section `03` idx `00`; read with get-parameter `0x020C` (§4.4.1); MIDI CC 12. Not in the summary reply or the preset dump/save data (§9). |
 | Input trim, main volume | Global config `0x0206`, idx 9 / 10 (§4.5) |
 
 ## 6. Typical session
@@ -605,7 +618,7 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 | Preset rename | **Supported**: full dump → patch the name buffer → write (`0x0203`, §4.3.1), verified on hardware. |
 | Preset save (parameters) | **Supported** (§4.3.1): the pedal's live edit buffer written back as the stored preset. The preset volume is not part of that data, so a save keeps the stored volume. |
 | Preset upload / `.tonex` captures | Not implemented; no upload path is known. |
-| Preset volume at load | Not readable. The summary reply does not contain it in any identified place; the full dump holds a saved copy at unstable offsets inside the model blob. It is only known once the pedal pushes a `0x0207` section `03` change or the host writes it. (The code still range-checks one candidate, element 0 of the 2nd array in `BA 03`, and logs all candidates under `TX_DEBUG_SERIAL=1` — unverified.) |
+| Preset volume | Read at preset load with get-parameter `0x020C` (§4.4.1), which returns the live value. It is not in any identified place of the summary reply or of the preset dump/save data, so a save keeps the stored volume. (The code still range-checks one candidate in the summary, element 0 of the 2nd array in `BA 03`, and logs all candidates under `TX_DEBUG_SERIAL=1` — unverified.) |
 | "Sections" in `0x0207` | Hypothesis: `<section> 00 <idx>` addresses float arrays in document order (Builty's old preset-tempo write `01 00 01`; `02` = 109-array confirmed; `03` = preset volume confirmed). How `03` maps onto the summary's arrays is not established. |
 | Name-group float | `B9 02 [BC 21 …] BA 01 88 <f32>` after the name (from vit3k's capture): meaning unknown; it is **not** the preset volume. |
 | Full dump `full = 01` | Reply type `0x0203` (§4.3); the app reads the header, body start and name buffer only. The model blob (~30 KB) is not decoded; offsets inside it vary between presets. |

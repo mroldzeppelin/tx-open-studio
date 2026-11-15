@@ -734,22 +734,21 @@ impl PresetNames {
     }
 }
 
-/// AMP tab header line: "Ratfish · ProCo Rat" (model · based on).
+/// AMP tab header line: the amp the model is based on ("Fender Twin
+/// Reverb"), or the model's own name when that isn't stored.
 fn amp_model_text(amp: &tonex_serial::AmpModel) -> String {
-    match &amp.based_on {
-        Some(b) => format!("{} · {b}", amp.name),
-        None => amp.name.clone(),
-    }
+    amp.based_on.clone().unwrap_or_else(|| amp.name.clone())
 }
 
-/// CAB tab header line: "Model cab", "IR: <name>", "Cab: <model> · <based on>".
-fn cab_source_text(cab: &tonex_serial::CabSource) -> String {
+/// CAB tab header line: the tone model whose cab plays ("Polite Twin"),
+/// "IR: <name>", or a borrowed cab's "<model> · <based on>".
+fn cab_source_text(cab: &tonex_serial::CabSource, amp: Option<&tonex_serial::AmpModel>) -> String {
     use tonex_serial::CabSource::*;
     match cab {
-        ModelCab => "Model cab".into(),
+        ModelCab => amp.map(|a| a.name.clone()).unwrap_or_default(),
         Ir(name) => format!("IR: {name}"),
-        Borrowed { name, based_on: Some(b) } => format!("Cab: {name} · {b}"),
-        Borrowed { name, based_on: None } => format!("Cab: {name}"),
+        Borrowed { name, based_on: Some(b) } => format!("{name} · {b}"),
+        Borrowed { name, based_on: None } => name.clone(),
     }
 }
 
@@ -1170,7 +1169,9 @@ impl SyncCtx {
                 }
                 let info = info.unwrap_or_default();
                 ui.set_amp_model_text(info.amp.as_ref().map(amp_model_text).unwrap_or_default().into());
-                ui.set_cab_source_text(info.cab.as_ref().map(cab_source_text).unwrap_or_default().into());
+                ui.set_cab_source_text(
+                    info.cab.as_ref().map(|c| cab_source_text(c, info.amp.as_ref())).unwrap_or_default().into(),
+                );
                 ui.set_cab_slot_type(match info.cab {
                     Some(tonex_serial::CabSource::ModelCab) => 0,
                     Some(tonex_serial::CabSource::Ir(_)) => 3,
@@ -1856,14 +1857,16 @@ mod tests {
         use tonex_serial::{AmpModel, CabSource};
         assert_eq!(
             amp_model_text(&AmpModel { name: "Ratfish".into(), based_on: Some("ProCo Rat".into()) }),
-            "Ratfish · ProCo Rat"
+            "ProCo Rat"
         );
         assert_eq!(amp_model_text(&AmpModel { name: "Solo".into(), based_on: None }), "Solo");
-        assert_eq!(cab_source_text(&CabSource::ModelCab), "Model cab");
-        assert_eq!(cab_source_text(&CabSource::Ir("B.Alnico 2".into())), "IR: B.Alnico 2");
+        assert_eq!(cab_source_text(&CabSource::ModelCab, None), "");
+        let twin = tonex_serial::AmpModel { name: "Polite Twin".into(), based_on: Some("Fender Twin Reverb".into()) };
+        assert_eq!(cab_source_text(&CabSource::ModelCab, Some(&twin)), "Polite Twin");
+        assert_eq!(cab_source_text(&CabSource::Ir("B.Alnico 2".into()), None), "IR: B.Alnico 2");
         assert_eq!(
-            cab_source_text(&CabSource::Borrowed { name: "51st Hi".into(), based_on: Some("Peavey 5150".into()) }),
-            "Cab: 51st Hi · Peavey 5150"
+            cab_source_text(&CabSource::Borrowed { name: "51st Hi".into(), based_on: Some("Peavey 5150".into()) }, None),
+            "51st Hi · Peavey 5150"
         );
     }
 }

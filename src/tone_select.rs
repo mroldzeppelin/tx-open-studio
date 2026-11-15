@@ -257,6 +257,12 @@ impl SyncCtx {
                 return;
             }
             t.scan_requested = true;
+            // Debug/testing switch: never probe the library (names then come
+            // only from preset dumps; the rest stay "Amp N" placeholders).
+            if std::env::var_os("TX_NO_LIBRARY_SCAN").is_some() {
+                t.scan_completed = false;
+                return;
+            }
             let missing = t.catalog.missing();
             t.scan_completed = missing.is_empty();
             missing

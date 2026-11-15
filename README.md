@@ -158,6 +158,7 @@ The desktop entry runs `tx-open-studio`, so the binary has to be on your `PATH` 
   ```sh
   TX_DEBUG_SERIAL=1 tx-open-studio
   ```
+- `TX_NO_LIBRARY_SCAN=1` skips the background library scan and the preset pass (testing): only the current preset's models get names, the rest stay pickable as "Amp N" / "Cab N".
 
 ## Limitations
 

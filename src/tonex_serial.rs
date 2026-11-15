@@ -763,12 +763,11 @@ struct DetailsRead {
     amp: Result<AmpParams, String>,
     raw: Vec<f32>,
     character: Option<String>,
-    level: Option<f32>,
 }
 
 impl DetailsRead {
     fn failed(e: String) -> Self {
-        Self { amp: Err(e), raw: Vec::new(), character: None, level: None }
+        Self { amp: Err(e), raw: Vec::new(), character: None }
     }
 }
 
@@ -848,21 +847,27 @@ const PARAM_SECTION: u8 = 0x02;
 /// Preset volume range (as shown on the pedal; observed 6.9..9.2).
 pub const PRESET_LEVEL_RANGE: (f32, f32) = (0.0, 10.0);
 
-/// Preset volume from a details payload.
-///
-/// Writes address float arrays as `<section> 00 <index>`. Section 02 is the
-/// 109-param array (`BA 03`'s first array, confirmed), and Builty's old
-/// preset-tempo write `01 00 01` hit element 1 of the name group's float
-/// array, i.e. sections count float arrays in document order. Section 03 is
-/// then the second array inside `BA 03`, element 0. UNVERIFIED against a
-/// details dump: `TX_DEBUG_SERIAL=1` logs every candidate
-/// (`preset_level_candidates`) to settle it. Range-checked so a wrong guess
-/// shows nothing rather than nonsense.
-fn extract_preset_level(payload: &[u8]) -> Option<f32> {
-    effects_array_first(payload, 1).filter(|v| (PRESET_LEVEL_RANGE.0..=PRESET_LEVEL_RANGE.1).contains(v))
+/// Events for a footswitch push of preset `idx` (a `0x0204` with the
+/// pushed-index marker): the preset change and its character. Never a
+/// preset volume: that comes from the get-parameter read only (see
+/// `preset_level_candidates`).
+fn pushed_preset_events(idx: u8, payload: &[u8]) -> Vec<Event> {
+    let params = extract_amp_params(payload)
+        .map_err(|e| eprintln!("TONEX: pushed preset {idx} params: {e}"))
+        .ok();
+    let mut events = vec![Event::PresetChanged { preset_idx: idx, params, raw: extract_param_array(payload) }];
+    if let Some(character) = extract_character(payload) {
+        events.push(Event::Character { preset_idx: idx, character });
+    }
+    events
 }
 
-/// All plausible locations of the preset volume, for a debug log.
+/// Old guesses for the preset volume in a details payload (the second
+/// array inside `BA 03`, element 0, among others), for a debug log only.
+/// None of them is used as the volume: the verified source is the
+/// get-parameter read (`get_param_request`). The guess used to be applied
+/// as the loaded volume; once the real value followed it, every preset
+/// showed EDITED.
 fn preset_level_candidates(payload: &[u8]) -> String {
     format!(
         "name-group BA01[0]={:?}  BA03[0][0]={:?}  BA03[1][0]={:?}  BA03[2][0]={:?}",
@@ -871,6 +876,20 @@ fn preset_level_candidates(payload: &[u8]) -> String {
         effects_array_first(payload, 1),
         effects_array_first(payload, 2),
     )
+}
+
+/// Preset select (type 0x0201 header, from the official editor, verified
+/// on hardware): `B9 03 81 01 02 82 <len LE> 80 10 03 | B9 02 <idx> 00`,
+/// size field = body length (4, or 5 with `80 xx` for idx >= 128).
+fn select_request(idx: u8) -> Vec<u8> {
+    let mut body = vec![0xB9, 0x02];
+    body.extend(index_bytes(idx));
+    body.push(0x00);
+    let mut req = vec![0xB9, 0x03, 0x81, 0x01, 0x02, 0x82];
+    req.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    req.extend_from_slice(&[0x80, 0x10, 0x03]);
+    req.extend(body);
+    req
 }
 
 /// "Get parameter" request (type 0x020C, from the official editor):
@@ -1336,7 +1355,7 @@ fn extract_current_preset(payload: &[u8]) -> Option<u8> {
     (usize::from(idx) < PRESET_COUNT).then_some(idx)
 }
 
-fn debug_enabled() -> bool {
+pub(crate) fn debug_enabled() -> bool {
     std::env::var_os("TX_DEBUG_SERIAL").is_some()
 }
 
@@ -1359,7 +1378,7 @@ pub enum Event {
     /// Result of `Pedal::request_names`.
     Names(Result<Vec<PresetMeta>, String>),
     /// The lone per-preset float after the name (`BA 01 88 <f32>`), assumed
-    /// to be the preset volume; see `extract_preset_level`. `preset_idx` is
+    /// to be the preset volume; see `preset_level_candidates`. `preset_idx` is
     /// None for a live change (applies to the current preset).
     PresetLevel { preset_idx: Option<u8>, value: f32 },
     /// Character of one preset (0-based), from a details read or push.
@@ -1453,6 +1472,8 @@ enum Request {
     Save(u8),
     /// Read a preset's amp/cab slot names (index).
     ToneInfo(u8),
+    /// Make preset `idx` the active one.
+    Select(u8),
     /// Read the active preset's volume at load (its index, for matching).
     PresetLevel(u8),
 }
@@ -1543,6 +1564,16 @@ impl Pedal {
             return Err(format!("preset index {idx} out of range"));
         }
         self.send(Request::Save(idx))
+    }
+
+    /// Selects preset `idx` (0-based) on the pedal. Requests queued after
+    /// it (the new preset's reads) are served after the select; writes
+    /// queued before it go to the old preset first.
+    pub fn select_preset(&self, idx: u8) -> Result<(), String> {
+        if usize::from(idx) >= PRESET_COUNT {
+            return Err(format!("preset index {idx} out of range"));
+        }
+        self.send(Request::Select(idx))
     }
 
     /// Reads the preset volume of the active preset `idx` (0-based) at
@@ -1697,9 +1728,34 @@ impl<F: Fn(Event)> Session<'_, F> {
         let mut saves = Vec::new();
         let mut latest_tone = None;
         let mut latest_level = None;
+        let mut select = None;
         let mut rest = VecDeque::new();
+        let mut held_back = false;
         for r in std::mem::take(&mut self.queue) {
+            if held_back {
+                rest.push_back(r);
+                continue;
+            }
             match r {
+                // A select goes out first, unless something queued before it
+                // (for the old preset) was collected: then it waits, with
+                // everything after it, for the next round.
+                Request::Select(idx) => {
+                    let collected = !writes.is_empty()
+                        || !global_writes.is_empty()
+                        || read_globals
+                        || latest_read.is_some()
+                        || !renames.is_empty()
+                        || !saves.is_empty()
+                        || latest_tone.is_some()
+                        || latest_level.is_some();
+                    if collected {
+                        held_back = true;
+                        rest.push_back(Request::Select(idx));
+                    } else {
+                        select = Some(idx);
+                    }
+                }
                 // A drag queues many writes per param: keep the latest value,
                 // in first-seen order across params.
                 Request::SetParam(section, index, value) => {
@@ -1722,10 +1778,13 @@ impl<F: Fn(Event)> Session<'_, F> {
             }
         }
         self.queue = rest;
+        if let Some(idx) = select {
+            self.link.send(&select_request(idx))?;
+        }
         for &(section, index, value) in &writes {
             self.link.send(&set_param_request(section, index, value))?;
         }
-        let mut served = !writes.is_empty() || !global_writes.is_empty();
+        let mut served = select.is_some() || !writes.is_empty() || !global_writes.is_empty();
         if !global_writes.is_empty() {
             self.write_globals(&global_writes)?;
         }
@@ -1738,9 +1797,6 @@ impl<F: Fn(Event)> Session<'_, F> {
             (self.on_event)(Event::AmpParams { preset_idx: idx, result: read.amp, raw: read.raw });
             if let Some(character) = read.character {
                 (self.on_event)(Event::Character { preset_idx: idx, character });
-            }
-            if let Some(value) = read.level {
-                (self.on_event)(Event::PresetLevel { preset_idx: Some(idx), value });
             }
             served = true;
         }
@@ -2060,16 +2116,8 @@ impl<F: Fn(Event)> Session<'_, F> {
         }
         if !awaiting && ty == Some(TYPE_PRESET_DETAILS) {
             if let Some(idx) = extract_current_preset(payload) {
-                let params = extract_amp_params(payload)
-                    .map_err(|e| eprintln!("TONEX: pushed preset {idx} params: {e}"))
-                    .ok();
-                let raw = extract_param_array(payload);
-                (self.on_event)(Event::PresetChanged { preset_idx: idx, params, raw });
-                if let Some(character) = extract_character(payload) {
-                    (self.on_event)(Event::Character { preset_idx: idx, character });
-                }
-                if let Some(value) = extract_preset_level(payload) {
-                    (self.on_event)(Event::PresetLevel { preset_idx: Some(idx), value });
+                for event in pushed_preset_events(idx, payload) {
+                    (self.on_event)(event);
                 }
                 return false;
             }
@@ -2109,7 +2157,6 @@ impl<F: Fn(Event)> Session<'_, F> {
                 amp: extract_amp_params(&payload),
                 raw: extract_param_array(&payload),
                 character: extract_character(&payload),
-                level: extract_preset_level(&payload),
             },
             None => DetailsRead::failed("no preset details received".into()),
         })
@@ -2382,6 +2429,19 @@ mod tests {
         p.push(0x10);
         p.extend(body);
         p
+    }
+
+    #[test]
+    fn select_request_bytes() {
+        assert_eq!(
+            select_request(5),
+            [0xB9, 0x03, 0x81, 0x01, 0x02, 0x82, 0x04, 0x00, 0x80, 0x10, 0x03, 0xB9, 0x02, 0x05, 0x00]
+        );
+        // As the editor sent it for 0x8E: `80 8E`, size 5.
+        assert_eq!(
+            select_request(0x8E),
+            [0xB9, 0x03, 0x81, 0x01, 0x02, 0x82, 0x05, 0x00, 0x80, 0x10, 0x03, 0xB9, 0x02, 0x80, 0x8E, 0x00]
+        );
     }
 
     #[test]
@@ -2799,6 +2859,36 @@ mod tests {
         p.extend_from_slice(&[0xB9, 0x04, 0x00, 0x00, 0x80, 140]);
         assert_eq!(extract_current_preset(&p), Some(140));
         assert_eq!(extract_current_preset(&[0xB9, 0x04, 0x00, 0x00, 0x80, 200]), None);
+    }
+
+    /// Regression (EDITED right after every load): a pushed summary whose
+    /// old volume guess (BA 03 array 1, element 0) is in range must not
+    /// produce a preset-volume event.
+    #[test]
+    fn pushed_summary_reports_no_preset_volume() {
+        let mut p = vec![0xB9, 0x03, 0x81, 0x04, 0x02];
+        p.extend_from_slice(&[0xB9, 0x04, 0x00, 0x00, 42]);
+        p.extend_from_slice(&NAME_MARKER);
+        p.extend_from_slice(&[b'X'; 33]);
+        p.extend_from_slice(&[0xBA, 0x03]);
+        for array in 0..3 {
+            p.extend_from_slice(&[0xBA, 0x6D]);
+            for i in 0..PARAM_COUNT {
+                let v = match (array, i) {
+                    (0, P_EQ_BASS_FREQ) => 300.0,
+                    (0, P_EQ_TREBLE_FREQ) => 1900.0,
+                    (0, P_AMP_ENABLE) => 1.0,
+                    (1, 0) => 3.0, // the old preset-volume guess
+                    _ => 0.0,
+                };
+                p.push(FLOAT_TAG);
+                p.extend_from_slice(&f32::to_le_bytes(v));
+            }
+        }
+        assert_eq!(effects_array_first(&p, 1), Some(3.0), "the guess is readable and in range");
+        let events = pushed_preset_events(42, &p);
+        assert!(matches!(events[0], Event::PresetChanged { preset_idx: 42, params: Some(_), .. }));
+        assert!(!events.iter().any(|e| matches!(e, Event::PresetLevel { .. })));
     }
 
     #[test]

@@ -1106,16 +1106,11 @@ pub struct PresetDiff {
 }
 
 /// Largest difference treated as "unchanged" for parameter `index`: half the
-/// UI step for displayed controls (amp knobs also absorb the 1/127 CC
-/// quantization: a value sent as CC comes back as e.g. 6.929 for 6.9), and a
-/// tiny relative tolerance for everything else (switches, selectors and
-/// parameters the app doesn't show).
+/// UI step for the per-model delay/reverb controls, and a tiny relative
+/// tolerance for everything else (amp knobs too: written over serial as
+/// exact floats, they come back exactly).
 fn tolerance(index: usize, baseline: f32) -> f32 {
-    use crate::tonex_serial::AmpKnob;
     use FxControl::*;
-    if AmpKnob::from_param_index(index).is_some() {
-        return 0.05;
-    }
     let per_model = |c: FxControl| {
         (0..DELAY_MODELS).any(|delay| {
             (0..REVERB_MODELS).any(|reverb| c.param_index(Models { delay, reverb, modulation: 0 }) == Some(index))
@@ -1163,6 +1158,22 @@ impl PresetDiff {
             self.level_base = Some(value);
         }
         self.level_cur = Some(value);
+    }
+
+    /// What makes the preset dirty, for the debug log: the first parameter
+    /// whose current value differs from the baseline, or the preset volume.
+    pub fn first_difference(&self) -> Option<String> {
+        if let (Some(b), Some(c)) = (self.level_base, self.level_cur) {
+            if (c - b).abs() > 0.05 {
+                return Some(format!("preset volume: loaded {b}, now {c}"));
+            }
+        }
+        self.baseline
+            .iter()
+            .zip(&self.current)
+            .enumerate()
+            .find(|&(i, (&b, &c))| (c - b).abs() > tolerance(i, b))
+            .map(|(i, (b, c))| format!("param {i}: loaded {b}, now {c}"))
     }
 
     /// Preset volume changed (our write or a pedal report).
@@ -1218,6 +1229,27 @@ mod diff_tests {
         assert_eq!(d.baseline(gain), Some(8.0));
     }
 
+    /// The EDITED-after-load regression: a guessed volume used as the
+    /// loaded value, followed by the real read, is a "change". The guess is
+    /// no longer reported as a level (only the verified read is).
+    #[test]
+    fn guessed_then_real_volume_would_be_dirty() {
+        let mut d = PresetDiff::default();
+        d.load(&base());
+        d.load_level(3.0); // the old guess
+        d.load_level(7.5); // the verified read
+        assert!(d.dirty());
+        assert_eq!(d.first_difference().unwrap(), "preset volume: loaded 3, now 7.5");
+        // As it happens now: only the verified read.
+        let mut d = PresetDiff::default();
+        d.load(&base());
+        d.load_level(7.5);
+        assert!(!d.dirty());
+        assert_eq!(d.first_difference(), None);
+        d.set(AmpKnob::Gain.param_index(), 8.0);
+        assert_eq!(d.first_difference().unwrap(), "param 20: loaded 6.9, now 8");
+    }
+
     #[test]
     fn preset_volume_read_at_load_is_the_baseline() {
         let mut d = PresetDiff::default();
@@ -1245,9 +1277,12 @@ mod diff_tests {
         let gain = AmpKnob::Gain.param_index();
         d.set(gain, 7.5);
         assert!(d.dirty());
-        // Back to 6.9 via CC: the pedal reports 88/127*10 = 6.929.
-        d.set(gain, 88.0 / 127.0 * 10.0);
+        // Back to exactly 6.9 (serial writes are exact floats).
+        d.set(gain, 6.9);
         assert!(!d.dirty());
+        // No CC-sized allowance any more: 6.93 is a change.
+        d.set(gain, 6.93);
+        assert!(d.dirty());
     }
 
     #[test]

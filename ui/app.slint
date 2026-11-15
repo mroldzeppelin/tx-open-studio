@@ -1436,6 +1436,8 @@ export component AppWindow inherits Window {
     // The pedal's serial port may not be opened (udev rule missing):
     // steady red LED, the status text explains.
     in property <bool> no-access: false;
+    // A MIDI port to the pedal is open: only the tuner toggle uses MIDI.
+    in property <bool> midi-available: false;
     // Newer release found ("v1.2.3"; "" = none): amber chip in the status
     // bar that opens the releases page.
     in property <string> update-version;
@@ -1793,10 +1795,12 @@ export component AppWindow inherits Window {
 
             // Tuner on/off (MIDI CC9). The pedal reports no tuner state, so
             // this shows what the app set; the OLED label reads TUNER ON.
+            // Disabled without a MIDI port (the tuner is the one MIDI use).
             tuner-btn := HwButton {
                 width: 26px;
                 height: 26px;
                 radius: 5px;
+                enabled: root.midi-available;
                 checked: root.tuner-active;
                 clicked => {
                     root.tuner-active = !root.tuner-active;

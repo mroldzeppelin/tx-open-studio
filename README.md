@@ -9,7 +9,7 @@ An unofficial Linux desktop editor for the IK Multimedia TONEX Pedal: browse and
 
 ![TX Open Studio](docs/screenshot-main.png)
 
-TX Open Studio is written in Rust with the [Slint](https://slint.dev) UI toolkit. It talks to the pedal over the single USB cable, which carries a USB-MIDI port and a USB serial (CDC-ACM) port. It does not replace IK Multimedia's TONEX software. It covers the day-to-day tasks of choosing a preset and tweaking it from the desk.
+TX Open Studio is written in Rust with the [Slint](https://slint.dev) UI toolkit. It talks to the pedal over the single USB cable, which carries a USB serial (CDC-ACM) port and a USB-MIDI port: everything goes over serial; MIDI is used only for the tuner toggle. It does not replace IK Multimedia's TONEX software. It covers the day-to-day tasks of choosing a preset and tweaking it from the desk.
 
 ## Features
 
@@ -18,7 +18,7 @@ TX Open Studio is written in Rust with the [Slint](https://slint.dev) UI toolkit
 - Lists all 150 presets with the names and "character" tags (CLEAN, DRIVE, STOMP - OVERDRIVE, ...) read from the pedal, labelled by bank and slot the way the pedal's display shows them (for example `46C`).
 - Search field: every word you type must match the preset id, bank, slot, name or character (`46c`, `bank 14`, `clean`, `dg solo`). Escape clears the search.
 - Keyboard navigation: Left/Right step through presets. In the search field, Down moves into the list. In the list, Up/Down move the highlight and Enter selects the preset.
-- Preset switching over USB-MIDI (Bank Select CC0 + Program Change, on whatever MIDI channel the pedal is set to — the app reads it from the pedal).
+- Preset switching over USB serial (the same select message IK's editor uses).
 - When you change presets with the footswitches, the app follows.
 - **Rename presets** on the pedal: right-click a preset in the list → Rename, edit inline, Enter or ✓ to write it.
 - The list's numbering follows the pedal's **Naming** setting (Bank+Name `46C`, 0-based `PC 083`, or names only) — change it on either side and both displays switch.
@@ -45,7 +45,7 @@ Other details:
 - Knobs are dragged vertically. Double-click a knob to reset it to its default value.
 - An **EDITED** indicator shows when the live state differs from the preset as last loaded.
 - **Save edits** to the active preset: hold the floppy button (top right) for 1 s — an amber fill rises as a guard against misclicks. The app writes the preset and verifies it by reading it back.
-- Tuner on/off button (sent as MIDI CC 9).
+- Tuner on/off button (sent as MIDI CC 9 — the only MIDI message the app uses; without a MIDI port the button is disabled).
 - Auto-reconnect: unplug the pedal or power-cycle it and the app shows RECONNECTING, polls every 2 seconds, and resyncs everything (current preset, names, parameters, globals) when it comes back. The status bar also has a manual reconnect button.
 
 ![Amp tab](docs/screenshot-amp.png)
@@ -122,9 +122,9 @@ cargo install cargo-generate-rpm && cargo build --release && cargo generate-rpm
 
 The packages install the binary, the udev rule (to `/usr/lib/udev/rules.d/`), the desktop entry and the icons, and they reload udev on install.
 
-### udev rule (required for editing)
+### udev rule (required)
 
-The serial port (`/dev/ttyACM*`) is not accessible to normal users by default. Without access, preset names, live editing and two-way sync do not work, and the status bar shows **NO ACCESS TO /dev/ttyACM0 — INSTALL THE UDEV RULE**. The packages and `install.sh` install the rule automatically. To install it by hand:
+The serial port (`/dev/ttyACM*`) is not accessible to normal users by default. The app controls the pedal over serial, so without access nothing works (there is no MIDI-only fallback), and the status bar shows **NO ACCESS TO /dev/ttyACM0 — INSTALL THE UDEV RULE**. The packages and `install.sh` install the rule automatically. To install it by hand:
 
 ```sh
 sudo cp packaging/70-tonex-pedal.rules /etc/udev/rules.d/
@@ -147,8 +147,8 @@ The desktop entry runs `tx-open-studio`, so the binary has to be on your `PATH` 
 
 ## Usage notes
 
-- Connect the pedal over USB and start the app. No configuration is needed. The app connects to the first MIDI output whose name contains "TONEX" and to the `/dev/ttyACM*` port whose USB vendor is IK Multimedia (`1963`).
-- The app reads the pedal's MIDI channel over serial and sends on it, so any channel works. Before the first read (or if the serial side is down, for example without the udev rule) it falls back to **channel 1**.
+- Connect the pedal over USB and start the app. No configuration is needed. The app connects to the `/dev/ttyACM*` port whose USB vendor is IK Multimedia (`1963`) and, for the tuner toggle only, to the first MIDI output whose name contains "TONEX". "TONEX PEDAL CONNECTED" means the serial link; MIDI missing only disables the tuner button.
+- The tuner CC goes out on the pedal's MIDI channel, read over serial (channel 1 until then).
 - Run with `TX_DEBUG_SERIAL=1` to log unhandled serial frames as hex on stderr. This is useful for protocol work and bug reports:
 
   ```sh

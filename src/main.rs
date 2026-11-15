@@ -133,9 +133,15 @@ enum LinkStatus {
 }
 
 impl LinkState {
-    /// Fully connected (or the serial handshake is still running).
+    /// Connected = the serial link is up (or its handshake is running).
+    /// MIDI is only used for the tuner and doesn't count.
     fn healthy(&self) -> bool {
-        self.midi && self.serial != SerialLink::Down
+        self.serial != SerialLink::Down
+    }
+
+    /// Anything to reconnect: serial, or MIDI for the tuner.
+    fn wants_poll(&self) -> bool {
+        !self.healthy() || !self.midi
     }
 
     fn status(&self) -> LinkStatus {
@@ -310,12 +316,6 @@ impl MidiEngine {
         status_byte(kind, self.channel.load(Ordering::Relaxed))
     }
 
-    /// Sends Bank Select (CC0) + Program Change on the pedal's channel.
-    fn send_preset(&self, preset_num: i32) -> Result<(), String> {
-        let (bank, pc) = bank_and_pc(preset_num);
-        self.send_all(&[&[self.status(0xB0), 0x00, bank], &[self.status(0xC0), pc]])
-    }
-
     /// Sends a Control Change on the pedal's channel.
     fn send_cc(&self, cc: u8, value: u8) -> Result<(), String> {
         self.send_all(&[&[self.status(0xB0), cc & 0x7F, value & 0x7F]])
@@ -327,9 +327,6 @@ impl MidiEngine {
 /// toggles made on the pedal itself, so the UI shows the state we set.
 const TUNER_CC: u8 = 9;
 
-/// Tap tempo: CC10, value 127 per tap (community TouchOSC
-/// template); the pedal derives the tempo from the tap intervals.
-const TAP_TEMPO_CC: u8 = 10;
 /// A longer gap starts a new tap sequence.
 const TAP_RESET: Duration = Duration::from_millis(2500);
 /// Taps closer than this are ignored (contact bounce, key repeat); 150 ms
@@ -382,9 +379,35 @@ impl TapTempo {
     }
 }
 
-/// After the last tap of a burst, the globals are read once more to show
-/// the tempo the pedal actually computed.
+/// After the last tap of a burst, the BPM is written once and the globals
+/// read once more to show the tempo the pedal took.
 const TAP_REREAD_DELAY: Duration = Duration::from_millis(500);
+
+/// Global-control id of the tempo (see GLOBAL_CONTROLS).
+const GLOBAL_TEMPO_ID: i32 = 5;
+
+/// The tempo estimate of a tap burst, written once when the burst ends.
+#[derive(Debug, Default)]
+struct TapBurst {
+    pending: Option<f32>,
+}
+
+impl TapBurst {
+    /// A tap gave a new estimate.
+    fn tap(&mut self, bpm: f32) {
+        self.pending = Some(bpm);
+    }
+
+    /// The burst is over: its latest estimate, once.
+    fn flush(&mut self) -> Option<f32> {
+        self.pending.take()
+    }
+}
+
+/// An amp knob value as written: the UI's 0.1 steps, 0..10.
+fn amp_knob_value(v: f32) -> f32 {
+    ((v * 10.0).round() / 10.0).clamp(0.0, 10.0)
+}
 
 /// A pedal-wide setting the GLOBAL tab edits: `id` is the `global-changed`
 /// id in app.slint, `index` the global (PROTOCOL.md §4.5).
@@ -482,48 +505,18 @@ fn tuner_cc_value(on: bool) -> u8 {
     }
 }
 
-/// MIDI CC number of each amp knob on the TONEX Pedal (big floor unit).
-///
-/// Source: ThibaultDucray/TonexPedal-TouchOSC-Template v4.3
-/// (`ToneX-controler-4-3-1.tosc`, controls radialGain=102,
-/// radialModelVolume=103, radialPresence=106, radialDepth=107, fEqBass=23,
-/// fEqMid=25, fEqTreble=28), which follows the pedal's MIDI implementation
-/// chart (post Nov-2024 firmware). Every one of them sends the control's
-/// 0..1 position scaled linearly to CC value 0..127; the pedal shows these
-/// params as 0..10, so the mapping is linear: cc = round(v / 10 * 127).
-/// Verified on hardware. Amp on/off has no CC; it is written over serial.
-fn knob_cc(knob: AmpKnob) -> u8 {
-    match knob {
-        AmpKnob::Gain => 102,
-        AmpKnob::Volume => 103,
-        AmpKnob::Presence => 106,
-        AmpKnob::Depth => 107,
-        AmpKnob::Bass => 23,
-        AmpKnob::Mid => 25,
-        AmpKnob::Treble => 28,
-    }
-}
-
 /// UI knob id (`amp-param-changed` in app.slint) → knob.
 fn knob_from_id(id: i32) -> Option<AmpKnob> {
     usize::try_from(id).ok().and_then(|i| AmpKnob::ALL.get(i).copied())
-}
-
-/// UI knob value (0..10, 0.1 steps) → CC value 0..127.
-fn knob_to_cc(v: f32) -> u8 {
-    let v = (v * 10.0).round() / 10.0;
-    (v.clamp(0.0, 10.0) / 10.0 * 127.0).round() as u8
 }
 
 /// After we change a value, pedal reports for it are ignored this long, so
 /// late echoes of our own changes don't yank the control back.
 const ECHO_GUARD: Duration = Duration::from_millis(600);
 
-/// Bookkeeping for two-way amp sync: last CC sent per knob (to skip
-/// redundant sends) and when we last changed each control.
+/// Bookkeeping for two-way amp sync: when we last changed each control.
 #[derive(Default)]
 struct AmpSync {
-    last_cc: [Option<u8>; 7],
     knob_touched: [Option<Instant>; 7],
     enable_touched: Option<Instant>,
     /// When the user last changed the preset volume (echo guard).
@@ -563,11 +556,6 @@ fn set_knob(ui: &AppWindow, knob: AmpKnob, v: f32) {
 
 fn clamp_preset(p: i32) -> i32 {
     p.clamp(MIN_PRESET, MAX_PRESET)
-}
-
-fn bank_and_pc(preset_num: i32) -> (u8, u8) {
-    let idx = clamp_preset(preset_num) - 1;
-    ((idx / 128) as u8, (idx % 128) as u8)
 }
 
 /// Preset names and characters read from the pedal over USB serial
@@ -752,6 +740,10 @@ fn cab_source_text(cab: &tonex_serial::CabSource, amp: Option<&tonex_serial::Amp
     }
 }
 
+/// How long after our own preset select the pedal's summary push for that
+/// preset is taken as its echo.
+const SELECT_ECHO_GUARD: Duration = Duration::from_secs(2);
+
 /// How long after a rename a pushed preset change for the renamed preset
 /// is taken as an echo of the write, not as a footswitch change.
 const RENAME_ECHO_GUARD: Duration = Duration::from_secs(3);
@@ -814,9 +806,26 @@ fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
 /// array. The baseline is reset on preset load (`AmpSync::clear`, footswitch
 /// push) and taken from the next read. Limit: edits made on the pedal before
 /// that read (e.g. while the app wasn't running) become part of the baseline.
-fn record_value(ui: &AppWindow, amp: &mut AmpSync, index: usize, value: f32) {
+fn record_value(ui: &AppWindow, amp: &mut AmpSync, index: usize, value: f32, cause: &str) {
     amp.diff.set(index, value);
-    ui.set_preset_dirty(amp.diff.dirty());
+    update_dirty(ui, amp, cause);
+}
+
+/// Shows the EDITED state. With `TX_DEBUG_SERIAL=1`, logs what turned it on
+/// (the event `cause` and the first differing value).
+fn update_dirty(ui: &AppWindow, amp: &AmpSync, cause: &str) {
+    let dirty = amp.diff.dirty();
+    if dirty && !ui.get_preset_dirty() && tonex_serial::debug_enabled() {
+        let what = amp.diff.first_difference().unwrap_or_else(|| "?".into());
+        eprintln!("TONEX: EDITED by {cause}: {what}");
+    }
+    ui.set_preset_dirty(dirty);
+}
+
+/// The pedal's summary push for `preset_idx` right after our own select of
+/// it (see SELECT_ECHO_GUARD).
+fn is_select_echo(echo: Option<(u8, Instant)>, preset_idx: u8, now: Instant) -> bool {
+    echo.is_some_and(|(i, t)| i == preset_idx && now.saturating_duration_since(t) < SELECT_ECHO_GUARD)
 }
 
 /// State shared between the UI callbacks and the serial event handler
@@ -836,6 +845,9 @@ struct SyncCtx {
     /// Last rename (0-based preset index, when it finished), see
     /// `RENAME_ECHO_GUARD`.
     rename_echo: Arc<Mutex<Option<(u8, Instant)>>>,
+    /// Last preset we selected (0-based index, when): the pedal pushes a
+    /// summary after a select, which must not count as a footswitch load.
+    select_echo: Arc<Mutex<Option<(u8, Instant)>>>,
 }
 
 impl SyncCtx {
@@ -845,6 +857,33 @@ impl SyncCtx {
 
     fn global_guard(&self) -> MutexGuard<'_, GlobalGuard> {
         self.global_guard.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Writes global control `id` (clamped/rounded): blob patch over
+    /// serial, echo guard; the MIDI channel also switches the tuner's
+    /// channel. On failure the globals are re-read to show the pedal's value.
+    fn write_global(&self, _ui: &AppWindow, id: i32, value: f32) {
+        let Some(c) = global_control(id) else {
+            eprintln!("unknown global id {id}");
+            return;
+        };
+        let value = c.sanitize(value);
+        match self.with_serial(|p| p.set_global(c.index, value)) {
+            Ok(()) => {
+                self.global_guard().touch(c.index, Instant::now());
+                if c.index == tonex_serial::G_MIDI_CHANNEL {
+                    if let Some(n) = channel_nibble(value) {
+                        self.midi.set_channel(n);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("TONEX global write: {e}");
+                if let Err(e) = self.with_serial(|p| p.request_globals()) {
+                    eprintln!("TONEX global config request failed: {e}");
+                }
+            }
+        }
     }
 
     /// The one place a globals read reaches the UI (startup, reconnect,
@@ -976,6 +1015,7 @@ impl SyncCtx {
     }
 
     fn show_link(&self, ui: &AppWindow) {
+        ui.set_midi_available(self.link().midi);
         let status = self.link().status();
         ui.set_connected(status == LinkStatus::Connected);
         ui.set_reconnecting(status == LinkStatus::Reconnecting);
@@ -1046,11 +1086,9 @@ impl SyncCtx {
         if ui.get_knob_active() {
             return;
         }
-        let mut amp = self.amp();
         let values = [p.gain, p.volume, p.presence, p.depth, p.bass, p.mid, p.treble];
         for (knob, v) in AmpKnob::ALL.into_iter().zip(values) {
             set_knob(ui, knob, v);
-            amp.last_cc[knob as usize] = Some(knob_to_cc(v));
         }
         ui.set_amp_enabled(p.amp_enabled);
     }
@@ -1076,7 +1114,8 @@ impl SyncCtx {
                     Some(_) => amp.diff.load_level(value),
                     None => amp.diff.set_level(value),
                 }
-                ui.set_preset_dirty(amp.diff.dirty());
+                let cause = if preset_idx.is_some() { "preset volume read at load" } else { "preset volume push" };
+                update_dirty(ui, &amp, cause);
                 let recent = amp.level_touched.is_some_and(|t| t.elapsed() < ECHO_GUARD);
                 if !recent && !ui.get_knob_active() {
                     let (min, max) = tonex_serial::PRESET_LEVEL_RANGE;
@@ -1140,7 +1179,7 @@ impl SyncCtx {
                         {
                             let mut amp = self.amp();
                             amp.diff.rebaseline();
-                            ui.set_preset_dirty(amp.diff.dirty());
+                            update_dirty(ui, &amp, "save");
                             fx::set_loaded_defaults(ui, &amp.diff);
                         }
                         self.request_tone_info(ui.get_preset());
@@ -1157,6 +1196,15 @@ impl SyncCtx {
                 let echo = *self.rename_echo.lock().unwrap_or_else(|e| e.into_inner());
                 if preset != ui.get_preset() && echo.is_some_and(|(i, t)| i == preset_idx && t.elapsed() < RENAME_ECHO_GUARD) {
                     return; // echo of our rename write, not a footswitch change
+                }
+                // The summary the pedal pushes after our own select: the
+                // load reads requested with the select cover it.
+                {
+                    let mut sel = self.select_echo.lock().unwrap_or_else(|e| e.into_inner());
+                    if preset == ui.get_preset() && is_select_echo(*sel, preset_idx, Instant::now()) {
+                        *sel = None;
+                        return;
+                    }
                 }
                 if preset != ui.get_preset() {
                     show_preset(ui, &self.names, preset);
@@ -1202,7 +1250,7 @@ impl SyncCtx {
             fx::refresh(ui, &amp.fx, card);
         }
         amp.diff.load(raw);
-        ui.set_preset_dirty(amp.diff.dirty());
+        update_dirty(ui, &amp, "parameter read");
         fx::set_loaded_defaults(ui, &amp.diff);
     }
 
@@ -1215,7 +1263,7 @@ impl SyncCtx {
         match self.with_serial(|p| p.set_param(index, value)) {
             Ok(()) => {
                 amp.fx.wrote(index, value);
-                record_value(ui, &mut amp, index, value);
+                record_value(ui, &mut amp, index, value, "app write");
                 // A new model shows that model's own stored values.
                 if control.is_model() {
                     fx::refresh(ui, &amp.fx, control.card());
@@ -1236,7 +1284,7 @@ impl SyncCtx {
             let mut amp = self.amp();
             // The badge tracks every real value, echoes and parameters the
             // app doesn't show (gate, comp, cab, ...) included.
-            record_value(ui, &mut amp, index, value);
+            record_value(ui, &mut amp, index, value, "pedal push");
             if fx::card_of(index).is_some() {
                 // None = echo of our own recent write: UI already shows it.
                 if let Some(card) = amp.fx.pedal_changed(index, value) {
@@ -1256,12 +1304,11 @@ impl SyncCtx {
             eprintln!("TONEX: param {index} value {value} out of range, ignored");
             return;
         };
-        let mut amp = self.amp();
+        let amp = self.amp();
         if ui.get_knob_active() || amp.knob_recent(knob) {
             return; // our own edit in progress / its echo
         }
         set_knob(ui, knob, v);
-        amp.last_cc[knob as usize] = Some(knob_to_cc(v));
     }
 }
 
@@ -1367,7 +1414,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ctx = ctx.clone();
         reconnect_timer.start(slint::TimerMode::Repeated, RECONNECT_POLL, move || {
             let Some(ui) = ui_weak.upgrade() else { return };
-            if !ctx.link().healthy() {
+            if ctx.link().wants_poll() {
                 ctx.poll(&ui);
             }
         });
@@ -1375,7 +1422,6 @@ fn main() -> Result<(), slint::PlatformError> {
 
     {
         let ui_weak = ui.as_weak();
-        let engine = engine.clone();
         let ctx = ctx.clone();
         ui.on_preset_changed(move |requested| {
             let Some(ui) = ui_weak.upgrade() else { return };
@@ -1383,10 +1429,15 @@ fn main() -> Result<(), slint::PlatformError> {
 
             show_preset(&ui, &ctx.names, preset);
 
-            // The pedal loads the preset's own amp settings.
+            // The pedal loads the preset's own amp settings. Selected over
+            // serial; the load reads below are served after the select.
             ctx.amp().clear();
-            if let Err(e) = engine.send_preset(preset) {
-                ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
+            let idx = (preset - 1) as u8;
+            match ctx.with_serial(|p| p.select_preset(idx)) {
+                Ok(()) => {
+                    *ctx.select_echo.lock().unwrap_or_else(|e| e.into_inner()) = Some((idx, Instant::now()));
+                }
+                Err(e) => eprintln!("TONEX preset select failed: {e}"),
             }
             ctx.request_amp_params(preset);
             ctx.request_preset_level(preset);
@@ -1395,8 +1446,9 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     {
+        // Amp knobs: written over serial (0x0207 section 02) at their
+        // parameter index, like every other knob.
         let ui_weak = ui.as_weak();
-        let engine = engine.clone();
         let ctx = ctx.clone();
         ui.on_amp_param_changed(move |id, value| {
             let Some(ui) = ui_weak.upgrade() else { return };
@@ -1404,63 +1456,61 @@ fn main() -> Result<(), slint::PlatformError> {
                 eprintln!("unknown amp param id {id}");
                 return;
             };
-            let cc_value = knob_to_cc(value);
+            let v = amp_knob_value(value);
             let mut amp = ctx.amp();
             amp.knob_touched[knob as usize] = Some(Instant::now());
-            if amp.last_cc[knob as usize] == Some(cc_value) {
-                return;
-            }
-            match engine.send_cc(knob_cc(knob), cc_value) {
-                Ok(()) => {
-                    amp.last_cc[knob as usize] = Some(cc_value);
-                    let v = (value * 10.0).round() / 10.0;
-                    record_value(&ui, &mut amp, knob.param_index(), v);
-                }
-                Err(e) => {
-                    drop(amp);
-                    ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
-                }
+            match ctx.with_serial(|p| p.set_param(knob.param_index(), v)) {
+                Ok(()) => record_value(&ui, &mut amp, knob.param_index(), v, "app amp knob write"),
+                Err(e) => eprintln!("TONEX {knob:?} write failed: {e}"),
             }
         });
     }
 
     {
+        // Tuner: the only MIDI message left (CC9, on the pedal's channel).
+        // A failure only takes the tuner away; MIDI comes back via the poll.
         let ui_weak = ui.as_weak();
         let engine = engine.clone();
         let ctx = ctx.clone();
         ui.on_tuner_toggled(move |on| {
             let Some(ui) = ui_weak.upgrade() else { return };
             if let Err(e) = engine.send_cc(TUNER_CC, tuner_cc_value(on)) {
+                eprintln!("MIDI tuner send failed: {e}");
                 ui.set_tuner_active(!on);
-                ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
+                ctx.link().midi = false;
+                engine.close();
+                ctx.show_link(&ui);
             }
         });
     }
 
     {
         // Tap tempo: a live control, not a preset parameter, so it never
-        // touches the EDITED state (no record_value).
+        // touches the EDITED state (no record_value). The BPM is written
+        // over serial (global 18), once per burst.
         let ui_weak = ui.as_weak();
-        let engine = engine.clone();
         let ctx = ctx.clone();
         let tap = std::cell::RefCell::new(TapTempo::default());
-        let reread = slint::Timer::default();
+        let burst = std::rc::Rc::new(std::cell::RefCell::new(TapBurst::default()));
+        let flush = slint::Timer::default();
         ui.on_tap_tempo(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
             let TapResult::Counted(bpm) = tap.borrow_mut().tap(Instant::now()) else { return };
-            if let Err(e) = engine.send_cc(TAP_TEMPO_CC, 127) {
-                ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
-                return;
-            }
             // Instant feedback from the taps; the pedal's own value (global
-            // 18) replaces it with the re-read below.
+            // 18) replaces it with the re-read after the write.
             if let Some(bpm) = bpm {
                 ui.set_tempo_bpm((bpm * 10.0).round() / 10.0);
+                burst.borrow_mut().tap(bpm);
             }
-            // Debounced: each tap restarts the timer, so one read follows
-            // the burst.
+            // Debounced: each tap restarts the timer, so one BPM write (the
+            // latest estimate) and one globals read follow the burst.
             let ctx = ctx.clone();
-            reread.start(slint::TimerMode::SingleShot, TAP_REREAD_DELAY, move || {
+            let ui_weak = ui.as_weak();
+            let burst = burst.clone();
+            flush.start(slint::TimerMode::SingleShot, TAP_REREAD_DELAY, move || {
+                if let (Some(bpm), Some(ui)) = (burst.borrow_mut().flush(), ui_weak.upgrade()) {
+                    ctx.write_global(&ui, GLOBAL_TEMPO_ID, bpm);
+                }
                 if let Err(e) = ctx.with_serial(|p| p.request_globals()) {
                     eprintln!("TONEX global config request failed: {e}");
                 }
@@ -1476,7 +1526,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ctx.amp().enable_touched = Some(Instant::now());
             let value = if on { 1.0 } else { 0.0 };
             match ctx.with_serial(|p| p.set_param(tonex_serial::AMP_ENABLE_PARAM, value)) {
-                Ok(()) => record_value(&ui, &mut ctx.amp(), tonex_serial::AMP_ENABLE_PARAM, value),
+                Ok(()) => record_value(&ui, &mut ctx.amp(), tonex_serial::AMP_ENABLE_PARAM, value, "app amp enable write"),
                 Err(e) => {
                     // No CC exists for amp on/off, so serial is the only way.
                     eprintln!("TONEX amp enable write failed: {e}");
@@ -1489,30 +1539,10 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ctx = ctx.clone();
         // Pedal-wide settings: never part of the EDITED state.
+        let ui_weak = ui.as_weak();
         ui.on_global_changed(move |id, value| {
-            let Some(c) = global_control(id) else {
-                eprintln!("unknown global id {id}");
-                return;
-            };
-            let value = c.sanitize(value);
-            match ctx.with_serial(|p| p.set_global(c.index, value)) {
-                Ok(()) => {
-                    ctx.global_guard().touch(c.index, Instant::now());
-                    if c.index == tonex_serial::G_MIDI_CHANNEL {
-                        // From now on everything goes out on the new channel.
-                        if let Some(n) = channel_nibble(value) {
-                            ctx.midi.set_channel(n);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("TONEX global write: {e}");
-                    // Show the pedal's actual value again.
-                    if let Err(e) = ctx.with_serial(|p| p.request_globals()) {
-                        eprintln!("TONEX global config request failed: {e}");
-                    }
-                }
-            }
+            let Some(ui) = ui_weak.upgrade() else { return };
+            ctx.write_global(&ui, id, value);
         });
     }
 
@@ -1528,7 +1558,7 @@ fn main() -> Result<(), slint::PlatformError> {
             match ctx.with_serial(|p| p.set_preset_level(value)) {
                 Ok(()) => {
                     amp.diff.set_level(value);
-                    ui.set_preset_dirty(amp.diff.dirty());
+                    update_dirty(&ui, &amp, "app preset volume write");
                     ui.set_preset_level_known(true);
                 }
                 Err(e) => eprintln!("TONEX preset volume write failed: {e}"),
@@ -1589,21 +1619,49 @@ mod tests {
     }
 
     #[test]
-    fn knob_maps_linearly_to_cc() {
-        assert_eq!(knob_to_cc(0.0), 0);
-        assert_eq!(knob_to_cc(5.0), 64); // 63.5 rounds up
-        assert_eq!(knob_to_cc(10.0), 127);
-        assert_eq!(knob_to_cc(6.9), 88);
-        assert_eq!(knob_to_cc(-1.0), 0);
-        assert_eq!(knob_to_cc(11.0), 127);
+    fn amp_knob_writes_go_to_their_param_indices() {
+        // UI ids 0..6: gain, volume, presence, depth, bass, mid, treble.
+        let indices: Vec<usize> = (0..7).filter_map(knob_from_id).map(|k| k.param_index()).collect();
+        assert_eq!(indices, [20, 21, 34, 35, 11, 13, 16]);
+        assert_eq!(knob_from_id(7), None);
+        assert_eq!(knob_from_id(-1), None);
+        // Written as the UI's 0.1 steps, clamped to 0..10.
+        assert_eq!(amp_knob_value(6.94), 6.9);
+        assert_eq!(amp_knob_value(-1.0), 0.0);
+        assert_eq!(amp_knob_value(10.4), 10.0);
     }
 
     #[test]
-    fn amp_param_ids_match_ui_order() {
-        let ccs: Vec<u8> = (0..7).filter_map(knob_from_id).map(knob_cc).collect();
-        assert_eq!(ccs, [102, 103, 106, 107, 23, 25, 28]);
-        assert_eq!(knob_from_id(7), None);
-        assert_eq!(knob_from_id(-1), None);
+    fn tap_burst_writes_once() {
+        let mut b = TapBurst::default();
+        assert_eq!(b.flush(), None, "no estimate, no write");
+        for bpm in [118.0, 121.5, 120.0] {
+            b.tap(bpm);
+        }
+        assert_eq!(b.flush(), Some(120.0), "the burst's latest estimate");
+        assert_eq!(b.flush(), None, "written once");
+        assert_eq!(global_control(GLOBAL_TEMPO_ID).unwrap().index, tonex_serial::G_TEMPO);
+    }
+
+    #[test]
+    fn link_state_with_and_without_midi() {
+        // Connected = serial; MIDI (tuner only) doesn't count.
+        let mut l = LinkState::default();
+        let id = l.serial_starting();
+        assert!(l.serial_connected(id));
+        assert!(l.healthy());
+        assert_eq!(l.status(), LinkStatus::Connected);
+        assert!(l.wants_poll(), "still polling for MIDI (tuner)");
+        l.midi = true;
+        assert!(!l.wants_poll());
+        // MIDI gone again: still connected.
+        l.midi = false;
+        assert_eq!(l.status(), LinkStatus::Connected);
+        // Serial gone: reconnecting, whatever MIDI does.
+        l.midi = true;
+        l.serial_ended(id);
+        assert_eq!(l.status(), LinkStatus::Reconnecting);
+        assert!(l.wants_poll());
     }
 
     #[test]
@@ -1741,18 +1799,7 @@ mod tests {
     fn frequency_labels() {
         // The formatter lives in app.slint; call it through a component on
         // the software renderer (no display needed).
-        use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-        use slint::platform::{Platform, WindowAdapter};
-        use std::rc::Rc;
-        struct Headless(Rc<MinimalSoftwareWindow>);
-        impl Platform for Headless {
-            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-                Ok(self.0.clone())
-            }
-        }
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
-        let _ = slint::platform::set_platform(Box::new(Headless(window)));
-        let ui = AppWindow::new().unwrap();
+        let ui = headless_ui();
         let hz = |v: f32| ui.global::<Format>().invoke_hz(v).to_string();
         assert_eq!(hz(75.0), "75");
         assert_eq!(hz(180.0), "180");
@@ -1879,5 +1926,68 @@ mod tests {
             cab_source_text(&CabSource::Borrowed { name: "51st Hi".into(), based_on: Some("Peavey 5150".into()) }, None),
             "51st Hi · Peavey 5150"
         );
+    }
+
+    /// An AppWindow on Slint's software renderer (no display needed). The
+    /// platform is process-wide: set once, ignored after.
+    fn headless_ui() -> AppWindow {
+        use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+        use slint::platform::{Platform, WindowAdapter};
+        use std::rc::Rc;
+        struct Headless;
+        impl Platform for Headless {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer))
+            }
+        }
+        let _ = slint::platform::set_platform(Box::new(Headless));
+        AppWindow::new().unwrap()
+    }
+
+    #[test]
+    fn select_echo_window() {
+        let t0 = Instant::now();
+        assert!(is_select_echo(Some((42, t0)), 42, t0 + Duration::from_millis(500)));
+        assert!(!is_select_echo(Some((42, t0)), 43, t0), "another preset");
+        assert!(!is_select_echo(Some((42, t0)), 42, t0 + SELECT_ECHO_GUARD), "too late");
+        assert!(!is_select_echo(None, 42, t0));
+    }
+
+    /// Regression: every preset showed EDITED right after loading. A load
+    /// through the real event handlers (parameter read, the load-time
+    /// preset-volume read, the pedal's push echoing our select) must not
+    /// be dirty; a later live change must.
+    #[test]
+    fn load_preset_is_not_dirty() {
+        let ui = headless_ui();
+        let ctx = SyncCtx::default();
+        let preset = 43;
+        let idx = (preset - 1) as u8;
+        ui.set_preset(preset);
+        let mut raw = vec![0.0f32; tonex_serial::PARAM_COUNT];
+        raw[12] = 300.0;
+        raw[15] = 750.0;
+        raw[17] = 2000.0;
+        raw[18] = 1.0;
+        raw[20] = 5.5;
+        raw[22] = 100.0;
+        let params = tonex_serial::AmpParams {
+            gain: 5.5, volume: 4.2, presence: 0.0, depth: 8.4, bass: 4.3, mid: 8.1, treble: 2.6, amp_enabled: true,
+        };
+        ctx.handle_event(&ui, Event::AmpParams { preset_idx: idx, result: Ok(params), raw: raw.clone() });
+        assert!(!ui.get_preset_dirty(), "after the parameter read");
+        ctx.handle_event(&ui, Event::PresetLevel { preset_idx: Some(idx), value: 7.5 });
+        assert!(!ui.get_preset_dirty(), "after the load-time preset volume read");
+        assert!(ui.get_preset_level_known());
+        assert_eq!(ui.get_preset_level(), 7.5);
+        // The pedal's summary push right after our own select: ignored.
+        *ctx.select_echo.lock().unwrap() = Some((idx, Instant::now()));
+        let mut pushed = raw.clone();
+        pushed[20] = 9.0;
+        ctx.handle_event(&ui, Event::PresetChanged { preset_idx: idx, params: Some(params), raw: pushed });
+        assert!(!ui.get_preset_dirty(), "after the select echo");
+        // A later live change (pedal push) is an edit.
+        ctx.handle_event(&ui, Event::PresetLevel { preset_idx: None, value: 6.0 });
+        assert!(ui.get_preset_dirty(), "a live change marks EDITED");
     }
 }

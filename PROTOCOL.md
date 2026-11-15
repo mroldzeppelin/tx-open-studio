@@ -312,13 +312,17 @@ Hardware note, still true: for a parameter edit, the pedal's own quick-save chan
 
 The preset volume is not part of the preset data written here; a save keeps the volume stored on the pedal.
 
-### 4.3.2 Preset select over serial (not used by the app)
+### 4.3.2 Preset select over serial
 
-Seen in the official editor's traffic; the app selects presets over MIDI (§7):
+From the official editor's traffic, verified on hardware (switched 132 → 131 → 132); the app selects presets this way:
 
 ```
-B9 03 81 01 02 82 05 00 80 10 03 | B9 02 <idx> 00
+B9 03 81 01 02 82 <len LE> 80 10 03 | B9 02 <idx> 00
+idx 5:    B9 03 81 01 02 82 04 00 80 10 03 | B9 02 05 00
+idx 142:  B9 03 81 01 02 82 05 00 80 10 03 | B9 02 80 8E 00
 ```
+
+`<idx>` in the value encoding (§3); the size field is the body length (4, or 5 with `80 xx`). The pedal pushes a `0x0204` summary of the selected preset afterwards; the app ignores that push for 2 s after its own select (its load reads cover it) so it isn't taken as a footswitch change.
 
 ### 4.4 Parameter change `0x0207`
 
@@ -567,7 +571,7 @@ Set `TX_DEBUG_SERIAL=1` to make the app log unhandled frames as hex on stderr.
 
 ## 7. MIDI control (USB-MIDI port, same cable)
 
-The pedal listens on the channel set in GLOBAL SETUP (global idx 7, §4.5, default 1); the app reads it over serial and sends on it. Source: `src/main.rs` (`send_preset`, `bank_and_pc`, `knob_cc`, `TUNER_CC`).
+Reference: the pedal still supports this, but the app now does everything over serial (preset select §4.3.2, amp knobs as `0x0207` section `02`, tap tempo as global 18) and uses MIDI **only for the tuner toggle** (CC 9). The pedal listens on the channel set in GLOBAL SETUP (global idx 7, §4.5, default 1); the app reads it over serial and sends the tuner CC on it. Source: `src/main.rs` (`TUNER_CC`).
 
 ### Preset select
 

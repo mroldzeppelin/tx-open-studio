@@ -1,0 +1,252 @@
+import { HwButton, ModuleTitle, StateButton } from "../components/buttons.slint";
+import { GlobalGroup } from "../components/global-group.slint";
+import { Knob } from "../components/knob.slint";
+import { Stepper } from "../components/stepper.slint";
+import { Theme } from "../theme.slint";
+
+// GLOBAL: levels row, then TUNER | TEMPO, then DEVICE |
+// MIDI. All pedal-wide and never part of the EDITED state.
+export component GlobalTab inherits Rectangle {
+    callback focus-main();
+    in property <length> slot;
+    in-out property <float> pedal-volume;
+    in property <bool> pedal-volume-known;
+    callback pedal-volume-changed(float);
+    in property <bool> globals-known;
+    in-out property <float> global-trim;
+    callback global-changed(int, float);
+    in-out property <float> global-volume;
+    in-out property <float> global-interface;
+    in-out property <int> tuner-mode;
+    in-out property <float> tuner-ref;
+    in-out property <int> flash;
+    callback tap-tempo;
+    in-out property <float> tempo-bpm;
+    in-out property <int> tempo-mode;
+    in-out property <bool> cab-sim;
+    in-out property <int> naming;
+    in-out property <int> midi-channel-index;
+    in-out property <bool> midi-thru;
+    in-out property <int> midi-clock;
+
+        VerticalLayout {
+            spacing: 10px;
+            HorizontalLayout {
+                height: 24px;
+                ModuleTitle { text: "GLOBAL"; }
+            }
+
+            // Levels.
+            HorizontalLayout {
+                alignment: center;
+                // The pedal's front-panel VOLUME knob (master volume,
+                // 0..10, persistent across presets; serial section 03,
+                // see src/protocol). Dimmed until read at connect.
+                Knob {
+                    width: root.slot;
+                    label: "Volume";
+                    size: 52px;
+                    min-value: 0;
+                    max-value: 10;
+                    step: 0.1;
+                    default-value: 5;
+                    value <=> root.pedal-volume;
+                    opacity: root.pedal-volume-known ? 1 : 0.5;
+                    edited(v) => { root.pedal-volume-changed(v); }
+                }
+                Knob {
+                    width: root.slot;
+                    label: "In Trim";
+                    size: 52px;
+                    enabled: root.globals-known;
+                    min-value: -15;
+                    max-value: 15;
+                    step: 0.1;
+                    default-value: 0;
+                    unit: " dB";
+                    value <=> root.global-trim;
+                    edited(v) => { root.global-changed(0, v); }
+                }
+                Knob {
+                    width: root.slot;
+                    label: "Master";
+                    size: 52px;
+                    enabled: root.globals-known;
+                    min-value: -40;
+                    max-value: 3;
+                    step: 0.1;
+                    default-value: 0;
+                    unit: " dB";
+                    value <=> root.global-volume;
+                    edited(v) => { root.global-changed(1, v); }
+                }
+                // Interface (USB) volume, -40..+3 dB (pedal manual).
+                Knob {
+                    width: root.slot;
+                    label: "Interface";
+                    size: 52px;
+                    enabled: root.globals-known;
+                    min-value: -40;
+                    max-value: 3;
+                    step: 1;
+                    decimals: 0;
+                    default-value: -10;
+                    unit: " dB";
+                    value <=> root.global-interface;
+                    edited(v) => { root.global-changed(2, v); }
+                }
+            }
+
+            // Both group rows split 42 / 58 so their seams line
+            // up (MIDI needs ~256 px at the 540 px minimum).
+            HorizontalLayout {
+                spacing: 8px;
+                GlobalGroup {
+                    width: (parent.width - 8px) * 0.42;
+                    title: "TUNER";
+                    VerticalLayout {
+                        alignment: center;
+                        Stepper {
+                            enabled: root.globals-known;
+                            value-width: 44px; // "Through"
+                            height: 24px;
+                            options: ["Off", "Through", "Muted"];
+                            index <=> root.tuner-mode;
+                            picked(i) => { root.global-changed(3, i); }
+                        }
+                    }
+                    Knob {
+                        width: 52px;
+                        horizontal-stretch: 0;
+                        label: "Ref";
+                        size: 30px;
+                        enabled: root.globals-known;
+                        min-value: 427;
+                        max-value: 453;
+                        step: 1;
+                        decimals: 0;
+                        default-value: 440;
+                        unit: " Hz";
+                        value <=> root.tuner-ref;
+                        edited(v) => { root.global-changed(4, v); }
+                    }
+                }
+                // Tap tempo: MIDI CC10 (also key T). The BPM is
+                // the pedal's (global 18), re-read after taps.
+                GlobalGroup {
+                    horizontal-stretch: 1;
+                    title: "TEMPO";
+                    VerticalLayout {
+                        alignment: center;
+                        tap-btn := HwButton {
+                            width: 44px;
+                            height: 32px;
+                            checked: root.flash == 2;
+                            clicked => {
+                                root.tap-tempo();
+                                root.focus-main();
+                            }
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: "TAP";
+                                color: tap-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink;
+                                font-size: 10px;
+                                font-weight: 600;
+                                font-family: Theme.mono-font;
+                                letter-spacing: 1.2px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                    Knob {
+                        width: 56px;
+                        horizontal-stretch: 0;
+                        label: "BPM";
+                        size: 30px;
+                        enabled: root.globals-known;
+                        min-value: 30;
+                        max-value: 300;
+                        step: 0.5;
+                        decimals: 1;
+                        default-value: 120;
+                        value <=> root.tempo-bpm;
+                        edited(v) => { root.global-changed(5, v); }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Stepper {
+                            enabled: root.globals-known;
+                            value-width: 38px; // "Global"
+                            height: 24px;
+                            options: ["Global", "Preset"];
+                            index <=> root.tempo-mode;
+                            picked(i) => { root.global-changed(6, i); }
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                // Pedal-wide cab sim kill switch, and how the
+                // pedal's own display titles presets (doesn't
+                // change this app's list).
+                GlobalGroup {
+                    width: (parent.width - 8px) * 0.42;
+                    title: "DEVICE";
+                    StateButton {
+                        horizontal-stretch: 0;
+                        width: 64px;
+                        height: 24px;
+                        enabled: root.globals-known;
+                        on <=> root.cab-sim;
+                        on-text: "Cab On";
+                        off-text: "Cab Off";
+                        toggled(on) => { root.global-changed(7, on ? 1 : 0); }
+                    }
+                    Stepper {
+                        enabled: root.globals-known;
+                        value-width: 58px; // "Bank+Name"
+                        height: 24px;
+                        options: ["Name", "PC+Name", "Bank+Name"];
+                        index <=> root.naming;
+                        picked(i) => { root.global-changed(11, i); }
+                    }
+                }
+                // Channel used for every MIDI message the app sends.
+                GlobalGroup {
+                    horizontal-stretch: 1;
+                    title: "MIDI";
+                    Stepper {
+                        enabled: root.globals-known;
+                        value-width: 34px; // "Ch 16"
+                        height: 24px;
+                        options: ["Ch 1", "Ch 2", "Ch 3", "Ch 4", "Ch 5", "Ch 6", "Ch 7", "Ch 8",
+                            "Ch 9", "Ch 10", "Ch 11", "Ch 12", "Ch 13", "Ch 14", "Ch 15", "Ch 16"];
+                        index <=> root.midi-channel-index;
+                        picked(i) => { root.global-changed(8, i + 1); }
+                    }
+                    StateButton {
+                        horizontal-stretch: 0;
+                        width: 48px;
+                        height: 24px;
+                        enabled: root.globals-known;
+                        on <=> root.midi-thru;
+                        on-text: "Thru";
+                        off-text: "Thru";
+                        toggled(on) => { root.global-changed(9, on ? 1 : 0); }
+                    }
+                    Stepper {
+                        enabled: root.globals-known;
+                        value-width: 58px; // "Slave USB"
+                        height: 24px;
+                        options: ["Clock Off", "Master", "Slave Mix", "Slave USB"];
+                        index <=> root.midi-clock;
+                        picked(i) => { root.global-changed(10, i); }
+                    }
+                }
+            }
+        }
+}

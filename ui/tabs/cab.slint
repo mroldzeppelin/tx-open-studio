@@ -1,0 +1,160 @@
+import { ModuleTitle, OnOffChip } from "../components/buttons.slint";
+import { Knob } from "../components/knob.slint";
+import { MicPad } from "../components/mic-pad.slint";
+import { Stepper } from "../components/stepper.slint";
+import { Theme } from "../theme.slint";
+
+// CAB. The chip switches the cab off (type 2) or back to the
+// last non-off type; VIR controls are active only in VIR mode
+// (dimmed otherwise, layout unchanged).
+export component CabTab inherits Rectangle {
+    in-out property <int> cab-type;
+    in property <string> cab-source-text;
+    in property <int> cab-slot-type;
+    callback fx-changed(int, float);
+    in-out property <bool> cab-on;
+    in-out property <int> cab-last-on;
+    in property <[string]> cab-model-names;
+    in-out property <int> cab-model;
+    in-out property <int> cab-mic1;
+    in-out property <int> cab-mic2;
+    in-out property <float> cab-reso;
+    in-out property <float> cab-blend;
+    in-out property <float> cab-mic1-x;
+    in-out property <float> cab-mic1-z;
+    in-out property <float> cab-mic2-x;
+    in-out property <float> cab-mic2-z;
+    in property <float> cab-mic1-x-default;
+    in property <float> cab-mic1-z-default;
+    in property <float> cab-mic2-x-default;
+    in property <float> cab-mic2-z-default;
+
+        property <bool> vir: root.cab-type == 1;
+
+        VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout {
+                height: 24px;
+                spacing: 6px;
+                ModuleTitle {
+                    horizontal-stretch: 0;
+                    text: "CABINET";
+                }
+                // What the preset's cab slot holds; dimmed while
+                // VIR or Off is selected (it plays when switched
+                // back to the slot option).
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    text: root.cab-source-text;
+                    color: Theme.muted;
+                    opacity: root.cab-type == 0 ? 1 : 0.5;
+                    font-size: 10px;
+                    font-family: Theme.mono-font;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+                // Option 0 is the preset's cab slot, named after
+                // what it holds.
+                Stepper {
+                    value-width: 36px; // "Model"
+                    height: 24px;
+                    options: [root.cab-slot-type == 3 ? "IR" : root.cab-slot-type == 4 ? "Cab" : "Model", "VIR", "Off"];
+                    index <=> root.cab-type;
+                    picked(i) => { root.fx-changed(50, i); }
+                }
+                OnOffChip {
+                    on <=> root.cab-on;
+                    toggled(on) => {
+                        root.cab-type = on ? root.cab-last-on : 2;
+                        root.fx-changed(50, root.cab-type);
+                    }
+                }
+            }
+            // VIR cab model and mics: too wide for the header.
+            HorizontalLayout {
+                height: 24px;
+                spacing: 6px;
+                alignment: start;
+                Stepper {
+                    enabled: vir;
+                    value-width: 58px; // "412 B8000"
+                    height: 24px;
+                    options: root.cab-model-names;
+                    index <=> root.cab-model;
+                    picked(i) => { root.fx-changed(51, i); }
+                }
+                Stepper {
+                    enabled: vir;
+                    // Mic 1, tinted like its dot on the mic pad.
+                    value-width: 52px; // "Cond 414"
+                    value-color: Theme.accent;
+                    height: 24px;
+                    options: ["Cond 414", "Dyn 57", "Rbn 121"];
+                    list-options: ["Condenser 414", "Dynamic 57", "Ribbon 121"];
+                    index <=> root.cab-mic1;
+                    picked(i) => { root.fx-changed(53, i); }
+                }
+                Stepper {
+                    enabled: vir;
+                    // Mic 2, tinted like its dot on the mic pad.
+                    value-width: 52px; // "Cond 414"
+                    value-color: Theme.mic2;
+                    height: 24px;
+                    options: ["Cond 414", "Dyn 57", "Rbn 121"];
+                    list-options: ["Condenser 414", "Dynamic 57", "Ribbon 121"];
+                    index <=> root.cab-mic2;
+                    picked(i) => { root.fx-changed(56, i); }
+                }
+            }
+            HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: 12px;
+                // Non-positional cab controls.
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 14px;
+                    Knob {
+                        width: 80px;
+                        label: "Reso";
+                        size: 52px;
+                        enabled: vir;
+                        default-value: 0;
+                        value <=> root.cab-reso;
+                        edited(v) => { root.fx-changed(52, v); }
+                    }
+                    Knob {
+                        width: 80px;
+                        label: "Blend";
+                        size: 52px;
+                        enabled: vir;
+                        min-value: -100;
+                        max-value: 100;
+                        step: 1;
+                        decimals: 0;
+                        default-value: 0;
+                        value <=> root.cab-blend;
+                        edited(v) => { root.fx-changed(59, v); }
+                    }
+                }
+                // Mic positions (fx ids 54/55 mic 1 X/Z, 57/58
+                // mic 2 X/Z; same writes as the former knobs).
+                MicPad {
+                    horizontal-stretch: 1;
+                    enabled: vir;
+                    m1x <=> root.cab-mic1-x;
+                    m1z <=> root.cab-mic1-z;
+                    m2x <=> root.cab-mic2-x;
+                    m2z <=> root.cab-mic2-z;
+                    m1x-default: root.cab-mic1-x-default;
+                    m1z-default: root.cab-mic1-z-default;
+                    m2x-default: root.cab-mic2-x-default;
+                    m2z-default: root.cab-mic2-z-default;
+                    edited(which, v) => {
+                        root.fx-changed([54, 55, 57, 58][which], v);
+                    }
+                }
+            }
+        }
+}

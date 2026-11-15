@@ -2,9 +2,9 @@
 
 Unofficial reference for the USB control protocol of the **IK Multimedia TONEX Pedal** (the big floor unit), as implemented and checked against hardware by TX Open Studio.
 
-- Executable spec: [`src/tonex_serial.rs`](src/tonex_serial.rs) (framing, parsing, request builders, tests built from captured frames).
-- Parameter tables: [`src/fx.rs`](src/fx.rs).
-- MIDI side: [`src/main.rs`](src/main.rs).
+- Executable spec: [`src/protocol/`](src/protocol) (framing, parsing, request builders, tests built from captured frames).
+- Parameter tables: [`src/fx/`](src/fx) (`controls.rs`).
+- MIDI side: [`src/midi.rs`](src/midi.rs).
 
 Line anchors below are given by function/constant name; they are the stable reference (line numbers drift as the code changes).
 
@@ -40,7 +40,7 @@ HDLC-like asynchronous framing, no address/control fields.
 | CRC byte order | Little-endian (low byte first). |
 | Bad CRC | Frame dropped silently. |
 
-Reference implementation: `crc16`, `build_frame`, `decode_frame` in `src/tonex_serial.rs`.
+Reference implementation: `crc16`, `build_frame`, `decode_frame` in `src/protocol/framing.rs`.
 
 ```rust
 fn crc16(data: &[u8]) -> u16 {
@@ -310,8 +310,6 @@ Verified on hardware: the live buffer shows unsaved edits (e.g. Gain 7.0) while 
 
 Hardware note, still true: for a parameter edit, the pedal's own quick-save changes only the edited value in the **first** of the body's three parameter arrays (after `BA 03`, three `BA 6D` arrays of 109 × `88` + f32; Gain 5 → 10 changed exactly the 2 bytes of param 20's f32). Arrays 1 and 2 are of unknown meaning.
 
-The preset volume is not part of the preset data written here; a save keeps the volume stored on the pedal.
-
 ### 4.3.2 Preset select over serial
 
 From the official editor's traffic, verified on hardware (switched 132 → 131 → 132); the app selects presets this way:
@@ -336,7 +334,7 @@ B9 03 81 07 02 82 0A 00 80 10 03 | B9 04 <section> 00 <idx> 88 <f32 LE>
 | `section` | `idx` | Target |
 |---|---|---|
 | `02` | 0..108 | Preset parameter array (§5). HW-verified for writes and pushes. |
-| `03` | `00` | Preset volume (0..10). HW-verified (captured while turning PRESET VOLUME). |
+| `03` | `00` | Front-panel **VOLUME** knob (0..10): the pedal's master volume, persistent across presets and not part of the preset data (pedal manual; HW: set to 0, other presets stay silent; read 5.0 on 5 different presets). HW-verified (captured while turning VOLUME). |
 
 Host write examples (`set_param_request`; unit test `set_param_matches_builty_bytes`):
 
@@ -347,11 +345,11 @@ amp enable = 1.0 (idx 18 = 0x12):
 model gain = 7.5 (idx 20 = 0x14):
 7E B9 03 81 07 02 82 0A 00 80 10 03 B9 04 02 00 14 88 00 00 F0 40 DB 29 7E
 
-preset volume = 7.5 (section 03):
+VOLUME = 7.5 (section 03):
 7E B9 03 81 07 02 82 0A 00 80 10 03 B9 04 03 00 00 88 00 00 F0 40 78 FA 7E
 ```
 
-Pedal push captured on hardware while turning PRESET VOLUME (unit test `parses_captured_preset_volume_frames`); note the pedal's literal size and third field:
+Pedal push captured on hardware while turning VOLUME (unit test `parses_captured_volume_frames`); note the pedal's literal size and third field:
 
 ```
 B9 03 81 07 02 0A 02 | B9 04 03 00 00 88 33 33 13 41      9.2
@@ -370,12 +368,12 @@ Seen in the official editor's traffic, verified on hardware:
 
 ```
 B9 03 81 0C 02 82 <len LE> 80 10 03 | B9 03 <section> 00 <idx>
-preset volume:  B9 03 81 0C 02 82 05 00 80 10 03 | B9 03 03 00 00
+VOLUME:         B9 03 81 0C 02 82 05 00 80 10 03 | B9 03 03 00 00
 ```
 
-The size field is the body length. The pedal answers with an ordinary `0x0207` parameter frame (§4.4), for the preset volume `B9 03 81 07 02 0A 02 | B9 04 03 00 00 88 <f32>`, the same frame it pushes when the volume changes. It returns the **live** value (changed live 10 → 9: read 9 while the stored value was 10).
+The size field is the body length. The pedal answers with an ordinary `0x0207` parameter frame (§4.4), for VOLUME `B9 03 81 07 02 0A 02 | B9 04 03 00 00 88 <f32>`, the same frame it pushes when the knob turns. It returns the **live** value.
 
-Caveat: once, a read right after the host's own write returned the previous value (a read 1 s later had the new one). The app therefore uses this read only at preset load and reconnect, never to verify its writes.
+Caveat: once, a read right after the host's own write returned the previous value (a read 1 s later had the new one). The app therefore reads VOLUME only at connect and reconnect (it is pedal-wide; later changes arrive as pushes), never to verify its writes. Reads of live values sent right after a preset select (§4.3.2) wait for the pedal's `0x0204` push confirming the select first.
 
 ### 4.5 Global config `0x0206`
 
@@ -411,7 +409,7 @@ item was changed on the pedal while polling this message and diffing the
 | 8 | MIDI Thru | 0 off · 1 thru | 0 |
 | 9 | Input trim (dB) | -15..15 | 0 |
 | 10 | Main (master) volume (dB) | -40..+3 | 0 |
-| 11 | Interface (USB) volume (dB) | -40(?)..0 | -10 |
+| 11 | Interface (USB) volume (dB) | -40..+3 (pedal manual) | -10 |
 | 12 | Operation mode | 0 Live · 1 Interface | 0 |
 | 13 | USB Out | 0 Stereo · 1 Dual | 0 |
 | 14 | Not identified (always 0 so far) | | 0 |
@@ -437,9 +435,9 @@ Builty sends a stray literal `7E` before the header, a hard-coded size `0x0DF0`,
 
 ## 5. Preset parameter array (109 floats)
 
-Order = Builty `enum TonexParameters` ("defined in the same order as they are sent by the Pedal"), ranges from Builty `tonex_params.c`, as used in `src/tonex_serial.rs` and `src/fx.rs`. Values are stored in display units (dB, ms, %, 0..10, model index) — no scaling.
+Order = Builty `enum TonexParameters` ("defined in the same order as they are sent by the Pedal"), ranges from Builty `tonex_params.c`, as used in `src/protocol/params.rs` and `src/fx/controls.rs`. Values are stored in display units (dB, ms, %, 0..10, model index) — no scaling.
 
-"HW" column: ✔ = value confirmed on hardware (read/write observed, or present in the captured preset-148 dump with a plausible value); blank = from Builty only. The **148** column shows the value at that index in a real dump of preset 148 (`accepts_hardware_dump_preset_148` in `src/fx.rs`; indices 0..39 only).
+"HW" column: ✔ = value confirmed on hardware (read/write observed, or present in the captured preset-148 dump with a plausible value); blank = from Builty only. The **148** column shows the value at that index in a real dump of preset 148 (`accepts_hardware_dump_preset_148` in `src/fx/mirror.rs`; indices 0..39 only).
 
 ### Noise gate, compressor (0–9)
 
@@ -541,14 +539,15 @@ Digital = 97–102, Tape = 103–108.
 
 Time signature (delay and modulation), 18 values 0..17: `1/32, 1/32 D, 1/32 T, 1/16, …, 1/1 T` (three variants — plain, dotted, triplet — per note value from 1/32 to 1/1).
 
-All effect parameters (gate, comp, cab, mod, delay, reverb) are written by the app via `0x0207` section `02`; this path is HW-verified (`src/fx.rs` header).
+All effect parameters (gate, comp, cab, mod, delay, reverb) are written by the app via `0x0207` section `02`; this path is HW-verified (`src/fx/mod.rs` header).
 
 ### Outside the array
 
 | Value | Where |
 |---|---|
-| Preset volume (0..10) | `0x0207` section `03` idx `00`; read with get-parameter `0x020C` (§4.4.1); MIDI CC 12. Not in the summary reply or the preset dump/save data (§9). |
-| Input trim, main volume | Global config `0x0206`, idx 9 / 10 (§4.5) |
+| Front-panel VOLUME (0..10, master, persistent across presets) | `0x0207` section `03` idx `00`; read with get-parameter `0x020C` (§4.4.1); MIDI CC 12. Not preset data: absent from the summary reply and the preset dump/save data. |
+| Input trim, MAIN VOL | Global config `0x0206`, idx 9 / 10 (§4.5). MAIN VOL (-40..+3 dB) is a separate master (analog output) from the VOLUME knob. |
+| Per-preset level | The model volume, param 21 of the array (the AMP tab's Volume); saved with the preset. |
 
 ## 6. Typical session
 
@@ -571,7 +570,7 @@ Set `TX_DEBUG_SERIAL=1` to make the app log unhandled frames as hex on stderr.
 
 ## 7. MIDI control (USB-MIDI port, same cable)
 
-Reference: the pedal still supports this, but the app now does everything over serial (preset select §4.3.2, amp knobs as `0x0207` section `02`, tap tempo as global 18) and uses MIDI **only for the tuner toggle** (CC 9). The pedal listens on the channel set in GLOBAL SETUP (global idx 7, §4.5, default 1); the app reads it over serial and sends the tuner CC on it. Source: `src/main.rs` (`TUNER_CC`).
+Reference: the pedal still supports this, but the app now does everything over serial (preset select §4.3.2, amp knobs as `0x0207` section `02`, tap tempo as global 18) and uses MIDI **only for the tuner toggle** (CC 9). The pedal listens on the channel set in GLOBAL SETUP (global idx 7, §4.5, default 1); the app reads it over serial and sends the tuner CC on it. Source: `src/midi.rs` (`TUNER_CC`).
 
 ### Preset select
 
@@ -602,7 +601,7 @@ On-pedal bank/slot: 3 presets per bank, slots A/B/C; the app shows banks 0-based
 | EQ bass | 23 | 0..127 | HW-verified |
 | EQ mid | 25 | 0..127 | HW-verified |
 | EQ treble | 28 | 0..127 | HW-verified |
-| Preset volume | 12 | 0..127 | per project hardware notes |
+| VOLUME (front-panel master) | 12 | 0..127 | per project hardware notes |
 | Tuner | 9 | 127 = on, 0 = off | HW-verified |
 | Amp enable | — | **no CC exists**; use serial `0x0207` param 18 | |
 
@@ -620,11 +619,10 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 | Topic | Status |
 |---|---|
 | Preset rename | **Supported**: full dump → patch the name buffer → write (`0x0203`, §4.3.1), verified on hardware. |
-| Preset save (parameters) | **Supported** (§4.3.1): the pedal's live edit buffer written back as the stored preset. The preset volume is not part of that data, so a save keeps the stored volume. |
+| Preset save (parameters) | **Supported** (§4.3.1): the pedal's live edit buffer written back as the stored preset. |
 | Preset upload / `.tonex` captures | Not implemented; no upload path is known. |
-| Preset volume | Read at preset load with get-parameter `0x020C` (§4.4.1), which returns the live value. It is not in any identified place of the summary reply or of the preset dump/save data, so a save keeps the stored volume. (The code still range-checks one candidate in the summary, element 0 of the 2nd array in `BA 03`, and logs all candidates under `TX_DEBUG_SERIAL=1` — unverified.) |
-| "Sections" in `0x0207` | Hypothesis: `<section> 00 <idx>` addresses float arrays in document order (Builty's old preset-tempo write `01 00 01`; `02` = 109-array confirmed; `03` = preset volume confirmed). How `03` maps onto the summary's arrays is not established. |
-| Name-group float | `B9 02 [BC 21 …] BA 01 88 <f32>` after the name (from vit3k's capture): meaning unknown; it is **not** the preset volume. |
+| "Sections" in `0x0207` | Hypothesis: `<section> 00 <idx>` addresses float arrays in document order (Builty's old preset-tempo write `01 00 01`; `02` = 109-array confirmed; `03` = front-panel VOLUME confirmed). `03` is not preset data, so it does not map onto the summary's arrays. |
+| Name-group float | `B9 02 [BC 21 …] BA 01 88 <f32>` after the name (from vit3k's capture): meaning unknown; it is **not** the VOLUME knob. |
 | Full dump `full = 01` | Reply type `0x0203` (§4.3); the app reads the header, body start and name buffer only. The model blob (~30 KB) is not decoded; offsets inside it vary between presets. |
 | Header third field | Host request headers from Builty end in `80 10 01` / `80 10 03`. Under the HW-verified one-byte `80` rule that decodes as `0x10` plus a stray 4th item in a 3-item `B9 03` header (it only made sense when `80` was read as u16: `0x0110` / `0x0310`). The pedal accepts these requests anyway; pedal-originated frames use a literal (`10`, `02`) and no stray byte. Meaning unknown. |
 | State `0x0201` list[1] | Second item of the `B9 02` list: `00` and `01` seen; meaning unknown. |
@@ -646,6 +644,6 @@ Built on earlier community protocol work, corrected against captures on a real T
 - **brunothesatellite / tonexpedal** — `index.html` `syncUSB()` (name scan on the big pedal).
 - **ThibaultDucray / TonexPedal-TouchOSC-Template** — MIDI CC numbers.
 
-Corrections from hardware: `80` is a one-byte extended value (not u16); state reply layout (`B9 02` list); amp enable at 18 / cab type at 24; VIR model range; preset volume as `0x0207` section `03`; metadata strings empty except character.
+Corrections from hardware: `80` is a one-byte extended value (not u16); state reply layout (`B9 02` list); amp enable at 18 / cab type at 24; VIR model range; front-panel VOLUME (pedal-wide, not per preset) as `0x0207` section `03`; metadata strings empty except character.
 
 TX Open Studio and this document are not affiliated with or endorsed by IK Multimedia. TONEX is a trademark of IK Multimedia. This document is provided for interoperability purposes.

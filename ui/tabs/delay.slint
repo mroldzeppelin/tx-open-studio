@@ -1,0 +1,134 @@
+import { ModuleTitle, OnOffChip, StateButton } from "../components/buttons.slint";
+import { Knob } from "../components/knob.slint";
+import { Stepper } from "../components/stepper.slint";
+import { Theme } from "../theme.slint";
+
+// DELAY (all values written and read over USB serial).
+export component DelayTab inherits Rectangle {
+    in property <length> slot;
+    in-out property <int> dly-model;
+    callback fx-changed(int, float);
+    in-out property <bool> dly-post;
+    in-out property <bool> dly-sync;
+    in-out property <bool> dly-pingpong;
+    in-out property <bool> dly-enabled;
+    in property <[string]> delay-divisions;
+    in-out property <int> dly-division;
+    in-out property <float> dly-time;
+    in-out property <float> dly-feedback;
+    in-out property <float> dly-mix;
+
+        VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout {
+                height: 24px;
+                spacing: 6px;
+                ModuleTitle { text: "DELAY"; }
+                Stepper {
+                    value-width: 48px; // "Digital"
+                    height: 24px;
+                    options: ["Digital", "Tape"];
+                    index <=> root.dly-model;
+                    picked(i) => { root.fx-changed(2, i); }
+                }
+                StateButton {
+                    horizontal-stretch: 0;
+                    width: 76px;
+                    height: 24px;
+                    on <=> root.dly-post;
+                    on-text: "Post amp";
+                    off-text: "Pre amp";
+                    toggled(on) => { root.fx-changed(1, on ? 1 : 0); }
+                }
+                StateButton {
+                    horizontal-stretch: 0;
+                    width: 70px;
+                    height: 24px;
+                    on <=> root.dly-sync;
+                    on-text: "Sync On";
+                    off-text: "Sync Off";
+                    toggled(on) => { root.fx-changed(3, on ? 1 : 0); }
+                }
+                StateButton {
+                    horizontal-stretch: 0;
+                    width: 76px;
+                    height: 24px;
+                    on <=> root.dly-pingpong;
+                    on-text: "Ping-pong";
+                    off-text: "Normal";
+                    toggled(on) => { root.fx-changed(7, on ? 1 : 0); }
+                }
+                OnOffChip {
+                    on <=> root.dly-enabled;
+                    toggled(on) => { root.fx-changed(0, on ? 1 : 0); }
+                }
+            }
+            VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    // Synced: note division instead of a time in ms.
+                    if root.dly-sync: VerticalLayout {
+                        width: root.slot;
+                        spacing: 4px;
+                        alignment: center;
+                        Text {
+                            text: "Division";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            Stepper {
+                                value-width: 42px; // "1/32 D"
+                                options: root.delay-divisions;
+                                index <=> root.dly-division;
+                                picked(i) => { root.fx-changed(4, i); }
+                            }
+                        }
+                    }
+                    if !root.dly-sync: Knob {
+                        width: root.slot;
+                        label: "Time";
+                        size: 52px;
+                        min-value: 0;
+                        max-value: 1000;
+                        step: 1;
+                        decimals: 0;
+                        unit: " ms";
+                        default-value: 500;
+                        value <=> root.dly-time;
+                        edited(v) => { root.fx-changed(5, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: "Feedback";
+                        size: 52px;
+                        min-value: 0;
+                        max-value: 100;
+                        step: 1;
+                        decimals: 0;
+                        unit: "%";
+                        default-value: 0;
+                        value <=> root.dly-feedback;
+                        edited(v) => { root.fx-changed(6, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: "Mix";
+                        size: 52px;
+                        min-value: 0;
+                        max-value: 100;
+                        step: 1;
+                        decimals: 0;
+                        unit: "%";
+                        default-value: 0;
+                        value <=> root.dly-mix;
+                        edited(v) => { root.fx-changed(8, v); }
+                    }
+                }
+            }
+        }
+}

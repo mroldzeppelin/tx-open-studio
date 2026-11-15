@@ -1,0 +1,142 @@
+import { ModuleTitle, OnOffChip, StateButton } from "../components/buttons.slint";
+import { Knob } from "../components/knob.slint";
+import { Stepper } from "../components/stepper.slint";
+import { Theme } from "../theme.slint";
+
+// MOD; knob set depends on the selected type.
+export component ModTab inherits Rectangle {
+    in property <length> slot;
+    in-out property <int> mod-model;
+    callback fx-changed(int, float);
+    in-out property <bool> mod-post;
+    in-out property <bool> mod-sync;
+    in-out property <bool> mod-enabled;
+    in property <[string]> delay-divisions;
+    in-out property <int> mod-division;
+    in-out property <float> mod-k1;
+    in-out property <float> mod-k2;
+    in-out property <float> mod-k3;
+    in-out property <float> mod-k4;
+
+        // Per-type knob definitions, indexed by mod-model
+        // (Chorus, Tremolo, Phaser, Flanger, Rotary); ranges
+        // must match MOD_KNOBS in src/fx/controls.rs.
+        property <int> m: clamp(root.mod-model, 0, 4);
+        property <bool> has-k4: m == 1 || m == 3 || m == 4;
+
+        VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout {
+                height: 24px;
+                spacing: 6px;
+                ModuleTitle { text: "MODULATION"; }
+                Stepper {
+                    value-width: 48px; // "Tremolo"
+                    height: 24px;
+                    options: ["Chorus", "Tremolo", "Phaser", "Flanger", "Rotary"];
+                    index <=> root.mod-model;
+                    picked(i) => { root.fx-changed(32, i); }
+                }
+                StateButton {
+                    horizontal-stretch: 0;
+                    width: 76px;
+                    height: 24px;
+                    on <=> root.mod-post;
+                    on-text: "Post amp";
+                    off-text: "Pre amp";
+                    toggled(on) => { root.fx-changed(31, on ? 1 : 0); }
+                }
+                StateButton {
+                    horizontal-stretch: 0;
+                    width: 70px;
+                    height: 24px;
+                    on <=> root.mod-sync;
+                    on-text: "Sync On";
+                    off-text: "Sync Off";
+                    toggled(on) => { root.fx-changed(33, on ? 1 : 0); }
+                }
+                OnOffChip {
+                    on <=> root.mod-enabled;
+                    toggled(on) => { root.fx-changed(30, on ? 1 : 0); }
+                }
+            }
+            VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    // Synced: note division instead of rate/speed.
+                    if root.mod-sync: VerticalLayout {
+                        width: root.slot;
+                        spacing: 4px;
+                        alignment: center;
+                        Text {
+                            text: "Division";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            Stepper {
+                                value-width: 42px; // "1/32 D"
+                                options: root.delay-divisions;
+                                index <=> root.mod-division;
+                                picked(i) => { root.fx-changed(34, i); }
+                            }
+                        }
+                    }
+                    if !root.mod-sync: Knob {
+                        width: root.slot;
+                        label: m == 4 ? "Speed" : "Rate";
+                        size: 52px;
+                        min-value: m == 4 ? 0 : 0.1;
+                        max-value: m == 4 ? 400 : 10;
+                        step: m == 4 ? 1 : 0.1;
+                        decimals: m == 4 ? 0 : 1;
+                        unit: m == 4 ? "" : " Hz";
+                        default-value: m == 4 ? 200 : 0.5;
+                        value <=> root.mod-k1;
+                        edited(v) => { root.fx-changed(35, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: ["Depth", "Shape", "Depth", "Depth", "Radius"][m];
+                        size: 52px;
+                        min-value: 0;
+                        max-value: [100, 10, 100, 100, 300][m];
+                        step: m == 1 ? 0.1 : 1;
+                        decimals: m == 1 ? 1 : 0;
+                        unit: m == 1 || m == 4 ? "" : "%";
+                        default-value: m == 4 ? 150 : 0;
+                        value <=> root.mod-k2;
+                        edited(v) => { root.fx-changed(36, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: ["Level", "Spread", "Level", "Feedback", "Spread"][m];
+                        size: 52px;
+                        min-value: 0;
+                        max-value: [10, 100, 10, 100, 100][m];
+                        step: m == 0 || m == 2 ? 0.1 : 1;
+                        decimals: m == 0 || m == 2 ? 1 : 0;
+                        unit: m == 0 || m == 2 ? "" : "%";
+                        default-value: m == 0 || m == 2 ? 5 : 0;
+                        value <=> root.mod-k3;
+                        edited(v) => { root.fx-changed(37, v); }
+                    }
+                    if has-k4: Knob {
+                        width: root.slot;
+                        label: "Level";
+                        size: 52px;
+                        min-value: 0;
+                        max-value: 10;
+                        step: 0.1;
+                        default-value: 5;
+                        value <=> root.mod-k4;
+                        edited(v) => { root.fx-changed(38, v); }
+                    }
+                }
+            }
+        }
+}

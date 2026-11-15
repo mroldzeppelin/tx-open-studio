@@ -1,0 +1,46 @@
+import { Theme } from "../theme.slint";
+
+// A titled group on the GLOBAL tab: thin border with the title sitting on
+// it like a faceplate legend; children are laid out in one row.
+export component GlobalGroup inherits Rectangle {
+    in property <string> title;
+    // Vertical padding (the AMP tab trims it to fit the tray).
+    in property <length> pad-top: 10px;
+    in property <length> pad-bottom: 8px;
+    // space-between pushes the outer children toward the group's edges
+    // (used by the EQ group so Bass/Treble sit near the borders).
+    in property <LayoutAlignment> content-alignment: LayoutAlignment.center;
+
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: 6px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: root.pad-top;
+        padding-bottom: root.pad-bottom;
+        spacing: 6px;
+        alignment: root.content-alignment;
+        @children
+    }
+
+    Rectangle {
+        x: 8px;
+        y: -6px;
+        width: legend.preferred-width + 8px;
+        height: 12px;
+        background: Theme.surface;
+        legend := Text {
+            x: 4px;
+            height: parent.height;
+            text: root.title;
+            color: Theme.muted;
+            font-size: 8px;
+            font-weight: 600;
+            font-family: Theme.mono-font;
+            letter-spacing: 1.2px;
+            vertical-alignment: center;
+        }
+    }
+}

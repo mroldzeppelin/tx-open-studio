@@ -1,0 +1,72 @@
+import { Theme } from "../theme.slint";
+
+// OLED text with a faked glow: four faint copies offset by 1.5px behind
+// the real text (Slint Text has no shadow). Elides like the real text.
+export component GlowText inherits Rectangle {
+    in property <string> text;
+    in property <color> ink;
+    in property <color> glow;
+    in property <float> glow-alpha: 0.15;
+    in property <length> font-size: 12px;
+    in property <int> font-weight: 400;
+    in property <string> font-family;
+    in property <length> letter-spacing: 0px;
+
+    // Soft halo wash behind the crisp glyphs: a radial gradient stretched
+    // over the line (the user's preferred look).
+    halo := Rectangle {
+        visible: root.glow-alpha > 0;
+        x: label.x - label.height;
+        y: label.y + label.height / 2 - self.height / 2;
+        width: label.width + label.height * 2;
+        height: label.height * 2.4;
+        background: @radial-gradient(circle,
+            root.glow.with-alpha(root.glow-alpha) 0%,
+            root.glow.with-alpha(root.glow-alpha * 0.45) 35%,
+            root.glow.with-alpha(0.0) 72%);
+    }
+
+    HorizontalLayout {
+        label := Text {
+            min-width: 0px;
+            text: root.text;
+            color: root.ink;
+            font-size: root.font-size;
+            font-weight: root.font-weight;
+            font-family: root.font-family;
+            letter-spacing: root.letter-spacing;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
+}
+
+// Compact OLED chip: outlined in `tint`, or solid with dark text.
+export component OledChip inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: Theme.accent;
+    in property <bool> solid: false;
+
+    horizontal-stretch: 0;
+    background: root.solid ? root.tint : transparent;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: root.solid ? root.tint : root.tint.with-alpha(0.6);
+
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        padding-top: 2px;
+        padding-bottom: 2px;
+        Text {
+            text: root.text;
+            color: root.solid ? Theme.on-accent : root.tint.brighter(0.35);
+            font-size: 9px;
+            font-weight: root.solid ? 600 : 500;
+            font-family: Theme.mono-font;
+            letter-spacing: 0.4px;
+            vertical-alignment: center;
+            wrap: no-wrap;
+        }
+    }
+}

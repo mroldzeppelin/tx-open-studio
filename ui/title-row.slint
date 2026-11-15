@@ -1,0 +1,80 @@
+import { HwButton, SaveButton } from "components/buttons.slint";
+import { Theme } from "theme.slint";
+
+// Brand row: amber mark + name left; save and tuner buttons right.
+export component TitleRow inherits HorizontalLayout {
+    in property <bool> preset-dirty;
+    in property <bool> save-busy;
+    callback save-preset;
+    in property <bool> midi-available;
+    in-out property <bool> tuner-active;
+    callback tuner-toggled(bool);
+
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 12px;
+        spacing: 8px;
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 2px;
+                background: Theme.accent;
+                drop-shadow-blur: 8px;
+                drop-shadow-color: Theme.accent.with-alpha(0.6);
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: "TX OPEN STUDIO";
+            color: Theme.hw-ink;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 2px;
+            vertical-alignment: center;
+        }
+        // Save the current preset: hold 1 s, only while EDITED.
+        SaveButton {
+            armed: root.preset-dirty;
+            busy: root.save-busy;
+            save => { root.save-preset(); }
+        }
+
+        // Tuner on/off (MIDI CC9). The pedal reports no tuner state, so
+        // this shows what the app set; the OLED label reads TUNER ON.
+        // Disabled without a MIDI port (the tuner is the one MIDI use).
+        tuner-btn := HwButton {
+            width: 26px;
+            height: 26px;
+            radius: 5px;
+            enabled: root.midi-available;
+            checked: root.tuner-active;
+            clicked => {
+                root.tuner-active = !root.tuner-active;
+                root.tuner-toggled(root.tuner-active);
+            }
+
+            Image {
+                source: @image-url("../assets/tuner.png");
+                width: 14px;
+                height: 14px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                colorize: root.tuner-active ? Theme.accent
+                    : (tuner-btn.hover ? Theme.hw-ink-hover : Theme.hw-ink);
+            }
+            // Amber LED, top-right, while the tuner is on.
+            if root.tuner-active: Rectangle {
+                x: parent.width - 7px;
+                y: 3px;
+                width: 4px;
+                height: 4px;
+                border-radius: 2px;
+                background: Theme.accent;
+                drop-shadow-blur: 5px;
+                drop-shadow-color: Theme.accent.with-alpha(0.9);
+            }
+        }
+}

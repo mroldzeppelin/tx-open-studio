@@ -1,0 +1,201 @@
+import { ModuleTitle, OnOffChip, StateButton } from "../components/buttons.slint";
+import { EqPair } from "../components/eq-pair.slint";
+import { GlobalGroup } from "../components/global-group.slint";
+import { Knob } from "../components/knob.slint";
+import { Theme } from "../theme.slint";
+
+// AMP: gain/volume/presence/depth and the EQ band gains are
+// MIDI CCs; mix, EQ frequencies, mid Q and EQ position are
+// serial-only (fx ids 60..65). Values are read from the
+// current preset over USB serial. Groups: GAIN | MODEL, EQ.
+export component AmpTab inherits Rectangle {
+    in property <length> slot;
+    in property <string> amp-model-text;
+    in property <bool> eq-post-known;
+    in-out property <bool> eq-post;
+    callback fx-changed(int, float);
+    in-out property <bool> amp-enabled;
+    callback amp-enable-changed(bool);
+    in-out property <float> amp-gain;
+    callback amp-param-changed(int, float);
+    in-out property <float> amp-volume;
+    in property <bool> amp-mix-known;
+    in property <float> amp-mix-default;
+    in-out property <float> amp-mix;
+    in-out property <float> amp-presence;
+    in-out property <float> amp-depth;
+    in-out property <float> amp-bass;
+    in property <bool> eq-freq-known;
+    in property <float> eq-bass-freq-default;
+    in-out property <float> eq-bass-freq;
+    in-out property <float> amp-mid;
+    in property <float> eq-mid-freq-default;
+    in-out property <float> eq-mid-freq;
+    in property <bool> eq-mid-q-known;
+    in property <float> eq-mid-q-default;
+    in-out property <float> eq-mid-q;
+    in-out property <float> amp-treble;
+    in property <float> eq-treble-freq-default;
+    in-out property <float> eq-treble-freq;
+    // True while any amp knob is being dragged (Rust skips pedal updates then).
+    out property <bool> knob-active: k-gain.active || k-volume.active || k-presence.active || k-depth.active || k-bass.active || k-mid.active || k-treble.active;
+
+        VerticalLayout {
+            spacing: 8px;
+            alignment: start;
+            HorizontalLayout {
+                height: 24px;
+                spacing: 6px;
+                ModuleTitle {
+                    horizontal-stretch: 0;
+                    text: "AMPLIFIER";
+                }
+                // Tone model name · what it's based on.
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    text: root.amp-model-text;
+                    color: Theme.muted;
+                    font-size: 10px;
+                    font-family: Theme.mono-font;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+                // EQ before or after the amp model (param 10).
+                StateButton {
+                    horizontal-stretch: 0;
+                    width: 76px;
+                    height: 24px;
+                    enabled: root.eq-post-known;
+                    on <=> root.eq-post;
+                    on-text: "Post amp";
+                    off-text: "Pre amp";
+                    toggled(on) => { root.fx-changed(65, on ? 1 : 0); }
+                }
+                // Amp enable/bypass toggle (written over USB serial).
+                OnOffChip {
+                    on <=> root.amp-enabled;
+                    toggled(on) => { root.amp-enable-changed(on); }
+                }
+            }
+            // Group borders cost height: trimmed paddings keep
+            // the knob sizes within the 320 px tray.
+            HorizontalLayout {
+                spacing: 8px;
+                GlobalGroup {
+                    title: "GAIN";
+                    horizontal-stretch: 2;
+                    pad-top: 8px;
+                    pad-bottom: 4px;
+                    k-gain := Knob {
+                        width: 72px;
+                        size: 52px;
+                        label: "Gain";
+                        value <=> root.amp-gain;
+                        edited(v) => { root.amp-param-changed(0, v); }
+                    }
+
+                    k-volume := Knob {
+                        width: 72px;
+                        size: 52px;
+                        label: "Volume";
+                        value <=> root.amp-volume;
+                        edited(v) => { root.amp-param-changed(1, v); }
+                    }
+                }
+                GlobalGroup {
+                    title: "MODEL";
+                    horizontal-stretch: 3;
+                    pad-top: 8px;
+                    pad-bottom: 4px;
+                    // Mix: serial-only (fx id 63), locked until
+                    // read, double-click returns to the loaded value.
+                    Knob {
+                        width: 72px;
+                        size: 52px;
+                        label: "Mix";
+                        unit: "%";
+                        min-value: 0;
+                        max-value: 100;
+                        step: 1;
+                        decimals: 0;
+                        enabled: root.amp-mix-known;
+                        default-value: root.amp-mix-default;
+                        value <=> root.amp-mix;
+                        edited(v) => { root.fx-changed(63, v); }
+                    }
+
+                    k-presence := Knob {
+                        width: 72px;
+                        size: 52px;
+                        label: "Presence";
+                        value <=> root.amp-presence;
+                        edited(v) => { root.amp-param-changed(2, v); }
+                    }
+
+                    k-depth := Knob {
+                        width: 72px;
+                        size: 52px;
+                        label: "Depth";
+                        value <=> root.amp-depth;
+                        edited(v) => { root.amp-param-changed(3, v); }
+                    }
+                }
+            }
+            // EQ bands: gain knob (MIDI CC) with its frequency
+            // knob (serial, fx ids 60..62) up-right; the mid band
+            // also has Q (fx id 64) up-left (EqPair).
+            GlobalGroup {
+                title: "EQ";
+                // Extra top padding keeps the small knobs' labels
+                // clear of the group's border line.
+                pad-top: 18px;
+                pad-bottom: 4px;
+                content-alignment: LayoutAlignment.space-between;
+                    k-bass := EqPair {
+                        width: root.slot;
+                        label: "Bass";
+                        gain <=> root.amp-bass;
+                        gain-edited(v) => { root.amp-param-changed(4, v); }
+                        freq-min: 75;
+                        freq-max: 600;
+                        freq-enabled: root.eq-freq-known;
+                        freq-default: root.eq-bass-freq-default;
+                        freq <=> root.eq-bass-freq;
+                        freq-edited(v) => { root.fx-changed(60, v); }
+                    }
+
+                    k-mid := EqPair {
+                        width: root.slot + 40px;
+                        label: "Mid";
+                        gain <=> root.amp-mid;
+                        gain-edited(v) => { root.amp-param-changed(5, v); }
+                        freq-min: 150;
+                        freq-max: 5000;
+                        freq-enabled: root.eq-freq-known;
+                        freq-default: root.eq-mid-freq-default;
+                        freq <=> root.eq-mid-freq;
+                        freq-edited(v) => { root.fx-changed(61, v); }
+                        has-q: true;
+                        q-enabled: root.eq-mid-q-known;
+                        q-default: root.eq-mid-q-default;
+                        q <=> root.eq-mid-q;
+                        q-edited(v) => { root.fx-changed(64, v); }
+                    }
+
+                    k-treble := EqPair {
+                        width: root.slot;
+                        label: "Treble";
+                        gain <=> root.amp-treble;
+                        gain-edited(v) => { root.amp-param-changed(6, v); }
+                        freq-min: 1000;
+                        freq-max: 4000;
+                        freq-enabled: root.eq-freq-known;
+                        freq-default: root.eq-treble-freq-default;
+                        freq <=> root.eq-treble-freq;
+                        freq-edited(v) => { root.fx-changed(62, v); }
+                    }
+            }
+        }
+}

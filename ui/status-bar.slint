@@ -1,0 +1,116 @@
+import { StyledButton } from "components/buttons.slint";
+import { Theme } from "theme.slint";
+
+// Status bar: LED + status on the left, update chip + reconnect right.
+export component StatusBar inherits Rectangle {
+    in property <bool> connected;
+    in property <bool> reconnecting;
+    in property <bool> no-access;
+    in-out property <bool> led-dim;
+    in-out property <string> status-note;
+    in property <string> status-text;
+    in property <string> update-version;
+    callback open-releases;
+    callback reconnect;
+
+        background: Theme.status-bg;
+        // Follows the chassis' rounded bottom corners.
+        border-bottom-left-radius: 11px;
+        border-bottom-right-radius: 11px;
+        clip: true;
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            Rectangle {
+                height: 1px;
+                background: Theme.status-line;
+            }
+
+            HorizontalLayout {
+                height: 30px;
+                padding-left: 16px;
+                padding-right: 10px;
+                spacing: 8px;
+
+                VerticalLayout {
+                    alignment: center;
+                    // Green when connected, blinking amber while
+                    // reconnecting, steady red without port access,
+                    // dark gray otherwise.
+                    Rectangle {
+                        property <bool> amber: !root.connected && root.reconnecting;
+                        property <bool> red: root.no-access;
+                        property <color> lit: root.connected ? Theme.ok
+                            : (self.red ? Theme.error : (self.amber ? Theme.accent : Theme.led-off));
+                        width: 6px;
+                        height: 6px;
+                        border-radius: 3px;
+                        background: self.lit;
+                        opacity: self.amber && root.led-dim ? 0.25 : 1;
+                        drop-shadow-blur: root.connected || self.amber || self.red ? 6px : 0px;
+                        drop-shadow-color: root.connected || self.amber || self.red ? self.lit.with-alpha(0.9) : transparent;
+                    }
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.status-note != "" ? root.status-note : root.status-text;
+                    color: root.status-note != "" ? Theme.error : Theme.status-ink;
+                    font-size: 10px;
+                    font-weight: 500;
+                    font-family: Theme.mono-font;
+                    letter-spacing: 1px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                if root.update-version != "": VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: 18px;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: update-ta.has-hover ? Theme.accent : Theme.accent.with-alpha(0.6);
+                        background: update-ta.has-hover ? Theme.accent.with-alpha(0.12) : transparent;
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            Text {
+                                text: "UPDATE " + root.update-version;
+                                color: Theme.accent;
+                                font-size: 9px;
+                                font-weight: 600;
+                                font-family: Theme.mono-font;
+                                letter-spacing: 0.8px;
+                                vertical-alignment: center;
+                                wrap: no-wrap;
+                            }
+                        }
+                        update-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.open-releases();
+                            }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    StyledButton {
+                        width: 22px;
+                        height: 22px;
+                        radius: 5px;
+                        text: "⟳";
+                        font-size: 13px;
+                        font-weight: 500;
+                        clicked => {
+                            root.reconnect();
+                        }
+                    }
+                }
+            }
+        }
+}

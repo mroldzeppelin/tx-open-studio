@@ -1,0 +1,100 @@
+import { ModuleTitle, OnOffChip, StateButton } from "../components/buttons.slint";
+import { Knob } from "../components/knob.slint";
+import { Stepper } from "../components/stepper.slint";
+
+// REVERB (USB serial).
+export component ReverbTab inherits Rectangle {
+    in property <length> slot;
+    in-out property <int> rvb-model;
+    callback fx-changed(int, float);
+    in-out property <bool> rvb-post;
+    in-out property <bool> rvb-enabled;
+    in-out property <float> rvb-time;
+    in-out property <float> rvb-predelay;
+    in-out property <float> rvb-mix;
+    in-out property <float> rvb-color;
+
+        VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout {
+                height: 24px;
+                spacing: 6px;
+                ModuleTitle { text: "REVERB"; }
+                Stepper {
+                    value-width: 54px; // "Spring 1"
+                    height: 24px;
+                    options: ["Spring 1", "Spring 2", "Spring 3", "Spring 4", "Room", "Plate"];
+                    index <=> root.rvb-model;
+                    picked(i) => { root.fx-changed(12, i); }
+                }
+                StateButton {
+                    horizontal-stretch: 0;
+                    width: 76px;
+                    height: 24px;
+                    on <=> root.rvb-post;
+                    on-text: "Post amp";
+                    off-text: "Pre amp";
+                    toggled(on) => { root.fx-changed(11, on ? 1 : 0); }
+                }
+                OnOffChip {
+                    on <=> root.rvb-enabled;
+                    toggled(on) => { root.fx-changed(10, on ? 1 : 0); }
+                }
+            }
+            VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Knob {
+                        width: root.slot;
+                        label: "Time";
+                        size: 52px;
+                        min-value: 0;
+                        max-value: 10;
+                        step: 0.1;
+                        default-value: 5;
+                        value <=> root.rvb-time;
+                        edited(v) => { root.fx-changed(13, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: "Predelay";
+                        size: 52px;
+                        min-value: 0;
+                        max-value: 500;
+                        step: 1;
+                        decimals: 0;
+                        unit: " ms";
+                        default-value: 0;
+                        value <=> root.rvb-predelay;
+                        edited(v) => { root.fx-changed(14, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: "Mix";
+                        size: 52px;
+                        min-value: 0;
+                        max-value: 100;
+                        step: 1;
+                        decimals: 0;
+                        unit: "%";
+                        default-value: 0;
+                        value <=> root.rvb-mix;
+                        edited(v) => { root.fx-changed(16, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: "Color";
+                        size: 52px;
+                        min-value: -10;
+                        max-value: 10;
+                        step: 0.1;
+                        default-value: 0;
+                        value <=> root.rvb-color;
+                        edited(v) => { root.fx-changed(15, v); }
+                    }
+                }
+            }
+        }
+}

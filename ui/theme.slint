@@ -1,0 +1,124 @@
+// Design tokens, shared structs and global helpers.
+
+// "Hardware controller" palette: dark chassis, OLED insets, amber accent.
+export global Theme {
+    // Page around the chassis (radial: lighter centre, near-black edges).
+    out property <brush> page: @radial-gradient(circle, #17181c 0%, #0a0b0d 70%);
+    out property <color> bg: #0a0b0d;
+    // Chassis body and its vertical sheen.
+    out property <color> body: #141518;
+    out property <color> body-top: #1b1d21;
+    out property <color> body-bottom: #101114;
+    // OLED / inset panels.
+    out property <color> oled: #090a0c;
+    // Bevel highlight line and near-black outer edge.
+    out property <color> bevel: #2c2f36;
+    out property <color> edge: #08090a;
+    // Raised "hw" button gradient, and its pressed (inverted) version.
+    out property <color> hw-top: #2b2e35;
+    out property <color> hw-bottom: #1b1d21;
+    out property <color> hw-pressed-top: #17191c;
+    out property <color> hw-pressed-bottom: #202329;
+    out property <color> hw-ink: #c9ccd3;
+    out property <color> hw-ink-hover: #ffffff;
+    out property <color> surface: #101114;
+    out property <color> surface-alt: #0e0f12;
+    out property <color> soft: #17191c;
+    out property <color> field: #17191c;
+    out property <color> hover: #22252a;
+    out property <color> selected: #1c1e22;
+    out property <color> border: #2a2d33;
+    out property <color> selected-border: #f59e0b;
+    out property <color> muted: #8d929c;
+    out property <color> ink: #d7dae0;
+    out property <color> secondary-ink: #c9ccd3;
+    out property <color> accent: #f59e0b;
+    out property <color> accent-hover: #fbbf24;
+    out property <color> amber-glow: #f59e0b80;
+    // OLED display: preset name ink and the display's black edge.
+    out property <color> oled-ink: #ece2cf;
+    out property <color> oled-edge: #000000;
+    // Soft warm glow behind the OLED preset name.
+    out property <color> oled-glow: #ffcf8a;
+    // Knob ring track, cap gradient and pointer.
+    out property <color> knob-track: #2a2d33;
+    out property <color> knob-cap-top: #3d4149;
+    out property <color> knob-cap-bottom: #1c1e22;
+    out property <color> knob-pointer: #f2f3f5;
+    // Faceplate trace joining an EQ band's gain and frequency knobs.
+    out property <color> trace: #4a4e57;
+    // Mic 2 on the cab mic pad (Mic 1 uses the amber accent).
+    out property <color> mic2: #3aa8a0;
+    // Dark text on solid amber.
+    out property <color> on-accent: #111111;
+    out property <color> ok: #22c55e;
+    out property <color> led-off: #2a2d33;
+    out property <color> error: #ef4444;
+    // "Modified" markers: solid amber.
+    out property <color> changed: #f59e0b;
+    // Status bar strip.
+    out property <color> status-bg: #0c0d0f;
+    out property <color> status-line: #060708;
+    out property <color> status-ink: #a3a8b2;
+    // Monospaced font for technical texts (status bar, values, small
+    // uppercase labels). Switch to "JetBrains Mono" once installed.
+    out property <string> mono-font: "Noto Sans Mono";
+}
+
+// One row of the (filtered) preset list: preset number (1..150), short id
+// ("41B": 0-based bank + slot), name ("" until loaded), character and its
+// colour group `kind` (0 = none; see character_kind in src/presets.rs).
+export struct PresetRow {
+    preset: int,
+    id: string,
+    name: string,
+    character: string,
+    kind: int,
+}
+
+// Value formatting shared by knobs and labels (exported so Rust tests can
+// call it).
+export global Format {
+    // Frequency label: "180", "750", "1.6K", "4K": from 1 kHz on in kHz
+    // with one decimal, a trailing .0 dropped.
+    pure public function hz(v: float) -> string {
+        if (v < 1000) {
+            return "\{round(v)}";
+        }
+        let tenths = round(v / 100);
+        return "\{floor(tenths / 10)}" + (mod(tenths, 10) == 0 ? "" : ".\{mod(tenths, 10)}") + "K";
+    }
+    // Program number as the pedal shows it in PC+Name mode: preset - 1,
+    // zero-padded to 3 (preset 84 → "083", hardware-checked). Presets
+    // 129..150 are PC 0..21 in bank 1 over MIDI; whether the pedal's
+    // display wraps there too is unchecked, so this stays continuous.
+    // Always one decimal ("4.2", "0.0", "-1.5"): mic pad readouts.
+    pure public function one(v: float) -> string {
+        let t = round(abs(v) * 10);
+        return (v <= -0.05 ? "-" : "") + "\{floor(t / 10)}.\{mod(t, 10)}";
+    }
+    pure public function ordinal(preset: int) -> string {
+        let pc = preset - 1;
+        return (pc < 10 ? "00" : pc < 100 ? "0" : "") + pc;
+    }
+}
+
+// Muted colours per preset character group, shared by list and OLED.
+export global CharacterColors {
+    pure public function of(kind: int) -> color {
+        if (kind == 1) { return #4a8a6a; } // clean
+        if (kind == 2) { return #a07d1c; } // crunch
+        if (kind == 3) { return #b0632c; } // drive
+        if (kind == 4) { return #a84a42; } // high gain / lead
+        if (kind == 5) { return #8a5bb0; } // stomp
+        if (kind == 6) { return #3d78b8; } // bass
+        if (kind == 7) { return #8a7a50; } // acoustic
+        return Theme.muted;
+    }
+}
+
+// Window height, for popups deciding whether to open upward (kept in sync
+// by AppWindow).
+export global WindowMetrics {
+    in-out property <length> height: 610px;
+}

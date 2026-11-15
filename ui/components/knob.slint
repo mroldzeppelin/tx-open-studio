@@ -1,0 +1,183 @@
+import { Format, Theme } from "../theme.slint";
+
+// Rotary knob with label above and value below. Vertical drag changes the
+// value in `step` increments (a full sweep is ~150 px). `edited` fires only
+// for user drags, not when the value is set programmatically (e.g. read back
+// from the pedal). Shown with `decimals` (0 or 1) and a `unit` suffix.
+// Double-click resets to `default-value` (sent like a normal edit).
+export component Knob inherits VerticalLayout {
+    in property <string> label;
+    in-out property <float> value: 5;
+    in property <float> min-value: 0;
+    in property <float> max-value: 10;
+    in property <float> step: 0.1;
+    in property <float> default-value: 5;
+    in property <int> decimals: 1;
+    in property <string> unit;
+    // Show the value as a frequency ("750", "1.6K"; see Format.hz).
+    in property <bool> hz: false;
+    in property <length> value-font-size: 12px;
+    in property <length> size: 48px;
+    // false: display only (no drag, no double-click reset), dimmed.
+    in property <bool> enabled: true;
+    callback edited(float);
+    out property <bool> active: ta.pressed;
+    // Sweep of 270°: min → -135°, max → +135° (0° = straight up).
+    property <float> frac: clamp((root.value - root.min-value) / max(root.max-value - root.min-value, 0.0001), 0, 1);
+    property <angle> sweep: (-135 + root.frac * 270) * 1deg;
+    property <int> tenths: round(root.value * 10);
+    property <int> abs-tenths: abs(root.tenths);
+    // decimals 2: always two places ("0.70"; EQ mid Q).
+    property <int> abs-hundredths: abs(round(root.value * 100));
+    property <string> number: root.hz ? Format.hz(root.value) : root.decimals == 2
+        ? (root.value < -0.005 ? "-" : "") + "\{floor(root.abs-hundredths / 100)}."
+            + (mod(root.abs-hundredths, 100) < 10 ? "0" : "") + "\{mod(root.abs-hundredths, 100)}"
+        : root.decimals == 0
+        ? "\{round(root.value)}"
+        : (root.tenths < 0 ? "-" : "") + "\{floor(root.abs-tenths / 10)}"
+            + (mod(root.abs-tenths, 10) == 0 ? "" : ".\{mod(root.abs-tenths, 10)}");
+    property <float> drag-start: 0;
+
+    spacing: 4px;
+    min-width: root.size;
+    horizontal-stretch: 1;
+
+    // No label row at all when empty (small EQ frequency knobs).
+    if root.label != "": Text {
+        text: root.label;
+        color: Theme.muted;
+        font-size: 12px;
+        horizontal-alignment: center;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+
+    // Top of the dial row (for drawing next to the dial, see EqPair).
+    out property <length> dial-top: dial-row.y;
+
+    dial-row := HorizontalLayout {
+        alignment: center;
+
+        // 270° arc ring (track + amber value arc), raised cap and a white
+        // pointer. Paths use a fixed 100×100 viewbox so everything scales
+        // with `size`; angles: 0° = up, clockwise positive.
+        dial := Rectangle {
+            width: root.size;
+            height: root.size;
+
+            property <float> ring-r: 44;
+            property <length> ring-w: max(2px, root.size * 0.08);
+
+            // Track: full sweep -135° → +135°.
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                stroke: Theme.knob-track;
+                stroke-width: dial.ring-w;
+                MoveTo {
+                    x: 50 + dial.ring-r * sin(-135deg);
+                    y: 50 - dial.ring-r * cos(-135deg);
+                }
+                ArcTo {
+                    x: 50 + dial.ring-r * sin(135deg);
+                    y: 50 - dial.ring-r * cos(135deg);
+                    radius-x: dial.ring-r;
+                    radius-y: dial.ring-r;
+                    large-arc: true;
+                    sweep: true;
+                }
+            }
+            // Value arc: -135° → current value.
+            if root.frac > 0.004: Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                stroke: Theme.accent;
+                stroke-width: dial.ring-w;
+                MoveTo {
+                    x: 50 + dial.ring-r * sin(-135deg);
+                    y: 50 - dial.ring-r * cos(-135deg);
+                }
+                ArcTo {
+                    x: 50 + dial.ring-r * sin(root.sweep);
+                    y: 50 - dial.ring-r * cos(root.sweep);
+                    radius-x: dial.ring-r;
+                    radius-y: dial.ring-r;
+                    large-arc: root.frac > 2 / 3;
+                    sweep: true;
+                }
+            }
+
+            // Cap: lighter top for a domed look; amber glow while dragged.
+            Rectangle {
+                width: root.size * 0.72;
+                height: self.width;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: self.width / 2;
+                background: @linear-gradient(180deg, Theme.knob-cap-top 0%, Theme.knob-cap-bottom 75%);
+                border-width: 1px;
+                border-color: ta.has-hover || ta.pressed ? Theme.bevel : Theme.edge;
+                drop-shadow-blur: ta.pressed ? 8px : 3px;
+                drop-shadow-offset-y: ta.pressed ? 0px : 1px;
+                drop-shadow-color: ta.pressed ? Theme.amber-glow : #00000099;
+            }
+
+            // Pointer line, rotated with the value.
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 100;
+                viewbox-height: 100;
+                stroke: Theme.knob-pointer;
+                stroke-width: max(1.5px, root.size * 0.045);
+                MoveTo {
+                    x: 50 + 14 * sin(root.sweep);
+                    y: 50 - 14 * cos(root.sweep);
+                }
+                LineTo {
+                    x: 50 + 31 * sin(root.sweep);
+                    y: 50 - 31 * cos(root.sweep);
+                }
+            }
+
+            opacity: root.enabled ? 1 : 0.55;
+            ta := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: root.enabled ? ns-resize : default;
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        root.drag-start = root.value;
+                    }
+                }
+                double-clicked => {
+                    root.value = root.default-value;
+                    root.edited(root.default-value);
+                }
+                moved => {
+                    if (self.pressed) {
+                        let v = root.drag-start + (self.pressed-y - self.mouse-y) / 150px * (root.max-value - root.min-value);
+                        let nv = clamp(round(v / root.step) * root.step, root.min-value, root.max-value);
+                        if (nv != root.value) {
+                            root.value = nv;
+                            root.edited(nv);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Text {
+        text: root.number + root.unit;
+        color: Theme.secondary-ink;
+        font-size: root.value-font-size;
+        font-family: Theme.mono-font;
+        horizontal-alignment: center;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+}

@@ -1,0 +1,79 @@
+import { ModuleTitle, OnOffChip, StateButton } from "../components/buttons.slint";
+import { Knob } from "../components/knob.slint";
+
+// COMP (USB serial, see fx.rs FxControl).
+export component CompTab inherits Rectangle {
+    in property <length> slot;
+    in-out property <bool> comp-post;
+    callback fx-changed(int, float);
+    in-out property <bool> comp-enabled;
+    in-out property <float> comp-threshold;
+    in-out property <float> comp-gain;
+    in-out property <float> comp-attack;
+
+        VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout {
+                height: 24px;
+                spacing: 6px;
+                ModuleTitle { text: "COMPRESSOR"; }
+                StateButton {
+                    horizontal-stretch: 0;
+                    width: 76px;
+                    height: 24px;
+                    on <=> root.comp-post;
+                    on-text: "Post amp";
+                    off-text: "Pre amp";
+                    toggled(on) => { root.fx-changed(21, on ? 1 : 0); }
+                }
+                OnOffChip {
+                    on <=> root.comp-enabled;
+                    toggled(on) => { root.fx-changed(20, on ? 1 : 0); }
+                }
+            }
+            VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Knob {
+                        width: root.slot;
+                        label: "Threshold";
+                        size: 52px;
+                        min-value: -40;
+                        max-value: 0;
+                        step: 0.1;
+                        default-value: -14;
+                        unit: " dB";
+                        value <=> root.comp-threshold;
+                        edited(v) => { root.fx-changed(22, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: "Gain";
+                        size: 52px;
+                        min-value: -30;
+                        max-value: 10;
+                        step: 0.1;
+                        default-value: -12;
+                        unit: " dB";
+                        value <=> root.comp-gain;
+                        edited(v) => { root.fx-changed(23, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: "Attack";
+                        size: 52px;
+                        min-value: 1;
+                        max-value: 51;
+                        step: 1;
+                        decimals: 0;
+                        default-value: 14;
+                        unit: " ms";
+                        value <=> root.comp-attack;
+                        edited(v) => { root.fx-changed(24, v); }
+                    }
+                }
+            }
+        }
+}

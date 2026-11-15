@@ -1,0 +1,310 @@
+import { Theme } from "../theme.slint";
+
+// Raised hardware-style button: vertical gradient, near-black edge, top
+// highlight and a hard 2px drop. Pressed (or `checked`) it sinks: darker
+// inverted gradient, no drop, content shifted down 2px. Content goes in as
+// children; `hover` lets it brighten its text.
+export component HwButton inherits Rectangle {
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <length> radius: 6px;
+    out property <bool> hover: ta.has-hover;
+    out property <bool> down: ta.pressed || root.checked;
+    property <length> shift: 0px;
+    callback clicked();
+
+    border-radius: root.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    background: @linear-gradient(180deg, Theme.hw-top 0%, Theme.hw-bottom 100%);
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: Theme.edge;
+    opacity: root.enabled ? 1 : 0.4;
+
+    // Top highlight (inset 0 1px 0 rgba(255,255,255,.1)).
+    Rectangle {
+        x: root.radius / 2;
+        y: 1px;
+        width: parent.width - root.radius;
+        height: 1px;
+        background: #ffffff1a;
+        visible: !root.down;
+    }
+
+    Rectangle {
+        y: root.shift;
+        width: parent.width;
+        height: parent.height;
+        @children
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    states [
+        sunk when root.down: {
+            background: @linear-gradient(180deg, Theme.hw-pressed-top 0%, Theme.hw-pressed-bottom 100%);
+            drop-shadow-offset-y: 0px;
+            shift: 2px;
+        }
+    ]
+}
+
+// Text button on the hardware look (std-widgets don't follow the palette).
+export component StyledButton inherits HwButton {
+    in property <string> text;
+    in property <length> font-size: 16px;
+    in property <int> font-weight: 600;
+    in property <bool> active: false;
+
+    min-height: 22px;
+    min-width: 22px;
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        color: root.active ? Theme.accent : (root.hover ? Theme.hw-ink-hover : Theme.hw-ink);
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Tab of the controller deck: sunk with an amber label when selected;
+// module tabs show the module's on/off LED before the label.
+export component TabButton inherits HwButton {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> has-led: false;
+    in property <bool> led-on: false;
+
+    height: 26px;
+    horizontal-stretch: 1;
+    min-width: 0px;
+    preferred-width: 0px;
+    checked: root.selected;
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: 4px;
+        if root.has-led: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 5px;
+                height: 5px;
+                border-radius: 2.5px;
+                background: root.led-on ? Theme.ok : Theme.led-off;
+                drop-shadow-blur: root.led-on ? 5px : 0px;
+                drop-shadow-color: root.led-on ? Theme.ok.with-alpha(0.9) : transparent;
+            }
+        }
+        // Elides instead of widening the tab, so nine tabs always share
+        // the row equally.
+        Text {
+            min-width: 0px;
+            text: root.label;
+            color: root.selected ? Theme.accent : (root.hover ? Theme.hw-ink-hover : Theme.status-ink);
+            font-size: 9px;
+            font-weight: 500;
+            font-family: Theme.mono-font;
+            letter-spacing: 0.4px;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
+}
+
+// Small uppercase module title at the left of a tray page header.
+export component ModuleTitle inherits Text {
+    horizontal-stretch: 1;
+    min-width: 0px;
+    color: Theme.hw-ink;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.6px;
+    vertical-alignment: center;
+    overflow: elide;
+    wrap: no-wrap;
+}
+
+// Hold-to-save button (floppy icon), enabled only while the preset is
+// EDITED. Holding it fills it with amber from the bottom over 1 s;
+// released early, the fill drops back and nothing happens; reaching the
+// top fires `save` once and flashes. While a save is in flight (`busy`)
+// the icon pulses and input is ignored.
+export component SaveButton inherits Rectangle {
+    in property <bool> armed;
+    in property <bool> busy;
+    callback save();
+
+    // Latched when a hold fires; cleared on release (one save per hold).
+    property <bool> fired: false;
+    property <bool> pressing: btn.down;
+    property <bool> held: self.pressing && root.armed && !root.busy && !self.fired;
+    property <bool> flash: false;
+    property <bool> pulse: false;
+
+    width: 26px;
+    height: 26px;
+
+    changed pressing => {
+        if (!self.pressing) {
+            root.fired = false;
+        }
+    }
+
+    btn := HwButton {
+        width: 100%;
+        height: 100%;
+        radius: 5px;
+        enabled: root.armed || root.busy;
+
+        // Hold progress: amber rising from the bottom.
+        Rectangle {
+            y: parent.height - self.height;
+            width: parent.width;
+            height: root.held ? parent.height : 0px;
+            animate height {
+                duration: root.held ? 1000ms : 250ms;
+                easing: linear;
+            }
+            border-radius: 4px;
+            background: Theme.accent.with-alpha(0.35);
+            drop-shadow-blur: 6px;
+            drop-shadow-color: Theme.amber-glow;
+        }
+        if root.flash: Rectangle {
+            border-radius: 4px;
+            background: Theme.accent.with-alpha(0.6);
+        }
+
+        // Floppy disk: body with a clipped corner, shutter, label.
+        Path {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            stroke: root.busy ? (root.pulse ? Theme.accent : Theme.hw-ink)
+                : (btn.hover && root.armed ? Theme.hw-ink-hover : Theme.hw-ink);
+            stroke-width: 1.3px;
+            commands: "M 1.5 1.5 L 11.5 1.5 L 14.5 4.5 L 14.5 14.5 L 1.5 14.5 Z M 4.5 1.5 L 4.5 5.5 L 10.5 5.5 L 10.5 1.5 M 4 14.5 L 4 9.5 L 12 9.5 L 12 14.5";
+        }
+    }
+
+    // Fires when the fill reaches the top.
+    Timer {
+        interval: 1000ms;
+        running: root.held;
+        triggered => {
+            root.fired = true;
+            root.flash = true;
+            root.save();
+        }
+    }
+    Timer {
+        interval: 180ms;
+        running: root.flash;
+        triggered => {
+            root.flash = false;
+        }
+    }
+    Timer {
+        interval: 400ms;
+        running: root.busy;
+        triggered => {
+            root.pulse = !root.pulse;
+        }
+    }
+}
+
+// On/Off chip for an effect block header: green dot + "On", muted "Off".
+export component OnOffChip inherits Rectangle {
+    in-out property <bool> on: true;
+    callback toggled(bool);
+
+    horizontal-stretch: 0;
+    background: chip-ta.pressed ? Theme.selected : (chip-ta.has-hover ? Theme.hover : Theme.soft);
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: chip-ta.has-hover ? Theme.bevel : Theme.border;
+    animate background { duration: 90ms; }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 3px;
+        padding-bottom: 3px;
+        spacing: 6px;
+        VerticalLayout {
+            alignment: center;
+            // LED: green with glow when on, dark when off.
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.on ? Theme.ok : Theme.led-off;
+                drop-shadow-blur: root.on ? 6px : 0px;
+                drop-shadow-color: root.on ? Theme.ok.with-alpha(0.9) : transparent;
+            }
+        }
+        Text {
+            // Fixed slot ("OFF" is wider than "ON"), so the chip never
+            // changes width and shoves its row neighbours.
+            width: 22px;
+            text: root.on ? "ON" : "OFF";
+            color: chip-ta.has-hover ? Theme.hw-ink-hover : (root.on ? Theme.ink : Theme.status-ink);
+            font-size: 10px;
+            font-family: Theme.mono-font;
+            letter-spacing: 1px;
+            horizontal-alignment: left;
+            vertical-alignment: center;
+        }
+    }
+    chip-ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.on = !root.on;
+            root.toggled(root.on);
+        }
+    }
+}
+
+// Small two-state button whose caption names the current state
+// ("Pre amp" / "Post amp"); highlighted when `on`.
+// Latching hardware button: sunk with amber text when `on`.
+export component StateButton inherits HwButton {
+    in-out property <bool> on;
+    in property <string> on-text;
+    in property <string> off-text;
+    callback toggled(bool);
+
+    height: 26px;
+    min-width: 32px;
+    horizontal-stretch: 1;
+    checked: root.on;
+    clicked => {
+        root.on = !root.on;
+        root.toggled(root.on);
+    }
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.on ? root.on-text : root.off-text;
+        color: root.on ? Theme.accent : (root.hover ? Theme.hw-ink-hover : Theme.hw-ink);
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}

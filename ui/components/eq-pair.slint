@@ -1,0 +1,155 @@
+import { Knob } from "knob.slint";
+import { Theme } from "../theme.slint";
+
+// One EQ band, Two Notes style: the band's gain knob (MIDI CC) with a
+// small frequency knob (serial) diagonally above-right of it, joined by a
+// thin faceplate trace. Range printed above the small knob, its value in
+// Hz/kHz below; steps 5 Hz below 1 kHz, 50 Hz above (fx::freq_step). The
+// frequency knob is locked and dimmed until plausible values were read
+// (`freq-enabled`), so nothing guessed is written.
+export component EqPair inherits Rectangle {
+    in property <string> label;
+    in-out property <float> gain;
+    callback gain-edited(float);
+    out property <bool> active: big.active;
+    in-out property <float> freq;
+    in property <float> freq-min;
+    in property <float> freq-max;
+    in property <float> freq-default;
+    in property <bool> freq-enabled: true;
+    callback freq-edited(float);
+    // Optional Q knob (mid band, Two Notes style): mirrors the frequency
+    // knob up-left of the gain knob, with its own trace.
+    in property <bool> has-q: false;
+    in-out property <float> q;
+    in property <float> q-default;
+    in property <bool> q-enabled: true;
+    callback q-edited(float);
+
+    height: 132px;
+    // Dial centres: the big one left of centre so a two-knob pair is
+    // balanced (centred with a Q knob), the small ones offset up-right
+    // (frequency) and up-left (Q).
+    property <length> cx: self.width / 2 - (root.has-q ? 0px : 16px);
+    property <length> qcx: self.cx - 52px;
+    property <length> cy: big.y + big.dial-top + 36px;
+    property <length> scx: self.cx + 52px;
+    property <length> scy: self.cy - 58px;
+    // Trace ends just outside both rings: big rim at 50° (clear of the
+    // label), small rim at its bottom-left (225°).
+    property <length> x0: self.cx + 37px * sin(50deg);
+    property <length> y0: self.cy - 37px * cos(50deg);
+    property <length> x1: self.scx - 15px * sin(45deg);
+    property <length> y1: self.scy + 15px * cos(45deg);
+    // Mirror for the Q trace: big rim at -50°, Q rim at its bottom-right.
+    property <length> qx0: self.cx - 37px * sin(50deg);
+    property <length> qx1: self.qcx + 15px * sin(45deg);
+
+    // Quarter curve: leaves the big knob upwards, meets the small one
+    // horizontally.
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        stroke: Theme.trace;
+        stroke-width: 1px;
+        MoveTo {
+            x: root.x0 / 1px;
+            y: root.y0 / 1px;
+        }
+        QuadraticTo {
+            control-x: root.x0 / 1px;
+            control-y: root.y1 / 1px;
+            x: root.x1 / 1px;
+            y: root.y1 / 1px;
+        }
+    }
+
+    if root.has-q: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        stroke: Theme.trace;
+        stroke-width: 1px;
+        MoveTo {
+            x: root.qx0 / 1px;
+            y: root.y0 / 1px;
+        }
+        QuadraticTo {
+            control-x: root.qx0 / 1px;
+            control-y: root.y1 / 1px;
+            x: root.qx1 / 1px;
+            y: root.y1 / 1px;
+        }
+    }
+
+    if root.has-q: Text {
+        x: root.qcx - self.width / 2;
+        y: root.scy - 14px - self.height - 1px;
+        text: "Q";
+        color: Theme.muted;
+        font-size: 8px;
+        font-family: Theme.mono-font;
+        wrap: no-wrap;
+    }
+
+    if root.has-q: Knob {
+        x: root.qcx - self.width / 2;
+        y: root.scy - 14px;
+        width: 40px;
+        height: self.preferred-height;
+        label: "";
+        size: 28px;
+        value-font-size: 10px;
+        enabled: root.q-enabled;
+        min-value: 0.2;
+        max-value: 3.0;
+        step: 0.05;
+        decimals: 2;
+        default-value: root.q-default;
+        value <=> root.q;
+        edited(v) => { root.q-edited(v); }
+    }
+
+    big := Knob {
+        x: root.cx - self.width / 2;
+        y: root.height - self.height;
+        width: 80px;
+        height: self.preferred-height;
+        size: 72px;
+        label: root.label;
+        value <=> root.gain;
+        edited(v) => { root.gain-edited(v); }
+    }
+
+    Text {
+        x: root.scx - self.width / 2;
+        y: small.y - self.height - 1px;
+        text: "Hz";
+        color: Theme.muted;
+        font-size: 8px;
+        font-family: Theme.mono-font;
+        wrap: no-wrap;
+    }
+
+    small := Knob {
+        x: root.scx - self.width / 2;
+        y: root.scy - 14px;
+        width: 40px;
+        height: self.preferred-height;
+        label: "";
+        size: 28px;
+        hz: true;
+        value-font-size: 10px;
+        enabled: root.freq-enabled;
+        min-value: root.freq-min;
+        max-value: root.freq-max;
+        step: root.freq >= 1000 ? 50 : 5;
+        decimals: 0;
+        default-value: root.freq-default;
+        value <=> root.freq;
+        edited(v) => { root.freq-edited(v); }
+    }
+}

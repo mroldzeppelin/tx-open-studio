@@ -36,7 +36,7 @@ Changes are sent to the pedal as you turn a knob in the app. Sync goes both ways
 - **Modulation**: on/off, pre/post, Chorus / Tremolo / Phaser / Flanger / Rotary with tempo sync and per-model controls.
 - **Delay**: on/off, pre/post, Digital / Tape, sync or time, feedback, normal/ping-pong, mix.
 - **Reverb**: on/off, pre/post, Spring 1-4 / Room / Plate, time, pre-delay, color, mix.
-- **Global**: the pedal's GLOBAL SETUP without the menu diving — Preset Volume, In Trim, Master and Interface (USB) levels; tuner mode (Off / Through / Muted) and reference pitch; tap tempo (button or the T key) with the pedal's **actual BPM** read back, writable as a number, and the Global/Preset tempo mode; global cab-sim bypass; display Naming; MIDI channel, MIDI Thru and MIDI Clock mode.
+- **Global**: the pedal's GLOBAL SETUP without the menu diving — levels: Volume (the front-panel master VOLUME knob, the same for every preset; per-preset level is the AMP tab's Volume), In Trim, Master (MAIN VOL) and Interface (USB, -40..+3 dB); tuner mode (Off / Through / Muted) and reference pitch; tap tempo (button or the T key) with the pedal's **actual BPM** read back, writable as a number, and the Global/Preset tempo mode; global cab-sim bypass; display Naming; MIDI channel, MIDI Thru and MIDI Clock mode.
 
 ![Global tab](docs/screenshot-global.png)
 
@@ -159,7 +159,6 @@ The desktop entry runs `tx-open-studio`, so the binary has to be on your `PATH` 
 
 These are not on a to-do list waiting for time. Each one is either an unknown part of the protocol or something the pedal does not report.
 
-- **Saving edits doesn't include the preset volume yet.** Presets can be renamed (right-click a preset in the list → Rename) and edits saved (hold the floppy button for 1 s while the preset shows EDITED). The preset volume is not part of the stored preset data the app writes, so a save keeps the volume stored on the pedal.
 - **No upload or download of `.tonex` captures / presets.** The full preset dump is an undecoded binary blob, and no upload path is known.
 - **The amp model (capture) cannot be changed.** Only the parameters around it can. Its name (and the cab source: model cab, IR or another model's cab) is shown read-only in the AMP and CAB tabs.
 - **The tuner shows no pitch.** The pedal sends no pitch data over USB. It also does not report tuner on/off when toggled on the pedal, so the app's tuner button only reflects what the app last sent.

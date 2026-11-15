@@ -1,0 +1,81 @@
+import { ModuleTitle, OnOffChip, StateButton } from "../components/buttons.slint";
+import { Knob } from "../components/knob.slint";
+
+// GATE (written and read over USB serial, see fx.rs).
+export component GateTab inherits Rectangle {
+    in property <length> slot;
+    in-out property <bool> gate-post;
+    callback fx-changed(int, float);
+    in-out property <bool> gate-enabled;
+    in-out property <float> gate-threshold;
+    in-out property <float> gate-release;
+    in-out property <float> gate-depth;
+
+        VerticalLayout {
+            spacing: 8px;
+            HorizontalLayout {
+                height: 24px;
+                spacing: 6px;
+                ModuleTitle { text: "NOISE GATE"; }
+                StateButton {
+                    horizontal-stretch: 0;
+                    width: 76px;
+                    height: 24px;
+                    on <=> root.gate-post;
+                    on-text: "Post amp";
+                    off-text: "Pre amp";
+                    toggled(on) => { root.fx-changed(41, on ? 1 : 0); }
+                }
+                OnOffChip {
+                    on <=> root.gate-enabled;
+                    toggled(on) => { root.fx-changed(40, on ? 1 : 0); }
+                }
+            }
+            VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Knob {
+                        width: root.slot;
+                        label: "Threshold";
+                        size: 52px;
+                        min-value: -100;
+                        max-value: 0;
+                        step: 1;
+                        decimals: 0;
+                        default-value: -64;
+                        unit: " dB";
+                        value <=> root.gate-threshold;
+                        edited(v) => { root.fx-changed(42, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: "Release";
+                        size: 52px;
+                        min-value: 5;
+                        max-value: 500;
+                        step: 1;
+                        decimals: 0;
+                        default-value: 20;
+                        unit: " ms";
+                        value <=> root.gate-release;
+                        edited(v) => { root.fx-changed(43, v); }
+                    }
+                    Knob {
+                        width: root.slot;
+                        label: "Depth";
+                        size: 52px;
+                        min-value: -100;
+                        max-value: -20;
+                        step: 1;
+                        decimals: 0;
+                        default-value: -60;
+                        unit: " dB";
+                        value <=> root.gate-depth;
+                        edited(v) => { root.fx-changed(44, v); }
+                    }
+                }
+            }
+        }
+}

@@ -208,7 +208,7 @@ B9 03 81 04 02 <size> <3rd> ...
 | Metadata | `B9 0D` followed by 13 fields, each `B9 02 BC <bufsize> <buf> <strlen>`; text = `buf[..strlen]`, cut at first NUL (bytes after it are garbage). Field 0 author, 1 date, **2 character**, 3 instrument, …, 12 description. Several `B9 0D` candidates may exist; take the first where all 13 fields parse. | `extract_character` |
 | Footswitch preset index | `B9 04 00 00 [80] <idx>` — present only in details **pushed** after a preset change on the pedal, absent from replies to host requests | `extract_current_preset` |
 
-On the pedal, the metadata strings are **empty** in practice, even on factory presets; only **character** (e.g. `CLEAN`, `DRIVE`, `STOMP - OVERDRIVE`) is populated. Amp model names are not stored (§9).
+On the pedal, the metadata strings are **empty** in practice, even on factory presets; only **character** (e.g. `CLEAN`, `DRIVE`, `STOMP - OVERDRIVE`) is populated. The tone model and cab names are not in this summary; they are in the full dump's slots (§4.3, "Body tree").
 
 Layout sanity check used by the app before trusting the array (guards against a shifted index table, since references disagree, §5): param 12 in 75..600, param 17 in 1000..4000, param 18 ∈ {0, 1}.
 
@@ -233,6 +233,41 @@ B9 03 81 03 02 81 <len lo> <len hi> 10 | B9 04 01 00 <idx> ... (body)
 The body length equals the header's `len` (30358 B on FW 1.6.24; don't hardcode it). Two consecutive reads are byte-identical. The body holds the raw model data (`BC 81 C8 35 …` region) the app does not decode.
 
 **Name buffer**: the 33 bytes right after the **first** `BC 21` following the body start (within its first few dozen bytes): ASCII, NUL-terminated, zero-filled after the name (32 characters max).
+
+#### Body tree
+
+The whole body parses cleanly with the value encoding (§3: `B9 n`/`BA n` = list/array of n nodes, `BC n` = blob of n bytes, `88` = f32, integers literal / `80` / `81` / `82`, lengths encoded the same way):
+
+```
+body     = list(4): [mode (01 = stored preset), 0, idx, contents]
+contents = list(4): [/0 details  — name, the BA 03 block with three 109-item arrays, metadata
+                     /1 AMP slot
+                     /2 int
+                     /3 CAB slot]
+slot     = list(5): [/0 16-byte id blob (BC 10)
+                     /1 list(2) of 33-byte name buffers (BC 21)
+                     /2 type (int)
+                     /3 data blob (BC 81 C8 35 = 13768 B)
+                     /4 …]
+```
+
+The slot's `/2` int is the **kind of content**, with the same meaning in either slot (hardware-checked on 6 presets):
+
+| Content kind | Meaning | Names |
+|---|---|---|
+| 0 | Empty. The slot **keeps stale data** from earlier use (e.g. an old cab name): never read it. An empty CAB slot means the AMP slot's tone model plays its own cab. | — |
+| 1, 4 | Tone model (1 seen for a stomp capture, 4 for amp captures; the exact difference is unknown; 2 is treated the same, unseen) | Name = name buffer 0 up to NUL (e.g. "Ratfish", "Polite Twin"); based on = data blob after 4 header bytes, ASCII up to NUL (e.g. "ProCo Rat", "Fender Twin Reverb") |
+| 3 | Custom IR (seen in the CAB slot only) | IR name = data blob from byte 0, ASCII up to NUL; name buffer empty |
+
+The app shows the AMP slot only when it holds a tone model, and the CAB slot as "Model cab" (empty), "IR: name" (3), or "Cab: name · based on" (a tone model's cab).
+
+Strings are printable ASCII terminated by NUL, with garbage after the NUL. The app parses the tree, picks the slots by path, and shows nothing for unknown types or anything that doesn't parse.
+
+Edit buffer (documented, unused by the app): `B9 04 00 00 00` addresses the live edit buffer in writes; `B9 04 10 00 00 01` reads it.
+
+#### Library list `0x0208` (documented, unused)
+
+Request `B9 03 00 82 06 00 80 10 03 | B9 02 81 08 02 10`; reply type `0x0208` containing `BA 81 2C 01` = an array of 300 × 16-byte ids. The amp and IR slot ids (slot `/0`) appear in it.
 
 ### 4.3.1 Preset write (rename) `0x0203`
 
@@ -554,7 +589,7 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 | State `0x0201` list[1] | Second item of the `B9 02` list: `00` and `01` seen; meaning unknown. |
 | Hello reply | Content not decoded. |
 | Global config | 19 of the 22 floats identified on hardware (see the table in §4.5); idx 14 unknown, idx 0/1 (exp. calibration) deduced but unexercised. The `0x0206` body after the 22 floats is opaque. |
-| Amp model names | Not stored on the device: metadata slots are empty even on factory presets; only "character" is populated. |
+| Amp model / cab names | Readable from the full dump's AMP and CAB slots (§4.3, "Body tree"); the app shows them. The summary's metadata strings are empty; only "character" is populated there. |
 | VIR cab model names | Resolved: 40 models (0..39) on FW 1.6.24, see §5 param 25. |
 | Array indices 10, 14, 15, 19, 22, 23 | Present in dumps, not identified. |
 | Tuner | No pitch data and no notification of pedal-side tuner toggles (see §8). Tuner-mode quirk (FW 1.6.24, MIDI-invoked tuner, analog outs): Off shows the tuner screen but mutes, Through passes audio, and Muted unexpectedly also passes audio. |

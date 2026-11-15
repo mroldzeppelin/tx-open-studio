@@ -1621,6 +1621,12 @@ export component AppWindow inherits Window {
     in property <int> rename-busy: 0;
     // Save of the current preset's live values in flight (Rust).
     in property <bool> save-busy: false;
+    // Amp model / cab slot names from the current preset's full dump
+    // ("" until read); cab-slot-type: 0 model cab, 3 IR, 4 borrowed cab,
+    // -1 unknown.
+    in property <string> amp-model-text;
+    in property <string> cab-source-text;
+    in property <int> cab-slot-type: -1;
     callback save-preset();
     callback rename-preset(int, string);
     pure callback name-filter(string) -> string;
@@ -2908,7 +2914,22 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             height: 24px;
                             spacing: 6px;
-                            ModuleTitle { text: "AMPLIFIER"; }
+                            ModuleTitle {
+                                horizontal-stretch: 0;
+                                text: "AMPLIFIER";
+                            }
+                            // Tone model name · what it's based on.
+                            Text {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                text: root.amp-model-text;
+                                color: Theme.muted;
+                                font-size: 10px;
+                                font-family: Theme.mono-font;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                wrap: no-wrap;
+                            }
                             // EQ before or after the amp model (param 10).
                             StateButton {
                                 horizontal-stretch: 0;
@@ -3064,11 +3085,31 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             height: 24px;
                             spacing: 6px;
-                            ModuleTitle { text: "CABINET"; }
+                            ModuleTitle {
+                                horizontal-stretch: 0;
+                                text: "CABINET";
+                            }
+                            // What the preset's cab slot holds; dimmed while
+                            // VIR or Off is selected (it plays when switched
+                            // back to the slot option).
+                            Text {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                text: root.cab-source-text;
+                                color: Theme.muted;
+                                opacity: root.cab-type == 0 ? 1 : 0.5;
+                                font-size: 10px;
+                                font-family: Theme.mono-font;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                wrap: no-wrap;
+                            }
+                            // Option 0 is the preset's cab slot, named after
+                            // what it holds.
                             Stepper {
-                                value-width: 66px; // "Tone Model"
+                                value-width: 36px; // "Model"
                                 height: 24px;
-                                options: ["Tone Model", "VIR", "Off"];
+                                options: [root.cab-slot-type == 3 ? "IR" : root.cab-slot-type == 4 ? "Cab" : "Model", "VIR", "Off"];
                                 index <=> root.cab-type;
                                 picked(i) => { root.fx-changed(50, i); }
                             }

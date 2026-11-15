@@ -734,6 +734,25 @@ impl PresetNames {
     }
 }
 
+/// AMP tab header line: "Ratfish · ProCo Rat" (model · based on).
+fn amp_model_text(amp: &tonex_serial::AmpModel) -> String {
+    match &amp.based_on {
+        Some(b) => format!("{} · {b}", amp.name),
+        None => amp.name.clone(),
+    }
+}
+
+/// CAB tab header line: "Model cab", "IR: <name>", "Cab: <model> · <based on>".
+fn cab_source_text(cab: &tonex_serial::CabSource) -> String {
+    use tonex_serial::CabSource::*;
+    match cab {
+        ModelCab => "Model cab".into(),
+        Ir(name) => format!("IR: {name}"),
+        Borrowed { name, based_on: Some(b) } => format!("Cab: {name} · {b}"),
+        Borrowed { name, based_on: None } => format!("Cab: {name}"),
+    }
+}
+
 /// How long after a rename a pushed preset change for the renamed preset
 /// is taken as an echo of the write, not as a footswitch change.
 const RENAME_ECHO_GUARD: Duration = Duration::from_secs(3);
@@ -771,6 +790,10 @@ fn show_preset(ui: &AppWindow, names: &PresetNames, preset: i32) {
     // Row first: the list scrolls to it when `preset` changes.
     ui.set_selected_row(list_row_of(ui, preset));
     ui.set_preset(preset);
+    // Slot names of the previous preset; the new ones follow its dump read.
+    ui.set_amp_model_text("".into());
+    ui.set_cab_source_text("".into());
+    ui.set_cab_slot_type(-1);
     // Until the new preset's details arrive.
     ui.set_preset_level_known(false);
     ui.set_eq_freq_known(false);
@@ -870,6 +893,7 @@ impl SyncCtx {
         });
         // Params first: the knobs shouldn't wait for the ~10 s name scan.
         let _ = pedal.request_amp_params((clamp_preset(preset) - 1) as u8);
+        let _ = pedal.request_tone_info((clamp_preset(preset) - 1) as u8);
         let _ = pedal.request_globals();
         if !self.names.loaded() {
             let _ = pedal.request_names();
@@ -995,6 +1019,13 @@ impl SyncCtx {
         }
     }
 
+    /// Amp model / cab source names of `preset` (read after its params).
+    fn request_tone_info(&self, preset: i32) {
+        if let Err(e) = self.with_serial(|p| p.request_tone_info((clamp_preset(preset) - 1) as u8)) {
+            eprintln!("TONEX tone info request failed: {e}");
+        }
+    }
+
     fn request_amp_params(&self, preset: i32) {
         if let Err(e) = self.with_serial(|p| p.request_amp_params((clamp_preset(preset) - 1) as u8)) {
             eprintln!("TONEX amp params request failed: {e}");
@@ -1071,6 +1102,7 @@ impl SyncCtx {
                     show_preset(ui, &self.names, preset);
                     self.amp().clear();
                     self.request_amp_params(preset);
+                    self.request_tone_info(preset);
                 }
             }
             Event::Renamed { preset_idx, result } => {
@@ -1096,10 +1128,13 @@ impl SyncCtx {
                     // Saved: the live values are now the preset's stored
                     // state (EDITED clears, double-click resets follow).
                     Ok(()) if ui.get_preset() == i32::from(preset_idx) + 1 => {
-                        let mut amp = self.amp();
-                        amp.diff.rebaseline();
-                        ui.set_preset_dirty(amp.diff.dirty());
-                        fx::set_loaded_defaults(ui, &amp.diff);
+                        {
+                            let mut amp = self.amp();
+                            amp.diff.rebaseline();
+                            ui.set_preset_dirty(amp.diff.dirty());
+                            fx::set_loaded_defaults(ui, &amp.diff);
+                        }
+                        self.request_tone_info(ui.get_preset());
                     }
                     Ok(()) => {} // the UI moved on to another preset meanwhile
                     Err(e) => {
@@ -1127,6 +1162,21 @@ impl SyncCtx {
                     Some(p) => self.apply_amp_params(ui, &p),
                     None => self.request_amp_params(preset),
                 }
+                self.request_tone_info(preset);
+            }
+            Event::ToneInfo { preset_idx, info } => {
+                if ui.get_preset() != i32::from(preset_idx) + 1 {
+                    return; // stale: the UI moved on to another preset
+                }
+                let info = info.unwrap_or_default();
+                ui.set_amp_model_text(info.amp.as_ref().map(amp_model_text).unwrap_or_default().into());
+                ui.set_cab_source_text(info.cab.as_ref().map(cab_source_text).unwrap_or_default().into());
+                ui.set_cab_slot_type(match info.cab {
+                    Some(tonex_serial::CabSource::ModelCab) => 0,
+                    Some(tonex_serial::CabSource::Ir(_)) => 3,
+                    Some(tonex_serial::CabSource::Borrowed { .. }) => 4,
+                    None => -1,
+                });
             }
         }
     }
@@ -1328,6 +1378,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 ctx.lose_pedal(&ui, &format!("MIDI send failed: {e}"));
             }
             ctx.request_amp_params(preset);
+            ctx.request_tone_info(preset);
         });
     }
 
@@ -1798,5 +1849,21 @@ mod tests {
         assert!(!g.recent(tonex_serial::G_MIDI_CHANNEL, t0));
         g.touch(99, t0); // out of range: ignored
         assert!(!g.recent(99, t0));
+    }
+
+    #[test]
+    fn slot_texts() {
+        use tonex_serial::{AmpModel, CabSource};
+        assert_eq!(
+            amp_model_text(&AmpModel { name: "Ratfish".into(), based_on: Some("ProCo Rat".into()) }),
+            "Ratfish · ProCo Rat"
+        );
+        assert_eq!(amp_model_text(&AmpModel { name: "Solo".into(), based_on: None }), "Solo");
+        assert_eq!(cab_source_text(&CabSource::ModelCab), "Model cab");
+        assert_eq!(cab_source_text(&CabSource::Ir("B.Alnico 2".into())), "IR: B.Alnico 2");
+        assert_eq!(
+            cab_source_text(&CabSource::Borrowed { name: "51st Hi".into(), based_on: Some("Peavey 5150".into()) }),
+            "Cab: 51st Hi · Peavey 5150"
+        );
     }
 }

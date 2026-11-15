@@ -462,6 +462,184 @@ fn patch_dump_name(body: &[u8], name: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------- value tree
+
+/// One node of a payload in the pedal's value encoding: `B9 n` / `BA n` =
+/// list / array of n nodes, `BC n` = blob of n bytes, `88` = f32 LE,
+/// anything else = an integer (literal < 0x80, `80 xx`, `81`/`82` u16 LE).
+/// Lengths use the integer encoding too.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Node<'a> {
+    List(Vec<Node<'a>>),
+    Blob(&'a [u8]),
+    Float(f32),
+    Int(u16),
+}
+
+/// Nesting limit for the tree walker (real dumps are ~5 deep).
+const MAX_TREE_DEPTH: usize = 24;
+
+fn parse_node<'a>(p: &'a [u8], pos: &mut usize, depth: usize) -> Option<Node<'a>> {
+    if depth > MAX_TREE_DEPTH {
+        return None;
+    }
+    match *p.get(*pos)? {
+        0xB9 | 0xBA => {
+            *pos += 1;
+            let n = read_u16_value(p, pos)?;
+            let mut items = Vec::with_capacity(usize::from(n).min(256));
+            for _ in 0..n {
+                items.push(parse_node(p, pos, depth + 1)?);
+            }
+            Some(Node::List(items))
+        }
+        0xBC => {
+            *pos += 1;
+            let n = usize::from(read_u16_value(p, pos)?);
+            let blob = p.get(*pos..*pos + n)?;
+            *pos += n;
+            Some(Node::Blob(blob))
+        }
+        FLOAT_TAG => {
+            let b = p.get(*pos + 1..*pos + 5)?;
+            *pos += 5;
+            Some(Node::Float(f32::from_le_bytes([b[0], b[1], b[2], b[3]])))
+        }
+        // Literal / 80 / 81 / 82 integers; any other tag fails the parse.
+        _ => read_u16_value(p, pos).map(Node::Int),
+    }
+}
+
+/// Parses the first node of `p` (None on any malformed or unknown item).
+pub fn parse_tree(p: &[u8]) -> Option<Node<'_>> {
+    parse_node(p, &mut 0, 0)
+}
+
+impl<'a> Node<'a> {
+    /// The node at `path` (list indices from this node).
+    pub fn at(&self, path: &[usize]) -> Option<&Node<'a>> {
+        path.iter().try_fold(self, |node, &i| match node {
+            Node::List(items) => items.get(i),
+            _ => None,
+        })
+    }
+
+    fn items(&self) -> Option<&[Node<'a>]> {
+        match self {
+            Node::List(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    fn blob(&self) -> Option<&'a [u8]> {
+        match self {
+            Node::Blob(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    fn int(&self) -> Option<u16> {
+        match self {
+            Node::Int(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------- tone model / cab source
+
+/// Amp (tone model) slot: model name and what it's based on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AmpModel {
+    pub name: String,
+    pub based_on: Option<String>,
+}
+
+/// What the cab slot holds.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CabSource {
+    /// Empty cab slot: the amp slot's tone model plays its own cab.
+    ModelCab,
+    /// A custom IR (its name).
+    Ir(String),
+    /// The cab of another tone model.
+    Borrowed { name: String, based_on: Option<String> },
+}
+
+/// A slot's content, by its content-kind int (same meaning in either
+/// slot; hardware-checked on 6 presets): 0 empty (the slot keeps stale
+/// data from earlier use, never read), 1 / 4 tone model (1 seen for a
+/// stomp capture, 4 for amp captures; 2 treated alike, unseen), 3 custom
+/// IR.
+#[derive(Clone, Debug, PartialEq)]
+enum SlotContent {
+    Empty,
+    Model { name: String, based_on: Option<String> },
+    Ir(String),
+}
+
+/// Amp and cab slot names of a preset, from its full dump.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ToneInfo {
+    pub amp: Option<AmpModel>,
+    pub cab: Option<CabSource>,
+}
+
+/// Longest slot string read (names are short; garbage follows the NUL).
+const SLOT_TEXT_MAX: usize = 64;
+
+/// ASCII text up to the first NUL (at most `SLOT_TEXT_MAX` bytes), trimmed;
+/// None if empty or not printable ASCII.
+fn slot_text(bytes: &[u8]) -> Option<String> {
+    let head = &bytes[..bytes.len().min(SLOT_TEXT_MAX)];
+    let text = &head[..head.iter().position(|&b| b == 0).unwrap_or(head.len())];
+    if !text.iter().all(|b| (0x20..=0x7E).contains(b)) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(text).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// A slot `[id blob, [name, name], kind, data blob, …]` → its content.
+/// Model: name buffer 0, based-on = data after 4 header bytes; IR: data
+/// from byte 0. Unknown kind or unreadable name: None.
+fn slot_content(slot: &Node<'_>) -> Option<SlotContent> {
+    let items = slot.items()?;
+    let kind = items.get(2)?.int()?;
+    if kind == 0 {
+        return Some(SlotContent::Empty);
+    }
+    let data = items.get(3)?.blob()?;
+    match kind {
+        1 | 2 | 4 => Some(SlotContent::Model {
+            name: items.get(1)?.at(&[0])?.blob().and_then(slot_text)?,
+            based_on: data.get(4..).and_then(slot_text),
+        }),
+        3 => slot_text(data).map(SlotContent::Ir),
+        _ => None,
+    }
+}
+
+/// Names from a full dump body: body = [mode, 0, idx, contents], contents =
+/// [details, amp slot, int, cab slot]. The amp line shows a tone model
+/// only; the cab slot maps empty → the model's own cab, IR → IR, tone model
+/// → borrowed cab. Unknown or malformed parts: that part is None. A body
+/// that doesn't parse: None.
+pub fn tone_info(body: &[u8]) -> Option<ToneInfo> {
+    let tree = parse_tree(body)?;
+    let contents = tree.at(&[3])?;
+    let amp = match contents.at(&[1]).and_then(slot_content) {
+        Some(SlotContent::Model { name, based_on }) => Some(AmpModel { name, based_on }),
+        _ => None,
+    };
+    let cab = contents.at(&[3]).and_then(slot_content).map(|c| match c {
+        SlotContent::Empty => CabSource::ModelCab,
+        SlotContent::Ir(name) => CabSource::Ir(name),
+        SlotContent::Model { name, based_on } => CabSource::Borrowed { name, based_on },
+    });
+    Some(ToneInfo { amp, cab })
+}
+
 /// The current preset's live state as the app knows it, for a save: the
 /// 109-item parameter array as last read, with every edit and pedal push
 /// since (shorter than `PARAM_COUNT`, or empty, if the read was partial or
@@ -1156,6 +1334,9 @@ pub enum Event {
     /// Result of `Pedal::save_preset` (0-based preset index); always sent,
     /// also when the session ends mid-operation.
     Saved { preset_idx: u8, result: Result<(), String> },
+    /// Result of `Pedal::request_tone_info` (0-based preset index); None
+    /// when the dump couldn't be read or parsed.
+    ToneInfo { preset_idx: u8, info: Option<ToneInfo> },
     /// The pedal switched preset by itself (footswitch); carries the new
     /// preset's amp params when they parsed, and its raw parameter array.
     PresetChanged { preset_idx: u8, params: Option<AmpParams>, raw: Vec<f32> },
@@ -1221,6 +1402,8 @@ enum Request {
     Rename(u8, String),
     /// Save the live values into a preset (index, snapshot).
     Save(u8, LiveValues),
+    /// Read a preset's amp/cab slot names (index).
+    ToneInfo(u8),
 }
 
 /// Handle to the session thread that owns the serial port. Dropping it ends
@@ -1309,6 +1492,12 @@ impl Pedal {
             return Err(format!("preset index {idx} out of range"));
         }
         self.send(Request::Save(idx, values))
+    }
+
+    /// Reads the amp model / cab source names of preset `idx` (0-based)
+    /// from its full dump; answered with `Event::ToneInfo`. Read-only.
+    pub fn request_tone_info(&self, idx: u8) -> Result<(), String> {
+        self.send(Request::ToneInfo(idx))
     }
 
     /// Reads the global config; answered with `Event::Globals`.
@@ -1447,6 +1636,7 @@ impl<F: Fn(Event)> Session<'_, F> {
         let mut latest_read = None;
         let mut renames = Vec::new();
         let mut saves = Vec::new();
+        let mut latest_tone = None;
         let mut rest = VecDeque::new();
         for r in std::mem::take(&mut self.queue) {
             match r {
@@ -1466,6 +1656,7 @@ impl<F: Fn(Event)> Session<'_, F> {
                 Request::AmpParams(idx) => latest_read = Some(idx),
                 Request::Rename(idx, name) => renames.push((idx, name)),
                 Request::Save(idx, values) => saves.push((idx, values)),
+                Request::ToneInfo(idx) => latest_tone = Some(idx),
                 other => rest.push_back(other),
             }
         }
@@ -1490,6 +1681,21 @@ impl<F: Fn(Event)> Session<'_, F> {
             if let Some(value) = read.level {
                 (self.on_event)(Event::PresetLevel { preset_idx: Some(idx), value });
             }
+            served = true;
+        }
+        // Names after the params: only the newest request, footswitch
+        // pushes still handled meanwhile.
+        if let Some(idx) = latest_tone {
+            let info = match self.fetch_dump(idx, false)? {
+                Ok(dump) => dump_body(&dump, idx).ok().and_then(tone_info),
+                Err(e) => {
+                    if self.debug {
+                        eprintln!("TONEX serial: tone info for preset {idx}: {e}");
+                    }
+                    None
+                }
+            };
+            (self.on_event)(Event::ToneInfo { preset_idx: idx, info });
             served = true;
         }
         for (idx, name) in renames {
@@ -1517,11 +1723,12 @@ impl<F: Fn(Event)> Session<'_, F> {
     }
 
     /// Requests a full dump of preset `idx` and returns its reply payload,
-    /// handling other frames meanwhile. Preset-details pushes are dropped
-    /// here: one may echo our own write and must not look like a
-    /// footswitch change. Inner Err: no valid dump (with the last layout
-    /// problem seen); outer Err: link failure.
-    fn fetch_dump(&mut self, idx: u8) -> Result<Result<Vec<u8>, String>, String> {
+    /// handling other frames meanwhile. With `drop_pushes` (rename/save),
+    /// preset-details pushes are dropped: one may echo our own write and
+    /// must not look like a footswitch change; read-only callers keep them.
+    /// Inner Err: no valid dump (with the last layout problem seen); outer
+    /// Err: link failure.
+    fn fetch_dump(&mut self, idx: u8, drop_pushes: bool) -> Result<Result<Vec<u8>, String>, String> {
         self.link.send(&full_dump_request(idx))?;
         let until = Instant::now() + DUMP_TIMEOUT;
         let mut problem = "no preset dump received".to_string();
@@ -1531,7 +1738,7 @@ impl<F: Fn(Event)> Session<'_, F> {
                     Ok(_) => return Ok(Ok(payload)),
                     Err(e) => problem = e,
                 },
-                Some(TYPE_PRESET_DETAILS) => {
+                Some(TYPE_PRESET_DETAILS) if drop_pushes => {
                     if self.debug {
                         eprintln!("TONEX serial: preset push during a dump read dropped");
                     }
@@ -1548,7 +1755,7 @@ impl<F: Fn(Event)> Session<'_, F> {
     /// written or not verified; outer Err: link failure.
     fn rename_preset(&mut self, idx: u8, name: &str) -> Result<Result<String, String>, String> {
         // 1. A fresh dump, validated.
-        let dump = match self.fetch_dump(idx)? {
+        let dump = match self.fetch_dump(idx, true)? {
             Ok(d) => d,
             Err(e) => return Ok(Err(format!("reading the preset: {e}"))),
         };
@@ -1590,7 +1797,7 @@ impl<F: Fn(Event)> Session<'_, F> {
                 self.dispatch(&payload, false);
             }
         }
-        Ok(self.fetch_dump(idx)?.map_err(|e| format!("verifying the write: {e}")))
+        Ok(self.fetch_dump(idx, true)?.map_err(|e| format!("verifying the write: {e}")))
     }
 
     /// The save operation (see `Pedal::save_preset`), same shape as a
@@ -1598,7 +1805,7 @@ impl<F: Fn(Event)> Session<'_, F> {
     /// failure.
     fn save_preset(&mut self, idx: u8, values: &LiveValues) -> Result<Result<(), String>, String> {
         // 1. A fresh dump, validated.
-        let dump = match self.fetch_dump(idx)? {
+        let dump = match self.fetch_dump(idx, true)? {
             Ok(d) => d,
             Err(e) => return Ok(Err(format!("reading the preset: {e}"))),
         };
@@ -1830,6 +2037,138 @@ impl<F: Fn(Event)> Session<'_, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Synthetic encoder for tree tests (the pedal's value encoding).
+    fn enc_int(n: u16) -> Vec<u8> {
+        if n < 0x80 {
+            vec![n as u8]
+        } else if n < 0x100 {
+            vec![0x80, n as u8]
+        } else {
+            vec![0x81, n as u8, (n >> 8) as u8]
+        }
+    }
+    fn enc_list(tag: u8, items: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut out = vec![tag];
+        out.extend(enc_int(items.len() as u16));
+        items.into_iter().for_each(|i| out.extend(i));
+        out
+    }
+    fn enc_blob(bytes: &[u8]) -> Vec<u8> {
+        let mut out = vec![0xBC];
+        out.extend(enc_int(bytes.len() as u16));
+        out.extend_from_slice(bytes);
+        out
+    }
+    /// 33-byte name buffer: text, NUL, then garbage.
+    fn enc_name(text: &str) -> Vec<u8> {
+        let mut buf = vec![0x5A; NAME_BUF_LEN];
+        buf[..text.len()].copy_from_slice(text.as_bytes());
+        buf[text.len()] = 0;
+        enc_blob(&buf)
+    }
+    fn enc_slot(name: &str, kind: u16, data: &[u8]) -> Vec<u8> {
+        enc_list(0xB9, vec![enc_blob(&[7; 16]), enc_list(0xB9, vec![enc_name(name), enc_name("")]), enc_int(kind), enc_blob(data), enc_int(0)])
+    }
+    /// `len` bytes: `prefix`, NUL, garbage.
+    fn slot_data(prefix: &[u8], len: usize) -> Vec<u8> {
+        let mut d = vec![0xEE; len];
+        d[..prefix.len()].copy_from_slice(prefix);
+        d[prefix.len()] = 0;
+        d
+    }
+    fn enc_body(idx: u16, amp: Vec<u8>, cab: Vec<u8>) -> Vec<u8> {
+        let floats = enc_list(0xBA, (0..5).map(|i| { let mut f = vec![FLOAT_TAG]; f.extend((i as f32).to_le_bytes()); f }).collect());
+        let details = enc_list(0xB9, vec![enc_name("PRESET"), enc_list(0xBA, vec![floats.clone(), floats.clone(), floats])]);
+        let contents = enc_list(0xB9, vec![details, amp, enc_int(2), cab]);
+        enc_list(0xB9, vec![enc_int(1), enc_int(0), enc_int(idx), contents])
+    }
+    fn amp_slot() -> Vec<u8> {
+        enc_slot("Ratfish", 1, &slot_data(b"\x01\x02\x03\x04ProCo Rat", 300))
+    }
+
+    #[test]
+    fn value_tree_walker() {
+        let mut p = enc_list(0xB9, vec![enc_int(5), enc_int(200), enc_int(1000), enc_blob(&[1, 2, 3]), enc_blob(&[9; 300])]);
+        p.extend([0x88, 0, 0, 0x80, 0x3F]); // trailing node after the list: ignored
+        let tree = parse_tree(&p).unwrap();
+        assert_eq!(tree.at(&[0]), Some(&Node::Int(5)));
+        assert_eq!(tree.at(&[1]), Some(&Node::Int(200)));
+        assert_eq!(tree.at(&[2]), Some(&Node::Int(1000)));
+        assert_eq!(tree.at(&[3]), Some(&Node::Blob(&[1, 2, 3])));
+        assert_eq!(tree.at(&[4]).and_then(|n| n.blob()).map(|b| b.len()), Some(300));
+        assert_eq!(tree.at(&[5]), None);
+        assert_eq!(tree.at(&[0, 0]), None, "an int has no children");
+        assert_eq!(parse_tree(&[0x88, 0, 0, 0x80, 0x3F]), Some(Node::Float(1.0)));
+        // Nested lists and arrays.
+        let nested = enc_list(0xB9, vec![enc_list(0xBA, vec![enc_int(1), enc_list(0xB9, vec![enc_int(42)])])]);
+        assert_eq!(parse_tree(&nested).unwrap().at(&[0, 1, 0]), Some(&Node::Int(42)));
+        // Malformed: truncated blob/list, unknown tag.
+        assert!(parse_tree(&[0xBC, 0x05, 1, 2]).is_none());
+        assert!(parse_tree(&[0xB9, 0x03, 0x01, 0x02]).is_none());
+        assert!(parse_tree(&[0xB9, 0x01, 0x99]).is_none());
+    }
+
+    #[test]
+    fn tone_info_from_slots() {
+        // Amp + own model cab (type 0).
+        let body = enc_body(42, amp_slot(), enc_slot("", 0, &[0; 40]));
+        assert!(dump_body(&{
+            let mut p = vec![0xB9, 0x03, 0x81, 0x03, 0x02, 0x81];
+            p.extend((body.len() as u16).to_le_bytes());
+            p.push(0x10);
+            p.extend(&body);
+            p
+        }, 42).is_ok(), "synthetic body passes the dump checks");
+        let info = tone_info(&body).unwrap();
+        assert_eq!(info.amp, Some(AmpModel { name: "Ratfish".into(), based_on: Some("ProCo Rat".into()) }));
+        assert_eq!(info.cab, Some(CabSource::ModelCab));
+        // Custom IR (type 3): name from the data blob, garbage after NUL.
+        let ir = enc_slot("", 3, &slot_data(b"B.Alnico 2 Liveplayrock", 200));
+        assert_eq!(tone_info(&enc_body(130, amp_slot(), ir)).unwrap().cab, Some(CabSource::Ir("B.Alnico 2 Liveplayrock".into())));
+        // Borrowed cab (type 4).
+        let borrowed = enc_slot("51st Hi", 4, &slot_data(b"\0\0\0\0Peavey 5150", 300));
+        assert_eq!(
+            tone_info(&enc_body(1, amp_slot(), borrowed)).unwrap().cab,
+            Some(CabSource::Borrowed { name: "51st Hi".into(), based_on: Some("Peavey 5150".into()) })
+        );
+        // Unknown kinds: nothing.
+        let info = tone_info(&enc_body(1, enc_slot("X", 9, &[0; 8]), enc_slot("", 7, &[0; 8]))).unwrap();
+        assert_eq!((info.amp, info.cab), (None, None));
+    }
+
+    #[test]
+    fn slot_kinds_apply_to_either_slot() {
+        // Amp captures use kind 4 in the AMP slot (2 treated alike).
+        for kind in [4, 2] {
+            let amp = enc_slot("Polite Twin", kind, &slot_data(b"\0\0\0\0Fender Twin Reverb", 300));
+            let info = tone_info(&enc_body(9, amp, enc_slot("", 0, &[0; 8]))).unwrap();
+            assert_eq!(info.amp, Some(AmpModel { name: "Polite Twin".into(), based_on: Some("Fender Twin Reverb".into()) }));
+        }
+        // An empty (kind 0) cab slot keeps stale data: never shown.
+        let stale = enc_slot("51st Hi", 0, &slot_data(b"\0\0\0\0Peavey 5150", 300));
+        assert_eq!(tone_info(&enc_body(0, amp_slot(), stale)).unwrap().cab, Some(CabSource::ModelCab));
+        // Empty or IR content in the AMP slot: no amp line.
+        let ir = enc_slot("", 3, &slot_data(b"Some IR", 50));
+        for amp in [enc_slot("Old", 0, &slot_data(b"\0\0\0\0Old based", 50)), ir] {
+            assert_eq!(tone_info(&enc_body(0, amp, enc_slot("", 0, &[0; 8]))).unwrap().amp, None);
+        }
+        // A model without a readable name: nothing (no guessing).
+        let unnamed = enc_slot("", 4, &slot_data(b"\0\0\0\0Something", 50));
+        assert_eq!(tone_info(&enc_body(0, unnamed, enc_slot("", 0, &[0; 8]))).unwrap().amp, None);
+    }
+
+    #[test]
+    fn slot_text_rules() {
+        assert_eq!(slot_text(b"Ratfish\0garbage"), Some("Ratfish".into()));
+        assert_eq!(slot_text(b"  padded  \0"), Some("padded".into()));
+        assert_eq!(slot_text(b"\0Ratfish"), None, "empty before the NUL");
+        assert_eq!(slot_text(b"Bad\x01name\0"), None, "non-printable");
+        assert_eq!(slot_text(&[b'A'; 100]).map(|t| t.len()), Some(SLOT_TEXT_MAX), "capped");
+        // A body that doesn't parse gives no names at all.
+        let body = enc_body(1, amp_slot(), enc_slot("", 0, &[0; 8]));
+        assert_eq!(tone_info(&body[..body.len() - 3]), None);
+    }
 
     /// Synthetic full-dump reply for preset `idx` (no real dump bytes):
     /// header, body `B9 04 01 00 <idx> B9 02 BC 21 <33-byte name> <filler>`.

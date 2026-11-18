@@ -46,7 +46,7 @@ Changes are sent to the pedal as you turn a knob in the app. Sync goes both ways
 
 Other details:
 
-- **Model and cab choice from your pedal's library**: the app loads library items by id — the pedal fills in the model data itself, so nothing is copied or stored but names. On first connect the app learns the names in the background (status bar `LIBRARY 57/192`; × stops, ↻ learns them again). While it does, the cab is switched off and restored afterwards; everything stays pickable meanwhile ("Amp 7" / "Cab 7" until named). Browsing models on the pedal's MODEL encoder updates the app's names live. Names and the per-preset lines are cached as JSON in `~/.local/share/tx-open-studio/`.
+- **Model and cab choice from your pedal's library**: the app loads library items by id — the pedal fills in the model data itself, so nothing is copied or stored but names. On first connect the app reads the names from the pedal in the background (status bar `LIBRARY 57/192`; × stops, ↻ reads them again), without touching the sound; everything stays pickable meanwhile ("Amp 7" / "Cab 7" until named). Browsing models on the pedal's MODEL encoder updates the app's names live. Names and the per-preset lines are cached as JSON in `~/.local/share/tx-open-studio/`.
 
 - Knobs are dragged vertically. Double-click a knob to reset it to its default value.
 - An **EDITED** indicator shows when the live state differs from the preset as last loaded.
@@ -158,7 +158,6 @@ The desktop entry runs `tx-open-studio`, so the binary has to be on your `PATH` 
   ```sh
   TX_DEBUG_SERIAL=1 tx-open-studio
   ```
-- `TX_NO_LIBRARY_SCAN=1` skips the background library scan and the preset pass (testing): only the current preset's models get names, the rest stay pickable as "Amp N" / "Cab N".
 
 ## Limitations
 

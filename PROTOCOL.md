@@ -132,6 +132,9 @@ Message type → handler (`frame_type`, `Session::dispatch`):
 | `0x0204` | pedal → host | Preset details (reply and footswitch push) |
 | `0x0206` | both | Global config (reply; host write) |
 | `0x0207` | both | Single parameter change (pedal push; host write) |
+| `0x0208` | pedal → host | Library list (reply) |
+| `0x0209` | host → pedal | Library item read by list position |
+| `0x020A` | pedal → host | Library item (reply to `0x0209`) |
 
 ### 4.1 Hello (handshake)
 
@@ -256,7 +259,7 @@ The slot's `/2` int is the **kind of content**, with the same meaning in either 
 | Content kind | Meaning | Names |
 |---|---|---|
 | 0 | Empty. The slot **keeps stale data** from earlier use (e.g. an old cab name): never read it. An empty CAB slot means the AMP slot's tone model plays its own cab. | — |
-| 1, 4 | Tone model (1 seen for a stomp capture, 4 for amp captures; the exact difference is unknown; 2 is treated the same, unseen) | Name = name buffer 0 up to NUL (e.g. "Ratfish", "Polite Twin"); based on = data blob after 4 header bytes, ASCII up to NUL (e.g. "ProCo Rat", "Fender Twin Reverb") |
+| 1, 2, 4 | Tone model (1 seen for a stomp capture, 4 for amp captures; 2 seen only in library item reads (§4.3 `0x020A`), e.g. "… (Amp)" and pre-amp items; the exact differences are unknown, all read the same) | Name = name buffer 0 up to NUL (e.g. "Ratfish", "Polite Twin"); based on = data blob after 4 header bytes, ASCII up to NUL (e.g. "ProCo Rat", "Fender Twin Reverb") |
 | 3 | Custom IR (seen in the CAB slot only) | IR name = data blob from byte 0, ASCII up to NUL; name buffer empty |
 
 The app shows the AMP slot only when it holds a tone model, and the CAB slot as the AMP model's name (empty: its own cab), "IR · name" (3), or "name · based on" (a tone model's cab).
@@ -347,17 +350,38 @@ The app's loads (`Pedal::apply_slot`, `with_library_slot` / `model_cab_body`):
 
 Slot items after `/3` (`/4` …) are kept from the slot being replaced. After the write the app polls the live buffer (every 120 ms, up to 1.5 s) until the slot holds the id with data no longer zero, and checks that the active preset didn't change; then it shows the names and the pedal's dirty flag (EDITED). Saving works as before (§4.3.1, live buffer → stored preset).
 
+#### Library item read `0x0209` → `0x020A`
+
+Seen in the official editor's traffic (it sends this only for library items missing from its local cache, also offline). Hardware-verified 2026-11-18 on FW 1.6.24: all 192 used positions read back to back, about 85 ms each (16 s in total), no failures, no pushes in between, the live buffer byte-identical and the active preset unchanged before and after. Read-only.
+
+```
+B9 03 81 09 02 82 <len LE> 80 10 03 | B9 03 10 00 <position>
+position 150:  B9 03 81 09 02 82 06 00 80 10 03 | B9 03 10 00 80 96
+```
+
+`position` is the 0-based index into the `0x0208` array (§4.3 "Library list"), in the value encoding (§3; ≥ 256 would be `81 lo hi`, unexercised: the test pedal uses positions 0–191). The size field is the body length.
+
+Reply, type `0x020A` (~14 KB):
+
+```
+B9 03 81 0A 02 81 <len LE> 10 | B9 03 00 <position> <slot>
+```
+
+| Body item | Value |
+|---|---|
+| 0 | `00` |
+| 1 | the requested position |
+| 2 | the item as a **slot** (same layout as a dump's AMP/CAB slot, "Body tree" above): `/0` 16-byte id (= the `0x0208` id at that position), `/1` list(2) [33-byte name buffer, name length], `/2` content kind, `/3` data blob (13768 B), `/4` list(9) metadata |
+
+Kinds seen on the test pedal: 4 (150 items), 1 (24), 2 (17), 3 (1). Names sit as in a dump slot: kinds 1, 2, 4 in the name buffer, with the based-on text at data offset 4; kind 3 (IR) has an empty name buffer and its name at data offset 0. `/4` holds short strings (e.g. a tag like "British", a date, a description) not used by the app.
+
+An unused position (192, the first past the used range) got **no answer** (2 s); the pedal answered other requests normally afterwards. Position 299 was not tried.
+
 #### Catalog scan
 
-To name every library item without storing model data, the app probes the ids the 0x0208 list has and its catalog doesn't (`src/protocol/catalog.rs`):
+To name every library item without storing model data, the app reads, for each id the `0x0208` list has and its cached catalog (`catalog.json`) doesn't, that item's names with `0x0209` by its list position (`src/protocol/catalog.rs`). It starts as soon as the list is known, before the preset pass, in the background after user requests. A reply is used only if its type, size field, position and id all match; only the names and kind are kept, the data blob is dropped. An item that doesn't answer (1 s) or doesn't parse keeps its placeholder name; the scan goes on. A manual rescan reads every listed item again. Nothing is written: the live buffer and audio are not touched.
 
-1. Save what the scan touches (CAB slot, contents `/2`, param 24) from a live read; set param 24 = 2 (cab off) so the probes are not heard.
-2. Per id: write the live buffer with the CAB slot = that id (kind 4), contents `/2` = 1; poll the live buffer until the slot is filled; take name / based-on / kind. An IR comes back with an empty name buffer and its name at the data's start (the app classifies it as kind 3 whatever kind the pedal reports; the reported kind is logged under `TX_DEBUG_SERIAL=1`, together with the fill time per item).
-3. At the end, or before serving any other request, or after on-pedal browsing: read the live buffer again and put back the saved CAB slot, `/2` and param 24 in one live write (everything else stays as the pedal has it now), then param 24 again by `0x0207`. Pedal-side parameter changes during the scan are patched into the probes. If the active preset changed (footswitch), nothing is restored. Cancelling (status bar ×) or closing the app restores too; after a disconnect the probe stays in the live buffer until the next preset change.
-
-Open: whether the restore clears the pedal's dirty flag.
-
-Names also come for free from every full dump and live read. A background pass reads all 150 full dumps once per session (user requests first) for the preset list's "amp · cab" lines; it runs before the catalog scan, which then only probes the ids still unnamed.
+Names also come for free from every full dump and live read. A background pass reads all 150 full dumps once per session (read-only, no preset select) for the preset list's "amp · cab" lines.
 
 ### 4.4 Parameter change `0x0207`
 

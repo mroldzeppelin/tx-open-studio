@@ -31,7 +31,8 @@ pub(crate) struct Session<'a, F: Fn(Event)> {
     pub(crate) globals_seen: u32,
     /// When to read the live buffer after the pedal's browse pushes.
     pub(crate) browse_due: Option<Instant>,
-    pub(crate) scan: CatalogScan,
+    /// Library items still to read in the catalog scan.
+    pub(crate) scan: VecDeque<LibraryItem>,
     /// Next preset of the background preset pass.
     pub(crate) pass: Option<u8>,
     /// Background work waits until then (set by user requests).
@@ -39,8 +40,6 @@ pub(crate) struct Session<'a, F: Fn(Event)> {
     /// We wrote the live buffer in this loop round: browse pushes now may
     /// answer our own write, not the MODEL encoder.
     pub(crate) own_write: bool,
-    /// Cab-type pushes are hidden from the app until then (scan echoes).
-    pub(crate) scan_echo_until: Option<Instant>,
 }
 
 impl<F: Fn(Event)> Session<'_, F> {
@@ -49,17 +48,7 @@ impl<F: Fn(Event)> Session<'_, F> {
         loop {
             self.own_write = false;
             if !self.pull_requests() {
-                // Best effort: leave the live buffer as the scan found it.
-                let _ = self.scan_restore();
                 return "session closed".into();
-            }
-            // A scan probe never stays in the live buffer while anything
-            // else is served, or after the pedal browsed.
-            let step_aside = self.scan.saved.as_ref().is_some_and(|s| s.external || !self.queue.is_empty());
-            if step_aside {
-                if let Err(e) = self.scan_restore() {
-                    return e;
-                }
             }
             let now = Instant::now();
             let quiet = self.quiet_until.is_none_or(|t| now >= t);
@@ -75,8 +64,9 @@ impl<F: Fn(Event)> Session<'_, F> {
                     self.quiet_until = Some(now + BACKGROUND_QUIET);
                     self.refresh_live()
                 }
+                // Library names first: a few reads, no wait for the pass.
+                Ok(false) if quiet && !self.scan.is_empty() => self.scan_step(),
                 Ok(false) if quiet && self.pass.is_some() => self.pass_step(),
-                Ok(false) if self.scan_ready(quiet) => self.scan_step(),
                 Ok(false) => self.idle(),
                 Err(e) => Err(e),
             };
@@ -149,12 +139,9 @@ impl<F: Fn(Event)> Session<'_, F> {
                 Request::ReadVolume => read_volume = true,
                 Request::LibraryList => read_library = true,
                 Request::ApplySlot(target, choice) => applies.push((target, choice)),
-                Request::ScanCatalog(ids) => self.start_scan(ids),
+                Request::ScanCatalog(items) => self.start_scan(items),
                 Request::CancelScan => self.cancel_scan(),
-                Request::PresetPass => {
-                    self.pass = Some(0);
-                    (self.on_event)(Event::PresetPass { running: true });
-                }
+                Request::PresetPass => self.pass = Some(0),
                 other => rest.push_back(other),
             }
         }
@@ -507,7 +494,6 @@ impl<F: Fn(Event)> Session<'_, F> {
     /// request is missed (rare; the next preset change re-syncs).
     pub(crate) fn dispatch(&mut self, payload: &[u8], awaiting: bool) -> bool {
         let ty = frame_type(payload);
-        self.scan_note_frame(payload);
         if ty == Some(TYPE_LIVE_WRITE_ACK) {
             return false;
         }
@@ -540,13 +526,7 @@ impl<F: Fn(Event)> Session<'_, F> {
         }
         if ty == Some(TYPE_PARAM_CHANGED) {
             if let Some((index, value)) = extract_param_change(payload) {
-                if hides_scan_echo(index, self.scan.saved.is_some(), self.scan_echo_until, Instant::now()) {
-                    if self.debug {
-                        eprintln!("TONEX serial: catalog scan echo hidden: param {index} = {value}");
-                    }
-                } else {
-                    (self.on_event)(Event::ParamChanged { index, value });
-                }
+                (self.on_event)(Event::ParamChanged { index, value });
             } else if let Some(value) = extract_volume_change(payload) {
                 (self.on_event)(Event::Volume(value));
             } else if self.debug {

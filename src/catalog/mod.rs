@@ -1,6 +1,6 @@
 //! The tone catalog: what each item of the pedal's internal library is
 //! (name, based-on, kind), learned from slot reads and catalog-scan
-//! probes, cached in `catalog.json`. Never any model data: the pedal loads
+//! reads (`0x0209`), cached in `catalog.json`. Never any model data: the pedal loads
 //! items by id. Items without names yet show placeholders by their library
 //! position ("Amp 7", "Cab 7") and stay selectable.
 
@@ -121,8 +121,8 @@ impl Catalog {
     }
 
     /// Listed items without a catalog entry, in list order.
-    pub(crate) fn missing(&self) -> Vec<LibraryId> {
-        self.list.iter().filter(|i| !self.items.contains_key(&i.id)).map(|i| i.id).collect()
+    pub(crate) fn missing(&self) -> Vec<LibraryItem> {
+        self.list.iter().filter(|i| !self.items.contains_key(&i.id)).copied().collect()
     }
 
     /// (listed items with a catalog entry, listed items).
@@ -172,7 +172,7 @@ pub(crate) mod tests {
         let back = Catalog::load(path.clone());
         assert_eq!(back.list, c.list);
         assert_eq!(back.items, c.items);
-        assert_eq!(back.missing(), vec![[1; 16], [3; 16]]);
+        assert_eq!(back.missing().iter().map(|i| i.id).collect::<Vec<_>>(), vec![[1; 16], [3; 16]]);
         assert_eq!(back.progress(), (2, 4));
         assert_eq!(back.item(&[4; 16]).unwrap().name, "Plæxi Driver", "UTF-8 survives the file");
         assert_eq!(back.placeholder(&[3; 16], "Amp").as_deref(), Some("Amp 5"));

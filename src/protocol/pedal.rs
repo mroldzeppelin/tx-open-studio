@@ -53,8 +53,8 @@ pub enum Event {
     PresetChanged { preset_idx: u8, params: Option<AmpParams>, raw: Vec<f32> },
     /// The pedal's library list (`0x0208`): used items in list order.
     LibraryList(Result<Vec<LibraryItem>, String>),
-    /// Library items seen filled in a slot (any dump or live read, a
-    /// catalog probe): names for the catalog.
+    /// Library items' names (any dump or live read with filled slots, a
+    /// catalog scan read): names for the catalog.
     Slots(Vec<SlotInfo>),
     /// Slot summary of preset `preset_idx` (stored dump, or the live
     /// buffer of the active preset).
@@ -65,11 +65,9 @@ pub enum Event {
     /// Result of `Pedal::apply_slot`; always sent.
     SlotApplied { target: SlotTarget, result: Result<(), String> },
     /// A catalog scan started or ended (`running` false once finished or
-    /// cancelled; the live buffer is restored by then). `completed`: every
-    /// id was probed (not cancelled or stopped).
+    /// cancelled). `completed`: every item was read or tried (not
+    /// cancelled).
     CatalogScan { running: bool, completed: bool },
-    /// The background preset pass started or ended.
-    PresetPass { running: bool },
 }
 
 pub(crate) enum Request {
@@ -93,8 +91,8 @@ pub(crate) enum Request {
     LibraryList,
     /// Load a library item (or the model cab) into a slot of the live buffer.
     ApplySlot(SlotTarget, SlotChoice),
-    /// Learn these library items' names by probing (background).
-    ScanCatalog(Vec<LibraryId>),
+    /// Read these library items' names by list position (background).
+    ScanCatalog(Vec<LibraryItem>),
     CancelScan,
     /// Read every preset's full dump for its slot summary (background).
     PresetPass,
@@ -135,11 +133,10 @@ impl Pedal {
                 globals: None,
                 globals_seen: 0,
                 browse_due: None,
-                scan: CatalogScan::default(),
+                scan: VecDeque::new(),
                 pass: None,
                 quiet_until: None,
                 own_write: false,
-                scan_echo_until: None,
             };
             let reason = session.run();
             on_event(Event::Disconnected(reason));
@@ -231,21 +228,22 @@ impl Pedal {
         self.send(Request::ApplySlot(target, choice))
     }
 
-    /// Learns the names of `ids` in the background (one probe each, user
-    /// requests first); replaces a running scan. Reports
-    /// `Event::Slots` per item and `Event::CatalogScan` progress.
-    pub fn scan_catalog(&self, ids: Vec<LibraryId>) -> Result<(), String> {
-        self.send(Request::ScanCatalog(ids))
+    /// Reads the names of library `items` in the background (one
+    /// read-only `0x0209` request each, by list position; user requests
+    /// first); replaces a running scan. Reports `Event::Slots` per item
+    /// read and `Event::CatalogScan` progress.
+    pub fn scan_catalog(&self, items: Vec<LibraryItem>) -> Result<(), String> {
+        self.send(Request::ScanCatalog(items))
     }
 
-    /// Stops a catalog scan (the live buffer is restored).
+    /// Stops a catalog scan.
     pub fn cancel_scan(&self) -> Result<(), String> {
         self.send(Request::CancelScan)
     }
 
     /// Reads every preset's full dump in the background (user requests
-    /// first): `Event::PresetSlots` + `Event::Slots` per preset,
-    /// `Event::PresetPass` progress.
+    /// first; read-only, no preset select): `Event::PresetSlots` +
+    /// `Event::Slots` per preset.
     pub fn preset_pass(&self) -> Result<(), String> {
         self.send(Request::PresetPass)
     }

@@ -141,3 +141,14 @@ pub(crate) fn meta_field(buf_size: u8, text: &[u8], garbage: &[u8]) -> Vec<u8> {
     f.push(text.len() as u8);
     f
 }
+
+/// `body` with parameter `index` of array 0 set to `value`.
+pub(crate) fn patch_param(body: &[u8], index: usize, value: f32) -> Result<Vec<u8>, String> {
+    let at = find(body, &PARAM_MARKER).ok_or("parameter array not found")? + PARAM_MARKER.len() + index * 5;
+    if index >= PARAM_COUNT || body.get(at) != Some(&FLOAT_TAG) || body.len() < at + 5 {
+        return Err("unexpected parameter array layout".into());
+    }
+    let mut out = body.to_vec();
+    out[at + 1..at + 5].copy_from_slice(&value.to_le_bytes());
+    Ok(out)
+}

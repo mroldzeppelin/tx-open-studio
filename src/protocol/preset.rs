@@ -178,13 +178,19 @@ pub(crate) fn reply_body(payload: &[u8]) -> Result<&[u8], String> {
     if frame_type(payload) != Some(TYPE_PRESET_DUMP) {
         return Err("not a preset dump".into());
     }
+    sized_body(payload, "dump")
+}
+
+/// Body of a pedal reply `B9 03 <type> <size> <third> | <body>` whose
+/// header size field matches the body length (`what` names it in errors).
+pub(crate) fn sized_body<'a>(payload: &'a [u8], what: &str) -> Result<&'a [u8], String> {
     let mut pos = 2;
-    read_u16_value(payload, &mut pos).ok_or("bad dump header")?; // type
-    let size = read_u16_value(payload, &mut pos).ok_or("bad dump header size")?;
-    read_u16_value(payload, &mut pos).ok_or("bad dump header")?; // `10`
-    let body = payload.get(pos..).ok_or("dump too short")?;
+    read_u16_value(payload, &mut pos).ok_or_else(|| format!("bad {what} header"))?; // type
+    let size = read_u16_value(payload, &mut pos).ok_or_else(|| format!("bad {what} header size"))?;
+    read_u16_value(payload, &mut pos).ok_or_else(|| format!("bad {what} header"))?; // `10`
+    let body = payload.get(pos..).ok_or_else(|| format!("{what} too short"))?;
     if body.len() != usize::from(size) {
-        return Err(format!("dump body is {} bytes, header says {size}", body.len()));
+        return Err(format!("{what} body is {} bytes, header says {size}", body.len()));
     }
     Ok(body)
 }

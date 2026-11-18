@@ -1,7 +1,7 @@
 //! Preset slots by library id: slot identities, ID-only slots (the pedal
 //! fills in names and model data from its internal library), live-buffer
-//! edits, per-preset slot summaries, the library list (`0x0208`) and the
-//! browse push (`0x020B`).
+//! edits, per-preset slot summaries, the library list (`0x0208`), library
+//! item reads (`0x0209` → `0x020A`) and the browse push (`0x020B`).
 
 use super::*;
 use std::time::Duration;
@@ -28,6 +28,15 @@ pub(crate) const LIBRARY_LIST_MARKER: [u8; 4] = [0xBA, 0x81, 0x2C, 0x01];
 
 pub(crate) const LIBRARY_LIST_TIMEOUT: Duration = Duration::from_millis(2000);
 
+/// Library item read by list position (request type `0x0209`, from the
+/// official editor; hardware-verified): answered with `0x020A`.
+pub(crate) const TYPE_LIBRARY_ITEM_REQUEST: u16 = 0x0209;
+pub(crate) const TYPE_LIBRARY_ITEM: u16 = 0x020A;
+
+/// The pedal answers in ~85 ms (FW 1.6.24); an unused position gets no
+/// answer at all.
+pub(crate) const LIBRARY_ITEM_TIMEOUT: Duration = Duration::from_millis(1000);
+
 /// Slot content kinds (slot `/2`): 0 empty, 1/2/4 tone model, 3 IR.
 pub const KIND_EMPTY: u16 = 0;
 pub const KIND_IR: u16 = 3;
@@ -39,7 +48,6 @@ pub fn is_model_kind(kind: u16) -> bool {
 
 /// Cab type (param 24): 0 the cab slot / model cab, 1 VIR, 2 off.
 pub const CAB_TYPE_SLOT: f32 = 0.0;
-pub const CAB_TYPE_OFF: f32 = 2.0;
 /// Param indices of the cab type and the VIR cab model.
 pub const P_CAB_TYPE: usize = 24;
 pub const P_CAB_MODEL: usize = 25;
@@ -72,6 +80,49 @@ pub(crate) fn parse_library_list(payload: &[u8]) -> Result<Vec<LibraryItem>, Str
     Ok(out)
 }
 
+/// Read of one library item by its list position (0-based index into the
+/// `0x0208` array): `B9 03 81 09 02 82 <len LE> 80 10 03 | B9 03 10 00
+/// <position>`, size field = body length. Read-only: no live buffer or
+/// preset change (verified on hardware).
+pub(crate) fn library_item_request(position: u16) -> Vec<u8> {
+    let mut body = vec![0xB9, 0x03, 0x10, 0x00];
+    body.extend(encode_int(position));
+    let [lo, hi] = TYPE_LIBRARY_ITEM_REQUEST.to_le_bytes();
+    let mut req = vec![0xB9, 0x03, 0x81, lo, hi, 0x82];
+    req.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    req.extend_from_slice(&[0x80, 0x10, 0x03]);
+    req.extend(body);
+    req
+}
+
+/// Names of `item` from a `0x020A` reply: body `B9 03 00 <position>
+/// <slot>`, the slot laid out as in a dump (id, names, kind, data, …).
+/// Checks the type, the size field, that the whole body parses, the
+/// position and the id. Only the names are taken; the model data stays in
+/// the payload.
+pub(crate) fn parse_library_item(payload: &[u8], item: &LibraryItem) -> Result<SlotInfo, String> {
+    if frame_type(payload) != Some(TYPE_LIBRARY_ITEM) {
+        return Err("not a library item".into());
+    }
+    let body = sized_body(payload, "library item")?;
+    let mut pos = 0;
+    let tree = parse_node(body, &mut pos, 0).ok_or("library item does not parse")?;
+    if pos != body.len() {
+        return Err("library item has trailing bytes".into());
+    }
+    if tree.at(&[0]).and_then(Node::int) != Some(0) {
+        return Err("unexpected library item layout".into());
+    }
+    if tree.at(&[1]).and_then(Node::int) != Some(item.position) {
+        return Err(format!("library item is not for position {}", item.position));
+    }
+    let slot = tree.at(&[2]).ok_or("library item slot missing")?;
+    if slot_id(slot) != Some(item.id) {
+        return Err(format!("library item at position {} has another id", item.position));
+    }
+    slot_info(slot).ok_or_else(|| "library item has no readable name".into())
+}
+
 /// The first 16-byte blob in `node` (the item itself or nested in it).
 fn first_id(node: &Node<'_>) -> Option<LibraryId> {
     match node {
@@ -79,10 +130,6 @@ fn first_id(node: &Node<'_>) -> Option<LibraryId> {
         Node::List(items) => items.iter().find_map(first_id),
         _ => None,
     }
-}
-
-pub(crate) fn is_browse_push(payload: &[u8]) -> bool {
-    frame_type(payload) == Some(TYPE_BROWSE)
 }
 
 /// The AMP or the CAB slot of a preset body.
@@ -295,25 +342,6 @@ pub(crate) fn live_write_body(body: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Value of parameter `index` (array 0) in a dump or live body.
-pub(crate) fn param_value(body: &[u8], index: usize) -> Option<f32> {
-    extract_param_array(body).get(index).copied()
-}
-
-/// `body` with parameter `index` of array 0 set to `value`.
-pub(crate) fn patch_param(body: &[u8], index: usize, value: f32) -> Result<Vec<u8>, String> {
-    if index >= PARAM_COUNT {
-        return Err(format!("param index {index} out of range"));
-    }
-    let at = find(body, &PARAM_MARKER).ok_or("parameter array not found")? + PARAM_MARKER.len() + index * 5;
-    if body.get(at) != Some(&FLOAT_TAG) || body.len() < at + 5 {
-        return Err("unexpected parameter array layout".into());
-    }
-    let mut out = body.to_vec();
-    out[at + 1..at + 5].copy_from_slice(&value.to_le_bytes());
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,7 +494,7 @@ mod tests {
         let mut body = live_with_params();
         body = patch_param(&body, P_CAB_TYPE, 1.0).unwrap();
         body = patch_param(&body, P_CAB_MODEL, 33.0).unwrap();
-        assert_eq!(param_value(&body, P_CAB_MODEL), Some(33.0));
+        assert_eq!(extract_param_array(&body).get(P_CAB_MODEL), Some(&33.0));
         let s = preset_slots(&body).unwrap();
         assert_eq!((s.amp_id, s.amp_kind), (Some([7; 16]), 1));
         assert_eq!((s.cab_id, s.cab_kind, s.cab_flag), (Some([7; 16]), 4, Some(0)));
@@ -474,8 +502,6 @@ mod tests {
         // Empty cab slot: its stale id is not reported.
         let s = preset_slots(&model_cab_body(&body).unwrap()).unwrap();
         assert_eq!((s.cab_id, s.cab_kind), (None, 0));
-        assert!(patch_param(&body, PARAM_COUNT, 0.0).is_err());
-        assert!(patch_param(&[0xB9, 0x00], 3, 0.0).is_err());
     }
 
     #[test]
@@ -496,7 +522,67 @@ mod tests {
         other[3] = 0x06;
         assert!(parse_library_list(&other).is_err());
         assert!(parse_library_list(&p[..11]).is_err());
-        assert!(is_browse_push(&[0xB9, 0x03, 0x81, 0x0B, 0x02, 0x03, 0x02, 0xB9, 0x01, 0x01]));
-        assert!(!is_browse_push(&p));
+    }
+
+    #[test]
+    fn library_item_request_bytes() {
+        // Position 150 as the official editor sent it: `80 96`, size 6.
+        assert_eq!(
+            library_item_request(150),
+            [0xB9, 0x03, 0x81, 0x09, 0x02, 0x82, 0x06, 0x00, 0x80, 0x10, 0x03, 0xB9, 0x03, 0x10, 0x00, 0x80, 0x96]
+        );
+        assert_eq!(&library_item_request(5)[5..], &[0x82, 0x05, 0x00, 0x80, 0x10, 0x03, 0xB9, 0x03, 0x10, 0x00, 0x05]);
+        // Past 255: `81 lo hi`, size 7.
+        assert_eq!(&library_item_request(299)[5..], &[0x82, 0x07, 0x00, 0x80, 0x10, 0x03, 0xB9, 0x03, 0x10, 0x00, 0x81, 0x2B, 0x01]);
+        assert_eq!(frame_type(&library_item_request(0)), Some(TYPE_LIBRARY_ITEM_REQUEST));
+    }
+
+    /// Synthetic `0x020A` reply (fake id, fake name, zero-filled data
+    /// after the based-on text; no pedal data).
+    fn item_reply(position: u16, slot: Vec<u8>) -> Vec<u8> {
+        let body = enc_list(0xB9, vec![enc_int(0), enc_int(position), slot]);
+        let mut p = vec![0xB9, 0x03, 0x81, 0x0A, 0x02, 0x81];
+        p.extend((body.len() as u16).to_le_bytes());
+        p.push(0x10);
+        p.extend(body);
+        p
+    }
+
+    fn item_slot(id: LibraryId, name: &str, kind: u16, data_prefix: &[u8]) -> Vec<u8> {
+        let mut data = vec![0; 13768];
+        data[..data_prefix.len()].copy_from_slice(data_prefix);
+        let meta = enc_list(0xB9, vec![enc_int(0), enc_int(1), enc_int(0), enc_list(0xB9, vec![enc_blob(b"Fake\0"), enc_int(4)])]);
+        enc_list(0xB9, vec![enc_blob(&id), enc_list(0xB9, vec![enc_name(name), enc_int(name.len() as u16)]), enc_int(kind), enc_blob(&data), meta])
+    }
+
+    #[test]
+    fn library_item_reply_parsing() {
+        let item = LibraryItem { position: 150, id: ID };
+        let model = item_reply(150, item_slot(ID, "Test Model", 4, b"\0\0\0\0Test Amp 100"));
+        assert_eq!(&model[9..14], &[0xB9, 0x03, 0x00, 0x80, 0x96], "body head with the position");
+        let info = parse_library_item(&model, &item).unwrap();
+        assert_eq!((info.id, info.kind, info.name.as_str(), info.based_on.as_deref()), (ID, 4, "Test Model", Some("Test Amp 100")));
+        // Kinds 1 and 2 read like 4; an IR's name is at the data's start.
+        for kind in [1, 2] {
+            assert_eq!(parse_library_item(&item_reply(150, item_slot(ID, "Stomp", kind, b"\0\0\0\0Box")), &item).unwrap().kind, kind);
+        }
+        let ir = parse_library_item(&item_reply(150, item_slot(ID, "", 3, b"Test IR 412")), &item).unwrap();
+        assert_eq!((ir.kind, ir.name.as_str(), ir.based_on), (KIND_IR, "Test IR 412", None));
+        // Another position or id, a bad size field, trailing bytes, another type: refused.
+        assert!(parse_library_item(&model, &LibraryItem { position: 151, id: ID }).is_err());
+        assert!(parse_library_item(&model, &LibraryItem { position: 150, id: [1; 16] }).is_err());
+        let mut sized = model.clone();
+        sized[6] ^= 1;
+        assert!(parse_library_item(&sized, &item).is_err());
+        let mut trailing = model.clone();
+        trailing.push(0);
+        let size = u16::from_le_bytes([trailing[6], trailing[7]]) + 1;
+        trailing[6..8].copy_from_slice(&size.to_le_bytes());
+        assert!(parse_library_item(&trailing, &item).is_err());
+        let mut other = model.clone();
+        other[3] = 0x03;
+        assert!(parse_library_item(&other, &item).is_err());
+        // No readable name (data all zero): refused.
+        assert!(parse_library_item(&item_reply(150, item_slot(ID, "", 4, b"")), &item).is_err());
     }
 }

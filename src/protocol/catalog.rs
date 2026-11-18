@@ -1,6 +1,7 @@
 //! Session side of model/cab choice: the library list, ID-only slot loads
-//! (apply), the catalog scan (probe each library id in the CAB slot to
-//! learn its name), the background preset pass and the browse refresh.
+//! (apply), the catalog scan (read each unnamed library item's names by
+//! its list position, `0x0209`), the background preset pass and the
+//! browse refresh.
 
 use super::*;
 use std::collections::VecDeque;
@@ -15,48 +16,13 @@ pub(crate) const BROWSE_DEBOUNCE: Duration = Duration::from_millis(300);
 pub(crate) const FILL_POLL: Duration = Duration::from_millis(120);
 pub(crate) const FILL_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// After the scan's restore, cab-type pushes (echoes of the scan's own
-/// writes) stay hidden from the app this long.
-pub(crate) const SCAN_ECHO_GUARD: Duration = Duration::from_millis(2000);
-
-/// Parameter pushes the app must not see: the cab type while a scan has
-/// the live buffer, and shortly after its restore. They echo the scan's
-/// own temporary writes and must not touch EDITED or the baseline.
-pub(crate) fn hides_scan_echo(index: usize, scanning: bool, echo_until: Option<Instant>, now: Instant) -> bool {
-    index == P_CAB_TYPE && (scanning || echo_until.is_some_and(|t| now < t))
-}
-
-/// Background work (scan probes, preset pass) waits this long after the
+/// Background work (catalog scan, preset pass) waits this long after the
 /// last user request.
 pub(crate) const BACKGROUND_QUIET: Duration = Duration::from_millis(1500);
 
-/// The live buffer as it was before the scan's first probe (only what the
-/// scan changes is restored: the CAB slot, contents `/2`, cab type).
-pub(crate) struct SavedLive {
-    pub(crate) idx: u8,
-    pub(crate) cab_slot: Vec<u8>,
-    pub(crate) cab_flag: Vec<u8>,
-    pub(crate) cab_type: f32,
-    /// Live body with the cab off: what each probe is built from. Pushed
-    /// parameter changes are patched in, so probes don't undo them.
-    pub(crate) probe_base: Vec<u8>,
-    /// Something outside the scan changed the live buffer (browse push):
-    /// restore now, resume later from a fresh read.
-    pub(crate) external: bool,
-}
-
-#[derive(Default)]
-pub(crate) struct CatalogScan {
-    pub(crate) pending: VecDeque<LibraryId>,
-    pub(crate) total: usize,
-    pub(crate) done: usize,
-    pub(crate) saved: Option<SavedLive>,
-}
-
 /// Outcome of polling for an id-only slot to be filled in.
 pub(crate) enum Fill {
-    /// `info`: None when the item's names don't read (loaded anyway).
-    Filled { body: Vec<u8>, idx: u8, dirty: bool, info: Option<SlotInfo>, after: Duration },
+    Filled { body: Vec<u8>, idx: u8, dirty: bool, after: Duration },
     /// The active preset is no longer the expected one.
     PresetChanged(u8),
     Timeout(String),
@@ -138,8 +104,8 @@ impl<F: Fn(Event)> Session<'_, F> {
             match self.fetch_live_body()? {
                 Ok((_, active, _)) if active != idx => return Ok(Fill::PresetChanged(active)),
                 Ok((body, active, dirty)) => {
-                    if let Some(info) = filled_slot(&body, target, id) {
-                        return Ok(Fill::Filled { body, idx: active, dirty, info, after: start.elapsed() });
+                    if filled_slot(&body, target, id).is_some() {
+                        return Ok(Fill::Filled { body, idx: active, dirty, after: start.elapsed() });
                     }
                 }
                 Err(e) => problem = format!("reading the live buffer: {e}"),
@@ -175,7 +141,7 @@ impl<F: Fn(Event)> Session<'_, F> {
         }
         match choice {
             SlotChoice::Library { id, .. } => match self.await_fill(target, id, idx)? {
-                Fill::Filled { body, idx, dirty, after, .. } => {
+                Fill::Filled { body, idx, dirty, after } => {
                     if self.debug {
                         eprintln!("TONEX serial: {} loaded into {target:?} after {} ms", hex_id(id), after.as_millis());
                     }
@@ -217,184 +183,75 @@ impl<F: Fn(Event)> Session<'_, F> {
         Ok(())
     }
 
-    /// Starts (replaces) a catalog scan of `ids`.
-    pub(crate) fn start_scan(&mut self, ids: Vec<LibraryId>) {
-        let mut pending = VecDeque::new();
-        for id in ids {
-            if !pending.contains(&id) {
-                pending.push_back(id);
+    /// Starts (replaces) a catalog scan of `items`.
+    pub(crate) fn start_scan(&mut self, items: Vec<LibraryItem>) {
+        let mut pending: VecDeque<LibraryItem> = VecDeque::new();
+        for item in items {
+            if !pending.contains(&item) {
+                pending.push_back(item);
             }
         }
-        self.scan.total = pending.len();
-        self.scan.done = 0;
-        self.scan.pending = pending;
-        (self.on_event)(Event::CatalogScan { running: self.scan.total > 0, completed: self.scan.total == 0 });
+        let empty = pending.is_empty();
+        self.scan = pending;
+        (self.on_event)(Event::CatalogScan { running: !empty, completed: empty });
     }
 
     pub(crate) fn cancel_scan(&mut self) {
-        if !self.scan.pending.is_empty() {
-            self.scan.pending.clear();
+        if !self.scan.is_empty() {
+            self.scan.clear();
             (self.on_event)(Event::CatalogScan { running: false, completed: false });
         }
     }
 
-    /// Whether a scan probe (or the final restore) is due.
-    pub(crate) fn scan_ready(&self, quiet: bool) -> bool {
-        (quiet && !self.scan.pending.is_empty()) || (self.scan.pending.is_empty() && self.scan.saved.is_some())
-    }
-
-    /// Saves what the scan changes and switches the cab off (so probes
-    /// are not heard).
-    pub(crate) fn scan_begin(&mut self) -> Result<Result<(), String>, String> {
-        let (body, idx, _) = match self.fetch_live_body()? {
-            Ok(l) => l,
-            Err(e) => return Ok(Err(format!("reading the live buffer: {e}"))),
-        };
-        let saved = (|| {
-            Ok::<_, String>(SavedLive {
-                idx,
-                cab_slot: slot_bytes(&body, SlotTarget::Cab).ok_or("cab slot not found")?.to_vec(),
-                cab_flag: span_at(&body, &CAB_FLAG_PATH).map(|r| body[r].to_vec()).ok_or("cab flag not found")?,
-                cab_type: param_value(&body, P_CAB_TYPE).ok_or("cab type not found")?,
-                probe_base: patch_param(&body, P_CAB_TYPE, CAB_TYPE_OFF)?,
-                external: false,
-            })
-        })();
-        match saved {
-            Ok(saved) => {
-                self.send_param(P_CAB_TYPE, CAB_TYPE_OFF)?;
-                self.scan.saved = Some(saved);
-                Ok(Ok(()))
+    /// Reads one library item's names (`0x0209` → `0x020A`), handling other
+    /// frames meanwhile. Inner Err: no valid answer; outer Err: link failure.
+    pub(crate) fn fetch_library_item(&mut self, item: &LibraryItem) -> Result<Result<SlotInfo, String>, String> {
+        self.link.send(&library_item_request(item.position))?;
+        let until = Instant::now() + LIBRARY_ITEM_TIMEOUT;
+        let mut problem = "no answer".to_string();
+        while let Some(payload) = self.link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
+            if frame_type(&payload) == Some(TYPE_LIBRARY_ITEM) {
+                // A late answer to an earlier read fails the position/id check.
+                match parse_library_item(&payload, item) {
+                    Ok(info) => return Ok(Ok(info)),
+                    Err(e) => problem = e,
+                }
+            } else {
+                self.dispatch(&payload, false);
             }
-            Err(e) => Ok(Err(e)),
         }
+        Ok(Err(problem))
     }
 
-    /// One scan step: the next probe, or the restore after the last.
+    /// One scan step: the next item's names. A failed item keeps its
+    /// placeholder; the scan goes on.
     pub(crate) fn scan_step(&mut self) -> Result<(), String> {
-        let Some(&id) = self.scan.pending.front() else {
-            return self.scan_restore();
-        };
-        if self.scan.saved.is_none() {
-            if let Err(e) = self.scan_begin()? {
-                eprintln!("TONEX catalog scan stopped: {e}");
-                self.cancel_scan();
-                return Ok(());
-            }
-        }
-        let Some(saved) = self.scan.saved.as_ref() else { return Ok(()) };
-        let idx = saved.idx;
-        // Probed with the amp-model kind; the pedal's answer tells IRs apart.
-        let probe = with_library_slot(&saved.probe_base, SlotTarget::Cab, &id, KIND_AMP_MODEL);
-        let outcome = match probe {
-            Ok(body) => match self.write_live(&body)? {
-                Ok(()) => Some(self.await_fill(SlotTarget::Cab, &id, idx)?),
-                Err(e) => {
-                    eprintln!("TONEX catalog scan: {}: {e}", hex_id(&id));
-                    None
-                }
-            },
-            Err(e) => {
-                eprintln!("TONEX catalog scan: {}: {e}", hex_id(&id));
-                None
-            }
-        };
-        match outcome {
-            Some(Fill::Filled { body, info, after, .. }) => {
-                // The AMP model changed under the probe (browsed on the
-                // pedal): step aside, keeping the new model.
-                let amp_of = |b: &[u8]| parse_tree(b).and_then(|t| t.at(&SlotTarget::Amp.path()).and_then(slot_id));
-                if let Some(saved) = self.scan.saved.as_mut() {
-                    if amp_of(&body) != amp_of(&saved.probe_base) {
-                        saved.external = true;
-                    }
-                }
+        let Some(item) = self.scan.pop_front() else { return Ok(()) };
+        let start = Instant::now();
+        match self.fetch_library_item(&item)? {
+            Ok(info) => {
                 if self.debug {
-                    let raw_kind = parse_tree(&body).and_then(|t| t.at(&[3, 3, 2]).and_then(Node::int));
                     eprintln!(
-                        "TONEX catalog scan: {} {:?} filled after {} ms (pedal kind {raw_kind:?}, taken as {:?})",
-                        hex_id(&id),
-                        info.as_ref().map(|i| i.name.as_str()),
-                        after.as_millis(),
-                        info.as_ref().map(|i| i.kind)
+                        "TONEX catalog scan: position {} {}: kind {} {:?} after {} ms",
+                        item.position,
+                        hex_id(&item.id),
+                        info.kind,
+                        info.name,
+                        start.elapsed().as_millis()
                     );
                 }
-                if let Some(info) = info {
-                    (self.on_event)(Event::Slots(vec![info]));
+                (self.on_event)(Event::Slots(vec![info]));
+            }
+            Err(e) => {
+                if self.debug {
+                    eprintln!("TONEX catalog scan: position {} {}: {e}", item.position, hex_id(&item.id));
                 }
             }
-            Some(Fill::PresetChanged(active)) => {
-                // The pedal moved on: nothing to restore; retry this id later.
-                self.scan.saved = None;
-                (self.on_event)(Event::CurrentPreset(active));
-                return Ok(());
-            }
-            Some(Fill::Timeout(e)) => eprintln!("TONEX catalog scan: {}: {e}", hex_id(&id)),
-            None => {}
         }
-        self.scan.pending.pop_front();
-        self.scan.done += 1;
-        let running = !self.scan.pending.is_empty();
-        if !running {
-            self.scan_restore()?;
-        }
-        if !running {
+        if self.scan.is_empty() {
             (self.on_event)(Event::CatalogScan { running: false, completed: true });
         }
         Ok(())
-    }
-
-    /// Puts back what the scan changed into the current live buffer (the
-    /// CAB slot, contents `/2`, the cab type), if the pedal is still on the
-    /// same preset. Everything else in the live buffer stays as it is now.
-    pub(crate) fn scan_restore(&mut self) -> Result<(), String> {
-        let Some(saved) = self.scan.saved.take() else { return Ok(()) };
-        self.scan_echo_until = Some(Instant::now() + SCAN_ECHO_GUARD);
-        let (body, idx, _) = match self.fetch_live_body()? {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("TONEX catalog scan: restore skipped: {e}");
-                return Ok(());
-            }
-        };
-        if idx != saved.idx {
-            (self.on_event)(Event::CurrentPreset(idx));
-            return Ok(());
-        }
-        let restored = splice(&body, &SlotTarget::Cab.path(), &saved.cab_slot)
-            .and_then(|b| splice(&b, &CAB_FLAG_PATH, &saved.cab_flag))
-            .and_then(|b| patch_param(&b, P_CAB_TYPE, saved.cab_type));
-        match restored {
-            Ok(b) => {
-                if let Err(e) = self.write_live(&b)? {
-                    eprintln!("TONEX catalog scan: restore failed: {e}");
-                }
-            }
-            Err(e) => eprintln!("TONEX catalog scan: restore failed: {e}"),
-        }
-        self.pump(WRITE_SETTLE)?;
-        self.send_param(P_CAB_TYPE, saved.cab_type)?;
-        self.scan_echo_until = Some(Instant::now() + SCAN_ECHO_GUARD);
-        Ok(())
-    }
-
-    /// Bookkeeping for frames seen while a scan has the live buffer: a
-    /// parameter pushed by the pedal goes into the probe base; a browse
-    /// push makes the scan step aside.
-    pub(crate) fn scan_note_frame(&mut self, payload: &[u8]) {
-        let own_write = self.own_write;
-        let Some(saved) = self.scan.saved.as_mut() else { return };
-        if is_browse_push(payload) {
-            if !own_write {
-                saved.external = true;
-            }
-        } else if let Some((index, value)) = extract_param_change(payload) {
-            if index != P_CAB_TYPE {
-                if let Ok(b) = patch_param(&saved.probe_base, index, value) {
-                    saved.probe_base = b;
-                }
-            }
-        }
     }
 
     /// One preset of the background pass: its full dump.
@@ -408,30 +265,7 @@ impl<F: Fn(Event)> Session<'_, F> {
             Err(e) => eprintln!("TONEX preset pass: preset {idx}: {e}"),
         }
         let next = idx + 1;
-        let running = usize::from(next) < PRESET_COUNT;
-        self.pass = running.then_some(next);
-        if !running {
-            (self.on_event)(Event::PresetPass { running: false });
-        }
+        self.pass = (usize::from(next) < PRESET_COUNT).then_some(next);
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scan_cab_type_echoes_are_hidden() {
-        let now = Instant::now();
-        // While the scan has the live buffer: the cab type only.
-        assert!(hides_scan_echo(P_CAB_TYPE, true, None, now));
-        assert!(!hides_scan_echo(P_CAB_MODEL, true, None, now));
-        // After the restore, for the guard time.
-        let until = Some(now + SCAN_ECHO_GUARD);
-        assert!(hides_scan_echo(P_CAB_TYPE, false, until, now + Duration::from_millis(500)));
-        assert!(!hides_scan_echo(P_CAB_TYPE, false, until, now + SCAN_ECHO_GUARD));
-        // No scan: every push reaches the app.
-        assert!(!hides_scan_echo(P_CAB_TYPE, false, None, now));
     }
 }

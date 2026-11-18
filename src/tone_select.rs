@@ -22,12 +22,11 @@ pub(crate) struct ToneState {
     current: Option<ToneInfo>,
     // Per session (reset on reconnect).
     list_known: bool,
-    pass_done: bool,
     scan_requested: bool,
     scan_running: bool,
-    /// This session's scan probed every unnamed item: items still without
-    /// a name were refused by the pedal and are hidden from the pickers
-    /// (retried on the next connect).
+    /// This session's scan tried every unnamed item: items still without
+    /// a name could not be read and are hidden from the pickers (retried
+    /// on the next connect).
     scan_completed: bool,
 }
 
@@ -35,7 +34,6 @@ impl ToneState {
     /// The session-scoped flags back to "nothing known yet".
     pub(crate) fn reset_session(&mut self) {
         self.list_known = false;
-        self.pass_done = false;
         self.scan_requested = false;
         self.scan_running = false;
         self.scan_completed = false;
@@ -161,7 +159,7 @@ impl SyncCtx {
         }
     }
 
-    /// Names learned from any slot read or scan probe: menus and lines
+    /// Names learned from any slot read or scan read: menus and lines
     /// update as they arrive.
     pub(crate) fn on_slots(&self, ui: &AppWindow, infos: &[SlotInfo]) {
         let changed = {
@@ -241,28 +239,15 @@ impl SyncCtx {
         }
     }
 
-    pub(crate) fn on_preset_pass(&self, running: bool) {
-        if !running {
-            self.tone().pass_done = true;
-            self.maybe_start_scan();
-        }
-    }
-
-    /// Once per session, after the preset pass (its dumps name many items
-    /// for free) and the library list: probe the items still unnamed.
+    /// Once per session, as soon as the library list is known: read the
+    /// names of the items the cached catalog lacks.
     pub(crate) fn maybe_start_scan(&self) {
         let missing = {
             let mut t = self.tone();
-            if !t.list_known || !t.pass_done || t.scan_requested {
+            if !t.list_known || t.scan_requested {
                 return;
             }
             t.scan_requested = true;
-            // Debug/testing switch: never probe the library (names then come
-            // only from preset dumps; the rest stay "Amp N" placeholders).
-            if std::env::var_os("TX_NO_LIBRARY_SCAN").is_some() {
-                t.scan_completed = false;
-                return;
-            }
             let missing = t.catalog.missing();
             t.scan_completed = missing.is_empty();
             missing
@@ -313,10 +298,10 @@ impl SyncCtx {
         }
     }
 
-    /// Manual rescan: probe every listed item again.
+    /// Manual rescan: read every listed item's names again.
     pub(crate) fn library_rescan(&self) {
-        let ids: Vec<_> = self.tone().catalog.list.iter().map(|i| i.id).collect();
-        if let Err(e) = self.with_serial(|p| p.scan_catalog(ids)) {
+        let items = self.tone().catalog.list.clone();
+        if let Err(e) = self.with_serial(|p| p.scan_catalog(items)) {
             eprintln!("TONEX catalog scan request failed: {e}");
         }
     }
@@ -373,7 +358,7 @@ mod tests {
         let slots = PresetSlots { amp_id: Some([1; 16]), amp_kind: 4, cab_type: Some(0.0), ..Default::default() };
         ctx.on_preset_slots(&ui, 0, &slots);
         assert_eq!(ui.get_preset_names().row_data(0).unwrap().tone, "Amp 1");
-        // A name arrives (scan probe or dump).
+        // A name arrives (scan read or dump).
         ctx.on_slots(&ui, &[info(1, 4, "Polite Twin", Some("Fender Twin Reverb"))]);
         let rows: Vec<String> = ui.get_amp_model_options().iter().map(|s| s.to_string()).collect();
         assert_eq!(rows, ["Polite Twin", "Amp 3"]);

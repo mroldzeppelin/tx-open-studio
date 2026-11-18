@@ -119,11 +119,8 @@ impl SyncCtx {
         let _ = pedal.request_volume();
         let _ = pedal.request_library_list();
         // Background: every preset's slots for the list lines (after the
-        // name scan; user requests first). TX_NO_LIBRARY_SCAN also skips it
-        // (testing without any learned names).
-        if std::env::var_os("TX_NO_LIBRARY_SCAN").is_none() {
-            let _ = pedal.preset_pass();
-        }
+        // library names; user requests first).
+        let _ = pedal.preset_pass();
         if !self.names.loaded() {
             let _ = pedal.request_names();
         }
@@ -410,7 +407,6 @@ impl SyncCtx {
             Event::Live { preset_idx, dirty, info } => self.on_live(ui, preset_idx, dirty, info),
             Event::SlotApplied { target, result } => self.on_slot_applied(ui, target, result),
             Event::CatalogScan { running, completed } => self.on_catalog_scan(ui, running, completed),
-            Event::PresetPass { running, .. } => self.on_preset_pass(running),
         }
     }
 

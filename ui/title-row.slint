@@ -3,6 +3,8 @@ import { Theme } from "theme.slint";
 
 // Brand row: amber mark + name left; save and tuner buttons right.
 export component TitleRow inherits HorizontalLayout {
+    // e.g. "0.6.0", or "0.6.0-debug" for a debug build.
+    in property <string> version;
     in property <bool> preset-dirty;
     in property <bool> save-busy;
     callback save-preset;
@@ -27,12 +29,18 @@ export component TitleRow inherits HorizontalLayout {
             }
         }
         Text {
-            horizontal-stretch: 1;
             text: "TX OPEN STUDIO";
             color: Theme.hw-ink;
             font-size: 11px;
             font-weight: 600;
             letter-spacing: 2px;
+            vertical-alignment: center;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.version;
+            color: Theme.muted.with-alpha(0.55);
+            font-size: 10px;
             vertical-alignment: center;
         }
         // Save the current preset: hold 1 s, only while EDITED.

@@ -52,6 +52,8 @@ fn select_backend() -> Result<(), slint::PlatformError> {
 fn main() -> Result<(), slint::PlatformError> {
     select_backend()?;
     let ui = AppWindow::new()?;
+    let version = env!("CARGO_PKG_VERSION");
+    ui.set_app_version(if cfg!(debug_assertions) { format!("{version}-debug") } else { version.to_string() }.into());
     let ctx = SyncCtx::default();
 
     ui.set_preset(DEFAULT_PRESET);

@@ -21,6 +21,7 @@ export { Theme, PresetRow, Format, CharacterColors } from "theme.slint";
 export { MenuTop, MenuMid, MenuLeaf } from "components/cascade-menu.slint";
 export component AppWindow inherits Window {
     title: "TX Open Studio";
+    in property <string> app-version;
     icon: @image-url("../assets/icon.png");
     preferred-width: 560px;
     preferred-height: 634px;
@@ -375,6 +376,7 @@ export component AppWindow inherits Window {
         // Brand row: amber mark + name left; model label and the tuner
         // button right.
         TitleRow {
+            version: root.app-version;
             preset-dirty: root.preset-dirty;
             save-busy: root.save-busy;
             save-preset => { root.save-preset(); }

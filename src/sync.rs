@@ -41,9 +41,10 @@ impl SyncCtx {
         self.global_guard.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Writes global control `id` (clamped/rounded): blob patch over
-    /// serial, echo guard; the MIDI channel also switches the tuner's
-    /// channel. On failure the globals are re-read to show the pedal's value.
+    /// Writes global control `id` (clamped/rounded): patch of a freshly
+    /// read config over serial, echo guard; the MIDI channel also switches
+    /// the tuner's channel. On failure the globals are re-read to show the
+    /// pedal's value (also `on_global_write_failed`).
     pub(crate) fn write_global(&self, _ui: &AppWindow, id: i32, value: f32) {
         let Some(c) = global_control(id) else {
             eprintln!("unknown global id {id}");
@@ -65,6 +66,17 @@ impl SyncCtx {
                     eprintln!("TONEX global config request failed: {e}");
                 }
             }
+        }
+    }
+
+    /// The session wrote nothing (no fresh global config): say so, and
+    /// show the pedal's values again (our echo guards would hide them).
+    pub(crate) fn on_global_write_failed(&self, ui: &AppWindow, e: &str) {
+        eprintln!("TONEX global write failed: {e}");
+        ui.set_status_note("GLOBAL WRITE FAILED".into());
+        *self.global_guard() = GlobalGuard::default();
+        if let Err(e) = self.with_serial(|p| p.request_globals()) {
+            eprintln!("TONEX global config request failed: {e}");
         }
     }
 
@@ -330,6 +342,7 @@ impl SyncCtx {
             Event::ParamChanged { index, value } => self.apply_param_change(ui, index, value),
             Event::Globals(Ok(g)) => self.apply_globals(ui, &g),
             Event::Globals(Err(e)) => eprintln!("TONEX global config read failed: {e}"),
+            Event::GlobalWriteFailed(e) => self.on_global_write_failed(ui, &e),
             Event::CurrentPreset(preset_idx) => {
                 // Show what the pedal is on, without sending MIDI back.
                 let preset = i32::from(preset_idx) + 1;

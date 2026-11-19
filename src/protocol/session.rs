@@ -12,10 +12,6 @@ pub(crate) struct Session<'a, F: Fn(Event)> {
     pub(crate) queue: VecDeque<Request>,
     pub(crate) on_event: &'a F,
     pub(crate) debug: bool,
-    /// Last global config payload received (needed to write a global).
-    pub(crate) globals: Option<Vec<u8>>,
-    /// Counts received global config frames (to detect our reply).
-    pub(crate) globals_seen: u32,
     /// When to read the live buffer after the pedal's browse pushes.
     pub(crate) browse_due: Option<Instant>,
     /// Library items still to read in the catalog scan.
@@ -142,7 +138,9 @@ impl<F: Fn(Event)> Session<'_, F> {
         }
         let mut served = select.is_some() || !writes.is_empty() || !global_writes.is_empty();
         if !global_writes.is_empty() {
-            self.write_globals(&global_writes)?;
+            if let Err(e) = self.write_globals(&global_writes)? {
+                (self.on_event)(Event::GlobalWriteFailed(e));
+            }
         }
         if read_globals {
             self.read_globals()?;
@@ -398,43 +396,50 @@ impl<F: Fn(Event)> Session<'_, F> {
         }
     }
 
-    /// Requests the global config; the reply is reported from `dispatch`.
-    pub(crate) fn read_globals(&mut self) -> Result<(), String> {
-        let seen = self.globals_seen;
+    /// Requests the global config and returns the first valid reply,
+    /// handling other frames meanwhile. Inner Err: none received; outer
+    /// Err: link failure.
+    pub(crate) fn fetch_globals(&mut self) -> Result<Result<Vec<u8>, String>, String> {
         self.link.send(&REQUEST_GLOBALS_CMD)?;
         let until = Instant::now() + GLOBALS_TIMEOUT;
-        while self.globals_seen == seen {
-            match self.link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
-                Some(payload) => {
-                    self.dispatch(&payload, false);
+        let mut problem = "no global config received".to_string();
+        while let Some(payload) = self.link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
+            if frame_type(&payload) == Some(TYPE_GLOBAL_CONFIG) {
+                match extract_globals(&payload) {
+                    Ok(_) => return Ok(Ok(payload)),
+                    Err(e) => problem = e,
                 }
-                None => {
-                    (self.on_event)(Event::Globals(Err("no global config received".into())));
-                    break;
-                }
+            } else {
+                self.dispatch(&payload, false);
             }
         }
+        Ok(Err(problem))
+    }
+
+    /// Reads the global config and reports it.
+    pub(crate) fn read_globals(&mut self) -> Result<(), String> {
+        let read = self.fetch_globals()?;
+        (self.on_event)(Event::Globals(read.and_then(|p| extract_globals(&p))));
         Ok(())
     }
 
-    /// Sends the stored global config back with `changes` applied.
-    pub(crate) fn write_globals(&mut self, changes: &[(usize, f32)]) -> Result<(), String> {
-        let Some(stored) = self.globals.as_mut() else {
-            eprintln!("TONEX: global write skipped: global config not read yet");
-            return Ok(());
+    /// Writes `changes` into a freshly read global config and sends it back
+    /// whole (there is no single-global message), so a setting changed on
+    /// the pedal since the last read is not reverted. No fresh read, no
+    /// write. The written config is reported as `Event::Globals`. Inner
+    /// Err: nothing written; outer Err: link failure.
+    pub(crate) fn write_globals(&mut self, changes: &[(usize, f32)]) -> Result<Result<(), String>, String> {
+        let fresh = match self.fetch_globals()? {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(format!("reading the global config: {e}"))),
         };
-        for &(index, value) in changes {
-            if let Err(e) = patch_global(stored, index, value) {
-                eprintln!("TONEX: global write skipped: {e}");
-                return Ok(());
+        match fresh_global_write(&fresh, changes) {
+            Ok((config, request)) => {
+                self.link.send(&request)?;
+                (self.on_event)(Event::Globals(extract_globals(&config)));
+                Ok(Ok(()))
             }
-        }
-        match global_write_request(stored) {
-            Ok(req) => self.link.send(&req),
-            Err(e) => {
-                eprintln!("TONEX: global write skipped: {e}");
-                Ok(())
-            }
+            Err(e) => Ok(Err(e)),
         }
     }
 
@@ -474,12 +479,7 @@ impl<F: Fn(Event)> Session<'_, F> {
             if self.debug {
                 eprintln!("TONEX serial: globals: {}", globals_dump(payload));
             }
-            let result = extract_globals(payload);
-            if result.is_ok() {
-                self.globals = Some(payload.to_vec());
-            }
-            self.globals_seen = self.globals_seen.wrapping_add(1);
-            (self.on_event)(Event::Globals(result));
+            (self.on_event)(Event::Globals(extract_globals(payload)));
             return false;
         }
         if ty == Some(TYPE_STATE) {

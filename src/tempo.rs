@@ -25,8 +25,9 @@ pub(crate) enum TapResult {
     Counted(Option<f32>),
 }
 
-/// Local tempo estimate from tap times. The pedal computes its own tempo
-/// from the same taps; it can't be read back yet (globals index unknown).
+/// Local tempo estimate from tap times. The estimate is written as the
+/// pedal's tempo (global 18, `G_TEMPO`), which reads back with the globals
+/// (the re-read after the burst shows the value the pedal took).
 #[derive(Debug, Default)]
 pub(crate) struct TapTempo {
     pub(crate) last: Option<Instant>,

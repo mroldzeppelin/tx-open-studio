@@ -488,7 +488,7 @@ Caveat observed during the mapping session: the pedal re-enumerates USB
 (CDC port disappears and returns) while navigating some GLOBAL SETUP
 screens, so a host should expect the serial link to drop around menu use.
 
-Write: there is **no single-global message**. Resend the whole received body with values patched, under a write header with the real body length (`global_write_request`):
+Write: there is **no single-global message**. Resend the whole received body with values patched, under a write header with the real body length (`global_write_request`). The app reads the config afresh right before every write and patches that (`fresh_global_write`), so a setting changed on the pedal since an earlier read is not reverted; without a fresh read it writes nothing:
 
 ```
 B9 03 81 06 02 82 <len lo> <len hi> 80 10 03 | <received body from B9 01 B9 02 BA 16 ... to end, patched>

@@ -147,6 +147,18 @@ pub(crate) fn global_write_request(received: &[u8]) -> Result<Vec<u8>, String> {
     Ok(req)
 }
 
+/// The write of `changes` into a freshly read global config `fresh`:
+/// (the patched config, the write request). Everything not in `changes`
+/// is sent back as the pedal just reported it.
+pub(crate) fn fresh_global_write(fresh: &[u8], changes: &[(usize, f32)]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let mut config = fresh.to_vec();
+    for &(index, value) in changes {
+        patch_global(&mut config, index, value)?;
+    }
+    let request = global_write_request(&config)?;
+    Ok((config, request))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +196,18 @@ mod tests {
         assert_eq!(&req[11..17], &[0xB9, 0x01, 0xB9, 0x02, 0xBA, 0x16]);
         assert_eq!(extract_globals(&req).unwrap().get(G_MAIN_VOLUME), -6.0);
         assert!(global_write_request(&[0xB9, 0x03, 0x81, 0x04, 0x02]).is_err());
+    }
+
+    #[test]
+    fn global_write_keeps_fresh_pedal_values() {
+        // The pedal's main volume changed to -6 since our last read: the
+        // write of the trim keeps it.
+        let fresh = globals_payload(0.0, -6.0);
+        let (config, req) = fresh_global_write(&fresh, &[(G_INPUT_TRIM, 3.0), (G_MIDI_CHANNEL, 5.0)]).unwrap();
+        let written = extract_globals(&req).unwrap();
+        assert_eq!((written.get(G_INPUT_TRIM), written.get(G_MAIN_VOLUME), written.get(G_MIDI_CHANNEL)), (3.0, -6.0, 5.0));
+        assert_eq!(extract_globals(&config).unwrap().get(G_INPUT_TRIM), 3.0, "the config reported as written");
+        // An index the config doesn't have: nothing to write.
+        assert!(fresh_global_write(&fresh, &[(G_INPUT_TRIM, 3.0), (GLOBALS_COUNT, 1.0)]).is_err());
     }
 }

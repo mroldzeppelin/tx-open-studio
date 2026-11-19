@@ -35,8 +35,12 @@ pub enum Event {
     /// The pedal's current preset (0-based), from a state message: the
     /// handshake's request-state reply, or a pushed state update.
     CurrentPreset(u8),
-    /// Global config (reply to `request_globals`, or pushed by the pedal).
+    /// Global config (reply to `request_globals`, pushed by the pedal, or
+    /// the config just written by `set_global`).
     Globals(Result<Globals, String>),
+    /// A `set_global` was not written (no fresh global config to patch,
+    /// or it didn't patch).
+    GlobalWriteFailed(String),
     /// Result of `Pedal::rename_preset` (0-based preset index): the name
     /// as stored and verified, or why nothing (or nothing verified) was
     /// written. Always sent, also when the session ends mid-operation.
@@ -145,8 +149,6 @@ impl Pedal {
             };
             let mut session = Session { link, rx, queue: VecDeque::new(), on_event: &on_event,
                 debug: debug_enabled(),
-                globals: None,
-                globals_seen: 0,
                 browse_due: None,
                 scan: VecDeque::new(),
                 pass: None,
@@ -264,9 +266,10 @@ impl Pedal {
         self.send(Request::Globals)
     }
 
-    /// Writes one global (any `G_*` index) by sending the
-    /// last global config read back with that value changed. Verified on
-    /// hardware.
+    /// Writes one global (any `G_*` index): reads the global config
+    /// afresh and sends it back with that value changed (verified on
+    /// hardware). Answered with `Event::Globals` (the written config), or
+    /// `Event::GlobalWriteFailed` when nothing was written.
     pub fn set_global(&self, index: usize, value: f32) -> Result<(), String> {
         if index >= GLOBALS_COUNT {
             return Err(format!("global index {index} out of range"));

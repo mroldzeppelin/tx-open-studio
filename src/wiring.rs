@@ -88,8 +88,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &SyncCtx) {
                 }
                 Err(e) => eprintln!("TONEX preset select failed: {e}"),
             }
-            ctx.request_amp_params(preset);
-            ctx.request_tone_info(preset);
+            ctx.request_live_state();
         });
     }
 

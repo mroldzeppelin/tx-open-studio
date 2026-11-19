@@ -2,20 +2,23 @@
 
 use super::*;
 
-/// Compares the current preset's parameter values with the values it was
-/// loaded with, for the "Changed" badge (strict: turning a control back to
-/// its loaded value clears it).
+/// The EDITED state: the current (live) parameter values against the
+/// preset's stored values, plus the pedal's own dirty flag as of the last
+/// live read. EDITED = that flag, or any value differing from the stored
+/// one (strict: turning a control back clears the difference, but not a
+/// flag the pedal reported; only a save or a reload clears that, as on the
+/// pedal).
 ///
-/// The baseline is taken from the first full read after a preset load
-/// (startup, preset change, footswitch push, Reconnect); later reads of the
-/// same preset only refresh `current`.
+/// The baseline (stored values) comes with each live read on a preset
+/// load (`load_live`: connect, preset change, after a save); a pushed
+/// summary only sets it when none is set yet (`load`).
 #[derive(Default)]
 pub struct PresetDiff {
     baseline: Vec<f32>,
     current: Vec<f32>,
-    /// The pedal reports unsaved edits after a model/cab load or on-pedal
-    /// browsing (its own dirty flag; slots are not in the arrays).
-    slot_edited: bool,
+    /// The pedal's dirty flag at the last live read: unsaved edits the
+    /// arrays don't show (model/cab slots), or made before the read.
+    pedal_dirty: bool,
 }
 
 /// Largest difference treated as "unchanged" for parameter `index`: half the
@@ -51,16 +54,28 @@ impl PresetDiff {
         self.current = raw.to_vec();
     }
 
+    /// A live read on a preset load: `live` is what plays, `stored` the
+    /// preset's stored values (the baseline; `live` when empty), `dirty`
+    /// the pedal's flag.
+    pub fn load_live(&mut self, live: &[f32], stored: &[f32], dirty: bool) {
+        if live.is_empty() {
+            return;
+        }
+        self.baseline = if stored.is_empty() { live.to_vec() } else { stored.to_vec() };
+        self.current = live.to_vec();
+        self.pedal_dirty = dirty;
+    }
+
     /// After a verified save the current values are the preset's stored
     /// state: they become the baseline, as after a preset load.
     pub fn rebaseline(&mut self) {
         self.baseline = self.current.clone();
-        self.slot_edited = false;
+        self.pedal_dirty = false;
     }
 
     /// The pedal's dirty flag read after a model/cab load or browsing.
-    pub fn set_slot_edited(&mut self, edited: bool) {
-        self.slot_edited = edited;
+    pub fn set_pedal_dirty(&mut self, dirty: bool) {
+        self.pedal_dirty = dirty;
     }
 
     /// Value of parameter `index` as loaded with the preset (None before
@@ -72,8 +87,8 @@ impl PresetDiff {
     /// What makes the preset dirty, for the debug log: the first parameter
     /// whose current value differs from the baseline.
     pub fn first_difference(&self) -> Option<String> {
-        if self.slot_edited {
-            return Some("model/cab slot (pedal dirty flag)".into());
+        if self.pedal_dirty {
+            return Some("the pedal's dirty flag".into());
         }
         self.baseline
             .iter()
@@ -91,7 +106,7 @@ impl PresetDiff {
     }
 
     pub fn dirty(&self) -> bool {
-        self.slot_edited
+        self.pedal_dirty
             || self
                 .baseline
             .iter()
@@ -165,11 +180,42 @@ mod tests {
     fn slot_edit_is_dirty_until_saved() {
         let mut d = PresetDiff::default();
         d.load(&base());
-        d.set_slot_edited(true);
+        d.set_pedal_dirty(true);
         assert!(d.dirty());
-        assert!(d.first_difference().unwrap().contains("slot"));
+        assert!(d.first_difference().unwrap().contains("dirty flag"));
         d.rebaseline();
         assert!(!d.dirty());
+    }
+
+    /// Unsaved edits on the pedal at a live read: live values shown,
+    /// EDITED from the pedal's flag, the stored values as the baseline.
+    #[test]
+    fn live_read_with_unsaved_edits() {
+        let gain = AmpKnob::Gain.param_index();
+        let mut live = base();
+        live[gain] = 9.0;
+        let mut d = PresetDiff::default();
+        d.load_live(&live, &base(), true);
+        assert!(d.dirty());
+        assert_eq!(d.baseline(gain), Some(6.9), "baseline = stored");
+        assert_eq!(d.first_difference().unwrap(), "the pedal's dirty flag");
+        // Turned back in the app: the pedal still reports its edit.
+        d.set(gain, 6.9);
+        assert!(d.dirty());
+        // A clean live read: live values are the stored ones.
+        d.load_live(&base(), &base(), false);
+        assert!(!d.dirty());
+        // Stored values unreadable: live values as the baseline, EDITED
+        // from the flag alone.
+        d.load_live(&live, &[], true);
+        assert_eq!(d.baseline(gain), Some(9.0));
+        assert!(d.dirty());
+        // A later pushed summary doesn't replace the baseline.
+        d.load(&base());
+        assert_eq!(d.baseline(gain), Some(9.0));
+        // An empty live read changes nothing.
+        d.load_live(&[], &base(), false);
+        assert!(d.dirty());
     }
 
     #[test]

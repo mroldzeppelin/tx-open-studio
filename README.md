@@ -49,7 +49,7 @@ Other details:
 - **Model and cab choice from your pedal's library**: the app loads library items by id — the pedal fills in the model data itself, so nothing is copied or stored but names. On first connect the app reads the names from the pedal in the background (status bar `LIBRARY 57/192`; × stops, ↻ reads them again), without touching the sound; everything stays pickable meanwhile ("Amp 7" / "Cab 7" until named). Browsing models on the pedal's MODEL encoder updates the app's names live. Names and the per-preset lines are cached as JSON in `~/.local/share/tx-open-studio/`.
 
 - Knobs are dragged vertically. Double-click a knob to reset it to its default value.
-- An **EDITED** indicator shows when the live state differs from the preset as last loaded.
+- An **EDITED** indicator shows when the pedal has unsaved edits (also ones made before the app connected) or a value differs from the stored preset. The app always shows what the pedal plays, read from its live edit buffer.
 - **Save edits** to the active preset: hold the floppy button (top right) for 1 s — an amber fill rises as a guard against misclicks. The app writes the preset and verifies it by reading it back.
 - Tuner on/off button (sent as MIDI CC 9 — the only MIDI message the app uses; without a MIDI port the button is disabled).
 - Auto-reconnect: unplug the pedal or power-cycle it and the app shows RECONNECTING, polls every 2 seconds, and resyncs everything (current preset, names, parameters, globals) when it comes back.

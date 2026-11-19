@@ -26,10 +26,9 @@ pub enum Event {
     Volume(f32),
     /// Character of one preset (0-based), from a details read or push.
     Character { preset_idx: u8, character: String },
-    /// Result of `Pedal::request_amp_params` (0-based preset index).
-    /// `raw` is the whole parameter array as far as it parsed (see
-    /// `extract_param_array`), empty if the details didn't arrive.
-    AmpParams { preset_idx: u8, result: Result<AmpParams, String>, raw: Vec<f32> },
+    /// Result of `Pedal::request_live_state`: what the active preset
+    /// plays now, or why the live buffer couldn't be read.
+    LiveState(Result<LiveState, String>),
     /// A parameter changed on the pedal (e.g. a physical knob was turned).
     /// `index` is the preset-parameter index (see `AmpKnob::param_index`).
     ParamChanged { index: usize, value: f32 },
@@ -45,9 +44,6 @@ pub enum Event {
     /// Result of `Pedal::save_preset` (0-based preset index); always sent,
     /// also when the session ends mid-operation.
     Saved { preset_idx: u8, result: Result<(), String> },
-    /// Result of `Pedal::request_tone_info` (0-based preset index); None
-    /// when the dump couldn't be read or parsed.
-    ToneInfo { preset_idx: u8, info: Option<ToneInfo> },
     /// The pedal switched preset by itself (footswitch); carries the new
     /// preset's amp params when they parsed, and its raw parameter array.
     PresetChanged { preset_idx: u8, params: Option<AmpParams>, raw: Vec<f32> },
@@ -70,9 +66,30 @@ pub enum Event {
     CatalogScan { running: bool, completed: bool },
 }
 
+/// The live edit buffer read as a preset load (connect, preset change,
+/// after a save): what the pedal plays, and the stored values to compare
+/// against.
+#[derive(Debug)]
+pub struct LiveState {
+    /// The active preset (0-based).
+    pub preset_idx: u8,
+    /// The pedal's own "edited" flag (live body field 2).
+    pub dirty: bool,
+    /// Amp knobs of the live values.
+    pub params: Result<AmpParams, String>,
+    /// The live parameter array (as far as it parsed).
+    pub raw: Vec<f32>,
+    /// The stored preset's parameter array: the live one when clean, the
+    /// stored dump's when dirty; None when that dump couldn't be read.
+    pub stored: Option<Vec<f32>>,
+    pub character: Option<String>,
+    pub info: Option<ToneInfo>,
+}
+
 pub(crate) enum Request {
     Names,
-    AmpParams(u8),
+    /// Read the live buffer as a preset load (see `LiveState`).
+    LiveState,
     /// (section, index, value).
     SetParam(u8, u8, f32),
     Globals,
@@ -81,8 +98,6 @@ pub(crate) enum Request {
     Rename(u8, String),
     /// Save the pedal's live edit buffer into its preset (index).
     Save(u8),
-    /// Read a preset's amp/cab slot names (index).
-    ToneInfo(u8),
     /// Make preset `idx` the active one.
     Select(u8),
     /// Read the front-panel VOLUME.
@@ -165,9 +180,11 @@ impl Pedal {
         self.send(Request::SetParam(VOLUME_SECTION, 0, value))
     }
 
-    /// Reads the amp params of `preset_idx` (0-based).
-    pub fn request_amp_params(&self, preset_idx: u8) -> Result<(), String> {
-        self.send(Request::AmpParams(preset_idx))
+    /// Reads the live edit buffer of the active preset (plus, when the
+    /// pedal reports unsaved edits, the stored dump for comparison);
+    /// answered with `Event::LiveState`. Read-only.
+    pub fn request_live_state(&self) -> Result<(), String> {
+        self.send(Request::LiveState)
     }
 
     /// Renames preset `idx` (0-based): reads a fresh full dump, validates
@@ -206,12 +223,6 @@ impl Pedal {
     /// (connect / reconnect), later changes arrive as pushes.
     pub fn request_volume(&self) -> Result<(), String> {
         self.send(Request::ReadVolume)
-    }
-
-    /// Reads the amp model / cab source names of preset `idx` (0-based)
-    /// from its full dump; answered with `Event::ToneInfo`. Read-only.
-    pub fn request_tone_info(&self, idx: u8) -> Result<(), String> {
-        self.send(Request::ToneInfo(idx))
     }
 
     /// Reads the library list; answered with `Event::LibraryList`.

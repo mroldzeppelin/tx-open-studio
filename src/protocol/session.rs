@@ -6,19 +6,6 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
 
-/// Result of one preset-details read.
-pub(crate) struct DetailsRead {
-    amp: Result<AmpParams, String>,
-    raw: Vec<f32>,
-    character: Option<String>,
-}
-
-impl DetailsRead {
-    pub(crate) fn failed(e: String) -> Self {
-        Self { amp: Err(e), raw: Vec::new(), character: None }
-    }
-}
-
 pub(crate) struct Session<'a, F: Fn(Event)> {
     pub(crate) link: Link,
     pub(crate) rx: mpsc::Receiver<Request>,
@@ -76,16 +63,15 @@ impl<F: Fn(Event)> Session<'_, F> {
         }
     }
 
-    /// Serves queued quick requests: all writes (in order), then only the
-    /// newest amp-params read. Returns whether anything was served.
+    /// Serves queued quick requests: all writes (in order), then one live
+    /// state read. Returns whether anything was served.
     pub(crate) fn serve_quick(&mut self) -> Result<bool, String> {
         let mut writes: Vec<(u8, u8, f32)> = Vec::new();
         let mut global_writes: Vec<(usize, f32)> = Vec::new();
         let mut read_globals = false;
-        let mut latest_read = None;
+        let mut read_live = false;
         let mut renames = Vec::new();
         let mut saves = Vec::new();
-        let mut latest_tone = None;
         let mut read_volume = false;
         let mut read_library = false;
         let mut applies: Vec<(SlotTarget, SlotChoice)> = Vec::new();
@@ -105,10 +91,9 @@ impl<F: Fn(Event)> Session<'_, F> {
                     let collected = !writes.is_empty()
                         || !global_writes.is_empty()
                         || read_globals
-                        || latest_read.is_some()
+                        || read_live
                         || !renames.is_empty()
                         || !saves.is_empty()
-                        || latest_tone.is_some()
                         || read_volume
                         || read_library
                         || !applies.is_empty();
@@ -132,10 +117,9 @@ impl<F: Fn(Event)> Session<'_, F> {
                     None => global_writes.push((index, value)),
                 },
                 Request::Globals => read_globals = true,
-                Request::AmpParams(idx) => latest_read = Some(idx),
+                Request::LiveState => read_live = true,
                 Request::Rename(idx, name) => renames.push((idx, name)),
                 Request::Save(idx) => saves.push(idx),
-                Request::ToneInfo(idx) => latest_tone = Some(idx),
                 Request::ReadVolume => read_volume = true,
                 Request::LibraryList => read_library = true,
                 Request::ApplySlot(target, choice) => applies.push((target, choice)),
@@ -164,12 +148,9 @@ impl<F: Fn(Event)> Session<'_, F> {
             self.read_globals()?;
             served = true;
         }
-        if let Some(idx) = latest_read {
-            let read = self.read_amp_params(idx)?;
-            (self.on_event)(Event::AmpParams { preset_idx: idx, result: read.amp, raw: read.raw });
-            if let Some(character) = read.character {
-                (self.on_event)(Event::Character { preset_idx: idx, character });
-            }
+        if read_live {
+            let state = self.read_live_state()?;
+            (self.on_event)(Event::LiveState(state));
             served = true;
         }
         // Front-panel VOLUME (pedal-wide, read at connect): the answer is
@@ -180,24 +161,6 @@ impl<F: Fn(Event)> Session<'_, F> {
             } else if self.debug {
                 eprintln!("TONEX serial: no answer to the VOLUME read");
             }
-            served = true;
-        }
-        // Names after the params: only the newest request, footswitch
-        // pushes still handled meanwhile.
-        if let Some(idx) = latest_tone {
-            let info = match self.fetch_dump(idx, false)? {
-                Ok(dump) => dump_body(&dump, idx).ok().and_then(|body| {
-                    self.report_body(idx, body);
-                    tone_info(body)
-                }),
-                Err(e) => {
-                    if self.debug {
-                        eprintln!("TONEX serial: tone info for preset {idx}: {e}");
-                    }
-                    None
-                }
-            };
-            (self.on_event)(Event::ToneInfo { preset_idx: idx, info });
             served = true;
         }
         for (target, choice) in applies {
@@ -565,21 +528,46 @@ impl<F: Fn(Event)> Session<'_, F> {
         Ok(None)
     }
 
-    /// Reads preset `idx`'s details. Ok(read) for the events; Err only for
-    /// link failures (session ends).
-    pub(crate) fn read_amp_params(&mut self, idx: u8) -> Result<DetailsRead, String> {
-        if usize::from(idx) >= PRESET_COUNT {
-            return Ok(DetailsRead::failed(format!("preset index {idx} out of range")));
-        }
-        let details = self.fetch_details(idx, PRESET_TIMEOUT)?;
-        Ok(match details {
-            Some(payload) => DetailsRead {
-                amp: extract_amp_params(&payload),
-                raw: extract_param_array(&payload),
-                character: extract_character(&payload),
-            },
-            None => DetailsRead::failed("no preset details received".into()),
-        })
+    /// The live buffer as a preset load: live values, the pedal's dirty
+    /// flag, slot names, and the stored values to compare against (the
+    /// live ones when clean; else read from the stored dump). Inner Err:
+    /// no valid live buffer; outer Err: link failure.
+    pub(crate) fn read_live_state(&mut self) -> Result<Result<LiveState, String>, String> {
+        let (payload, preset_idx, dirty) = match self.fetch_live()? {
+            Ok(l) => l,
+            Err(e) => return Ok(Err(format!("reading the live buffer: {e}"))),
+        };
+        let body = match live_body(&payload) {
+            Ok((body, ..)) => body,
+            Err(e) => return Ok(Err(e)),
+        };
+        self.report_body(preset_idx, body);
+        let raw = extract_param_array(body);
+        let stored = if dirty {
+            let read = self.fetch_dump(preset_idx, false)?.and_then(|dump| dump_body(&dump, preset_idx).map(extract_param_array));
+            match read {
+                Ok(stored) if !stored.is_empty() => Some(stored),
+                Ok(_) => {
+                    eprintln!("TONEX: stored values of preset {preset_idx}: no parameter array");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("TONEX: stored values of preset {preset_idx}: {e}");
+                    None
+                }
+            }
+        } else {
+            Some(raw.clone())
+        };
+        Ok(Ok(LiveState {
+            preset_idx,
+            dirty,
+            params: extract_amp_params(body),
+            stored,
+            character: extract_character(body),
+            info: tone_info(body),
+            raw,
+        }))
     }
 
     /// Reads all 150 names. Unreadable slots are empty strings; the inner

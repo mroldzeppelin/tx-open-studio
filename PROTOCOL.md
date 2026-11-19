@@ -314,6 +314,8 @@ Reply type `0x0203`, same header form as a stored dump; body `B9 04 00 <dirty> <
 
 Verified on hardware: the live buffer shows unsaved edits (e.g. Gain 7.0) while the stored dump still has the old value (5.0).
 
+**Preset loads** (as the official editor reads the live buffer at startup): at connect, after every preset change (app select, footswitch push, a state push naming another preset) and after a save, the app reads the live buffer and takes the parameter values, slot names and character from it, so it shows what the pedal plays, unsaved edits included. EDITED is on when the dirty flag is set or a value differs from the stored one. The stored values (the "Changed" baseline, double-click resets) are the live ones when the flag is clear; when it is set, the app also reads the stored full dump of that preset for them. The app no longer reads the stored summary or dump for the current preset's values.
+
 **Saving** (as the official editor does it): write the live buffer back with the write message above, the body changed only in fields 1 and 2 to `01 00` (stored, clean). The app:
 
 1. reads the live buffer and checks it (type, length field, the whole body parses, field 1 = `00`) and that its index is the preset being saved;
@@ -617,7 +619,8 @@ host  → hello                         (0x0000, body B9 02 02 10)
 pedal → hello reply
 host  → request state                 (body B9 02 81 01 02 10)
 pedal → 0x0201 state                  → current preset index
-host  → preset details idx=cur, 00    → name, 109 params, character
+host  → live buffer read (10 00 00 01) → active preset, dirty flag, 109 params, slots
+        (+ stored full dump of it, only when dirty)
 host  → request globals               (body B9 02 81 06 02 10)
 pedal → 0x0206 globals
 host  → preset details 0..149, 00     → all names + characters (~10 s)

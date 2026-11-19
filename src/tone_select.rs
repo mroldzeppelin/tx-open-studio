@@ -200,7 +200,7 @@ impl SyncCtx {
         }
         self.show_tone_info(ui, info);
         let mut amp = self.amp();
-        amp.diff.set_slot_edited(dirty);
+        amp.diff.set_pedal_dirty(dirty);
         update_dirty(ui, &amp, "model/cab load");
     }
 

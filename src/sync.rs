@@ -102,18 +102,18 @@ impl SyncCtx {
 
     /// (Re)starts the serial session; the previous one ends when its handle
     /// is dropped and releases the port before the new one opens it. Then
-    /// reads the current preset's amp params, the globals and (once per app
-    /// run: names can't change) all names.
-    pub(crate) fn start_serial(&self, ui: slint::Weak<AppWindow>, preset: i32) {
+    /// reads the live buffer (what the pedal plays), the globals and (once
+    /// per app run: names can't change) all names.
+    pub(crate) fn start_serial(&self, ui: slint::Weak<AppWindow>) {
         let id = self.link().serial_starting();
         let ctx = self.clone();
         let pedal = protocol::Pedal::start(move |event| {
             let ctx = ctx.clone();
             let _ = ui.upgrade_in_event_loop(move |ui| ctx.handle_session_event(&ui, id, event));
         });
-        // Params first: the knobs shouldn't wait for the ~10 s name scan.
-        let _ = pedal.request_amp_params((clamp_preset(preset) - 1) as u8);
-        let _ = pedal.request_tone_info((clamp_preset(preset) - 1) as u8);
+        // The live state first: the knobs shouldn't wait for the ~10 s
+        // name scan. The pedal's active preset comes with the handshake.
+        let _ = pedal.request_live_state();
         let _ = pedal.request_globals();
         // Pedal-wide: once per session; later changes arrive as pushes.
         let _ = pedal.request_volume();
@@ -176,7 +176,7 @@ impl SyncCtx {
         }
         if serial == SerialLink::Down {
             if protocol::port_available() {
-                self.start_serial(ui.as_weak(), ui.get_preset());
+                self.start_serial(ui.as_weak());
             } else {
                 // Node gone (unplugged): the access problem is moot.
                 self.link().clear_denied();
@@ -250,17 +250,39 @@ impl SyncCtx {
         }
     }
 
-    /// Amp model / cab source names of `preset` (read after its params).
-    pub(crate) fn request_tone_info(&self, preset: i32) {
-        if let Err(e) = self.with_serial(|p| p.request_tone_info((clamp_preset(preset) - 1) as u8)) {
-            eprintln!("TONEX tone info request failed: {e}");
+    /// Reads the live buffer of the active preset (`on_live_state`).
+    pub(crate) fn request_live_state(&self) {
+        if let Err(e) = self.with_serial(|p| p.request_live_state()) {
+            eprintln!("TONEX live state request failed: {e}");
         }
     }
 
-    pub(crate) fn request_amp_params(&self, preset: i32) {
-        if let Err(e) = self.with_serial(|p| p.request_amp_params((clamp_preset(preset) - 1) as u8)) {
-            eprintln!("TONEX amp params request failed: {e}");
+    /// The live buffer read on a preset load: knobs and cards show what
+    /// the pedal plays; EDITED and the "Changed" baseline come from the
+    /// pedal's dirty flag and the stored values.
+    pub(crate) fn on_live_state(&self, ui: &AppWindow, s: protocol::LiveState) {
+        if ui.get_preset() != i32::from(s.preset_idx) + 1 {
+            return; // stale: the UI moved on to another preset
         }
+        if let Some(character) = s.character {
+            if self.names.set_character(ui, s.preset_idx, character) {
+                show_preset_meta(ui, &self.names, ui.get_preset());
+            }
+        }
+        {
+            let mut amp = self.amp();
+            for card in amp.fx.load(&s.raw) {
+                fx::refresh(ui, &amp.fx, card);
+            }
+            amp.diff.load_live(&s.raw, s.stored.as_deref().unwrap_or_default(), s.dirty);
+            update_dirty(ui, &amp, "live read");
+            fx::set_loaded_defaults(ui, &amp.diff);
+        }
+        match s.params {
+            Ok(p) => self.apply_amp_params(ui, &p),
+            Err(e) => eprintln!("TONEX live amp params of preset {}: {e}", i32::from(s.preset_idx) + 1),
+        }
+        self.show_tone_info(ui, s.info);
     }
 
     /// Applies a full set of amp values read from the pedal, unless the user
@@ -303,17 +325,8 @@ impl SyncCtx {
                     show_preset_meta(ui, &self.names, ui.get_preset());
                 }
             }
-            Event::AmpParams { preset_idx, result, raw } => {
-                let current = ui.get_preset() == i32::from(preset_idx) + 1;
-                if current {
-                    self.load_fx(ui, &raw);
-                }
-                match result {
-                    Ok(p) if current => self.apply_amp_params(ui, &p),
-                    Ok(_) => {} // stale: the UI moved on to another preset
-                    Err(e) => eprintln!("TONEX amp params read failed (preset {}): {e}", i32::from(preset_idx) + 1),
-                }
-            }
+            Event::LiveState(Ok(state)) => self.on_live_state(ui, state),
+            Event::LiveState(Err(e)) => eprintln!("TONEX live state read failed: {e}"),
             Event::ParamChanged { index, value } => self.apply_param_change(ui, index, value),
             Event::Globals(Ok(g)) => self.apply_globals(ui, &g),
             Event::Globals(Err(e)) => eprintln!("TONEX global config read failed: {e}"),
@@ -323,8 +336,7 @@ impl SyncCtx {
                 if preset != ui.get_preset() {
                     show_preset(ui, &self.names, preset);
                     self.amp().clear();
-                    self.request_amp_params(preset);
-                    self.request_tone_info(preset);
+                    self.request_live_state();
                 }
             }
             Event::Renamed { preset_idx, result } => {
@@ -356,7 +368,7 @@ impl SyncCtx {
                             update_dirty(ui, &amp, "save");
                             fx::set_loaded_defaults(ui, &amp.diff);
                         }
-                        self.request_tone_info(ui.get_preset());
+                        self.request_live_state();
                     }
                     Ok(()) => {} // the UI moved on to another preset meanwhile
                     Err(e) => {
@@ -388,18 +400,13 @@ impl SyncCtx {
                     // it was reloaded, so its values are the new baseline.
                     self.amp().diff = fx::PresetDiff::default();
                 }
+                // The pushed summary shows right away; the live read
+                // follows with the slots and the pedal's dirty flag.
                 self.load_fx(ui, &raw);
-                match params {
-                    Some(p) => self.apply_amp_params(ui, &p),
-                    None => self.request_amp_params(preset),
+                if let Some(p) = params {
+                    self.apply_amp_params(ui, &p);
                 }
-                self.request_tone_info(preset);
-            }
-            Event::ToneInfo { preset_idx, info } => {
-                if ui.get_preset() != i32::from(preset_idx) + 1 {
-                    return; // stale: the UI moved on to another preset
-                }
-                self.show_tone_info(ui, info);
+                self.request_live_state();
             }
             Event::LibraryList(list) => self.on_library_list(ui, list),
             Event::Slots(infos) => self.on_slots(ui, &infos),
@@ -486,8 +493,21 @@ mod tests {
     use super::*;
     use crate::test_util::headless_ui;
 
+    /// A clean live read of preset `idx` with these values.
+    fn clean_live(idx: u8, raw: &[f32], params: protocol::AmpParams) -> Event {
+        Event::LiveState(Ok(protocol::LiveState {
+            preset_idx: idx,
+            dirty: false,
+            params: Ok(params),
+            raw: raw.to_vec(),
+            stored: Some(raw.to_vec()),
+            character: None,
+            info: None,
+        }))
+    }
+
     /// Regression: every preset showed EDITED right after loading. A load
-    /// through the real event handlers (parameter read, the pedal's push
+    /// through the real event handlers (live read, the pedal's push
     /// echoing our select) must not be dirty; a later live change must.
     #[test]
     fn load_preset_is_not_dirty() {
@@ -506,8 +526,8 @@ mod tests {
         let params = protocol::AmpParams {
             gain: 5.5, volume: 4.2, presence: 0.0, depth: 8.4, bass: 4.3, mid: 8.1, treble: 2.6, amp_enabled: true,
         };
-        ctx.handle_event(&ui, Event::AmpParams { preset_idx: idx, result: Ok(params), raw: raw.clone() });
-        assert!(!ui.get_preset_dirty(), "after the parameter read");
+        ctx.handle_event(&ui, clean_live(idx, &raw, params));
+        assert!(!ui.get_preset_dirty(), "after the live read");
         // The pedal's summary push right after our own select: ignored.
         *ctx.select_echo.lock().unwrap() = Some((idx, Instant::now()));
         let mut pushed = raw.clone();
@@ -519,6 +539,45 @@ mod tests {
         assert!(ui.get_preset_dirty(), "a live change marks EDITED");
     }
 
+    /// Connecting while the pedal has unsaved edits: the knobs show the
+    /// live values, EDITED is on, and the stored values stay the baseline
+    /// (double-click resets, "Changed"). A read for another preset than
+    /// the one shown is stale and ignored.
+    #[test]
+    fn live_read_with_unsaved_edits() {
+        let ui = headless_ui();
+        let ctx = SyncCtx::default();
+        ui.set_preset(5);
+        let mut stored = vec![0.0f32; protocol::PARAM_COUNT];
+        stored[12] = 300.0;
+        stored[17] = 2000.0;
+        stored[18] = 1.0;
+        stored[20] = 5.0;
+        let mut live = stored.clone();
+        live[20] = 7.0;
+        let params = protocol::AmpParams {
+            gain: 7.0, volume: 4.2, presence: 0.0, depth: 8.4, bass: 4.3, mid: 8.1, treble: 2.6, amp_enabled: true,
+        };
+        let state = |idx: u8| protocol::LiveState {
+            preset_idx: idx,
+            dirty: true,
+            params: Ok(params),
+            raw: live.clone(),
+            stored: Some(stored.clone()),
+            character: None,
+            info: None,
+        };
+        ctx.handle_event(&ui, Event::LiveState(Ok(state(9))));
+        assert!(!ui.get_preset_dirty(), "stale read for preset 10 ignored");
+        ctx.handle_event(&ui, Event::LiveState(Ok(state(4))));
+        assert!(ui.get_preset_dirty(), "the pedal's unsaved edit");
+        assert_eq!(ui.get_amp_gain(), 7.0, "live value shown");
+        assert_eq!(ctx.amp().diff.baseline(20), Some(5.0), "stored value as the baseline");
+        // A clean read after a save on the pedal: not EDITED any more.
+        ctx.handle_event(&ui, clean_live(4, &live, params));
+        assert!(!ui.get_preset_dirty());
+    }
+
     /// The front-panel VOLUME is the pedal's master volume, persistent
     /// across presets: its read and pushes set the GLOBAL knob and never
     /// the EDITED state.
@@ -528,11 +587,7 @@ mod tests {
         let ctx = SyncCtx::default();
         crate::wiring::wire(&ui, &ctx);
         ui.set_preset(10);
-        ctx.handle_event(&ui, Event::AmpParams {
-            preset_idx: 9,
-            result: Err("no params".into()),
-            raw: vec![0.0; protocol::PARAM_COUNT],
-        });
+        ctx.handle_event(&ui, Event::LiveState(Err("no live buffer".into())));
         assert!(!ui.get_pedal_volume_known());
         ctx.handle_event(&ui, Event::Volume(6.5)); // the read at connect
         assert!(ui.get_pedal_volume_known());

@@ -163,10 +163,9 @@ The desktop entry runs `tx-open-studio`, so the binary has to be on your `PATH` 
 
 These are not on a to-do list waiting for time. Each one is either an unknown part of the protocol or something the pedal does not report.
 
-- **No upload or download of `.tonex` captures / presets.** The full preset dump is an undecoded binary blob, and no upload path is known.
-- **The amp model (capture) cannot be changed.** Only the parameters around it can. Its name (and the cab source: model cab, IR or another model's cab) is shown read-only in the AMP and CAB tabs.
+- **No upload or download of `.tonex` captures / presets.** Models and cabs can be picked only from what is already in the pedal's library; no upload path is known, and the model data itself is not decoded.
 - **The tuner shows no pitch.** The pedal sends no pitch data over USB. It also does not report tuner on/off when toggled on the pedal, so the app's tuner button only reflects what the app last sent.
-- Only In Trim and Master are known among the pedal's global settings.
+- **Three of the pedal's 22 global values are not identified** (see [PROTOCOL.md §4.5](PROTOCOL.md)); the app leaves them as the pedal has them.
 
 The full list of open questions is in [PROTOCOL.md §9](PROTOCOL.md#9-known-limitations-and-open-questions).
 

@@ -249,12 +249,59 @@ pub(crate) fn extract_current_preset(payload: &[u8]) -> Option<u8> {
     (usize::from(idx) < PRESET_COUNT).then_some(idx)
 }
 
+/// Preset index of a reply to our summary request for a stored preset:
+/// type `0x0204`, size field = body length, body head `B9 04 01 00 <idx>`
+/// (hardware-verified for indices below and above 128 and for the active
+/// preset). Read with the value decoder, not by searching the payload.
+pub(crate) fn summary_reply_index(payload: &[u8]) -> Option<u8> {
+    if frame_type(payload) != Some(TYPE_PRESET_DETAILS) {
+        return None;
+    }
+    let body = sized_body(payload, "preset details").ok()?;
+    if body.get(..2)? != [0xB9, 0x04] {
+        return None;
+    }
+    let mut pos = 2;
+    let mode = read_u16_value(body, &mut pos)?;
+    let dirty = read_u16_value(body, &mut pos)?;
+    let idx = read_u16_value(body, &mut pos)?;
+    if mode != 1 || dirty != 0 || usize::from(idx) >= PRESET_COUNT {
+        return None;
+    }
+    u8::try_from(idx).ok()
+}
+
+/// What a `0x0204` preset-details frame is.
+#[derive(Debug, PartialEq)]
+pub(crate) enum DetailsFrame {
+    /// The reply to our request for the `requested` index.
+    Reply,
+    /// The pedal's push after a preset change (footswitch, our select).
+    Push(u8),
+    /// A reply for another index (late, or not ours), or unrecognised.
+    Other,
+}
+
+/// Classifies a frame while a summary request for `requested` (if any)
+/// is pending: only a stored-preset reply for exactly that index is the
+/// reply; a push stays a push.
+pub(crate) fn classify_details(payload: &[u8], requested: Option<u8>) -> DetailsFrame {
+    if frame_type(payload) != Some(TYPE_PRESET_DETAILS) {
+        return DetailsFrame::Other;
+    }
+    match summary_reply_index(payload) {
+        Some(idx) if Some(idx) == requested => DetailsFrame::Reply,
+        Some(_) => DetailsFrame::Other,
+        None => extract_current_preset(payload).map_or(DetailsFrame::Other, DetailsFrame::Push),
+    }
+}
+
 /// The pedal's confirmation of our select of preset `idx`: the `0x0204`
 /// summary it pushes once the preset is loaded (with the pushed-index
 /// marker). Reads of live values issued before it may still see the
 /// previous preset.
 pub(crate) fn is_select_ack(payload: &[u8], idx: u8) -> bool {
-    frame_type(payload) == Some(TYPE_PRESET_DETAILS) && extract_current_preset(payload) == Some(idx)
+    classify_details(payload, None) == DetailsFrame::Push(idx)
 }
 
 #[cfg(test)]
@@ -414,6 +461,47 @@ mod tests {
         sized[3] += 1;
         assert_eq!(parse_hello(&sized), DeviceInfo::default());
         assert_eq!(parse_hello(&HELLO_CMD), DeviceInfo::default());
+    }
+
+    /// Synthetic summary frame: header with a matching size field, body
+    /// head `B9 04 <mode> 00 <idx>`, then name and filler.
+    fn details_frame(mode: u8, idx: u8) -> Vec<u8> {
+        let mut body = vec![0xB9, 0x04, mode, 0x00];
+        body.extend(index_bytes(idx));
+        body.extend_from_slice(&NAME_MARKER);
+        body.extend([b'X'; 33]);
+        body.extend([0x5A; 40]);
+        let mut p = vec![0xB9, 0x03, 0x81, 0x04, 0x02, 0x81];
+        p.extend((body.len() as u16).to_le_bytes());
+        p.push(0x10);
+        p.extend(body);
+        p
+    }
+
+    #[test]
+    fn summary_reply_is_only_the_requested_index() {
+        for idx in [5u8, 140] {
+            let reply = details_frame(0x01, idx);
+            assert_eq!(summary_reply_index(&reply), Some(idx));
+            assert_eq!(classify_details(&reply, Some(idx)), DetailsFrame::Reply);
+            // A reply for another index (late, or not ours): neither the
+            // reply nor a push.
+            assert_eq!(classify_details(&reply, Some(idx.wrapping_add(1))), DetailsFrame::Other);
+            assert_eq!(classify_details(&reply, None), DetailsFrame::Other);
+            // A push landing while `idx` is requested stays a push.
+            let push = details_frame(0x00, idx);
+            assert_eq!(summary_reply_index(&push), None);
+            assert_eq!(classify_details(&push, Some(idx)), DetailsFrame::Push(idx));
+            assert_eq!(classify_details(&push, Some(3)), DetailsFrame::Push(idx));
+            assert!(is_select_ack(&push, idx));
+            assert!(!is_select_ack(&reply, idx), "a reply is no select confirmation");
+        }
+        // Size field off, index out of range, or another frame type: no reply.
+        let mut sized = details_frame(0x01, 5);
+        sized[6] ^= 1;
+        assert_eq!(summary_reply_index(&sized), None);
+        assert_eq!(summary_reply_index(&details_frame(0x01, 200)), None);
+        assert_eq!(classify_details(&preset_request(5), Some(5)), DetailsFrame::Other);
     }
 
     #[test]

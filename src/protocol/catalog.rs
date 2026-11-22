@@ -41,7 +41,7 @@ impl<F: Fn(Event)> Session<'_, F> {
             if frame_type(&payload) == Some(TYPE_LIBRARY_LIST) {
                 return Ok(parse_library_list(&payload));
             }
-            self.dispatch(&payload, false);
+            self.dispatch(&payload);
         }
         Ok(Err("no library list received".into()))
     }
@@ -70,7 +70,7 @@ impl<F: Fn(Event)> Session<'_, F> {
         let until = Instant::now() + dur;
         while let Some(payload) = self.link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
             if frame_type(&payload) != Some(TYPE_PRESET_DETAILS) {
-                self.dispatch(&payload, false);
+                self.dispatch(&payload);
             }
         }
         Ok(())
@@ -217,7 +217,7 @@ impl<F: Fn(Event)> Session<'_, F> {
                     Err(e) => problem = e,
                 }
             } else {
-                self.dispatch(&payload, false);
+                self.dispatch(&payload);
             }
         }
         Ok(Err(problem))

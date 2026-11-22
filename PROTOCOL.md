@@ -200,7 +200,7 @@ preset 10 summary:   7E B9 03 81 00 02 82 06 00 80 10 03 B9 04 10 01 09 00 DD 0A
 preset 141 summary:  7E B9 03 81 00 02 82 06 00 80 10 03 B9 04 10 01 80 8C 00 84 48 7E
 ```
 
-The app reads all 150 names by requesting summaries 0..149 in sequence (1 s timeout each, 10 s overall). While a request is pending, the first frame containing the name marker is taken as the reply.
+The app reads all 150 names by requesting summaries 0..149 in sequence (1 s timeout each, 10 s overall). A frame is taken as the reply only if it is a `0x0204` whose size field matches its body and whose body starts `B9 04 01 00 <idx>` for the requested index (read with the value decoder, `summary_reply_index`). Hardware-verified 2026-11-22 on FW 1.6.24 for indices 0, 5, 9 (the active preset: still `01 00`), 128 (`80 80`) and 140 (`80 8C`). Any other frame while waiting is handled as if no request were pending.
 
 #### Summary reply layout (`0x0204`, `full = 00`)
 
@@ -232,7 +232,7 @@ Layout sanity check used by the app before trusting the array (guards against a 
 
 #### Unsolicited preset details
 
-When the preset is changed on the pedal (footswitch), it pushes a `0x0204` frame containing the pushed-preset-index marker above plus the same name/array/metadata content. The app only treats a `0x0204` as a push while no request is pending; a push landing during a request is missed.
+When the preset is changed on the pedal (footswitch), it pushes a `0x0204` frame containing the pushed-preset-index marker above plus the same name/array/metadata content. A `0x0204` that is not a stored-preset reply (above) and has the pushed-index marker is a push, also while a request is pending (`classify_details`); a reply for another index is ignored. The push's own layout is from Builty and the app's working footswitch sync; the marker is still found by search, not at a fixed place in the body (unverified where it sits).
 
 #### Full dump (`full = 01`) → `0x0203`
 

@@ -234,7 +234,7 @@ impl<F: Fn(Event)> Session<'_, F> {
                     }
                 }
                 _ => {
-                    self.dispatch(&payload, false);
+                    self.dispatch(&payload);
                 }
             }
         }
@@ -287,7 +287,7 @@ impl<F: Fn(Event)> Session<'_, F> {
         let settle = Instant::now() + WRITE_SETTLE;
         while let Some(payload) = self.link.read_frame(settle.saturating_duration_since(Instant::now()), settle)? {
             if frame_type(&payload) != Some(TYPE_PRESET_DETAILS) {
-                self.dispatch(&payload, false);
+                self.dispatch(&payload);
             }
         }
         Ok(self.fetch_dump(idx, true)?.map_err(|e| format!("verifying the write: {e}")))
@@ -302,7 +302,7 @@ impl<F: Fn(Event)> Session<'_, F> {
             if is_select_ack(&payload, idx) {
                 return Ok(());
             }
-            self.dispatch(&payload, false);
+            self.dispatch(&payload);
         }
         if self.debug {
             eprintln!("TONEX serial: no confirmation of the select of preset {idx}");
@@ -321,7 +321,7 @@ impl<F: Fn(Event)> Session<'_, F> {
                     return Ok(Some(value));
                 }
             }
-            self.dispatch(&payload, false);
+            self.dispatch(&payload);
         }
         Ok(None)
     }
@@ -410,7 +410,7 @@ impl<F: Fn(Event)> Session<'_, F> {
                     Err(e) => problem = e,
                 }
             } else {
-                self.dispatch(&payload, false);
+                self.dispatch(&payload);
             }
         }
         Ok(Err(problem))
@@ -447,23 +447,20 @@ impl<F: Fn(Event)> Session<'_, F> {
     pub(crate) fn idle(&mut self) -> Result<(), String> {
         let far = Instant::now() + Duration::from_secs(3600);
         if let Some(payload) = self.link.read_frame(IDLE_POLL, far)? {
-            self.dispatch(&payload, false);
+            self.dispatch(&payload);
         }
         Ok(())
     }
 
-    /// Handles one incoming frame. Returns true when `awaiting` a details
-    /// response and this frame is it.
-    ///
-    /// While a request is pending, the first frame carrying a preset name is
-    /// taken as its response (the behaviour verified on hardware for the
-    /// name scan). Only while idle is a details frame with the preset-index
-    /// marker treated as a footswitch push, so a push that lands during a
-    /// request is missed (rare; the next preset change re-syncs).
-    pub(crate) fn dispatch(&mut self, payload: &[u8], awaiting: bool) -> bool {
+    /// Handles one incoming frame (pushes, replies nobody waits for). A
+    /// preset-details frame is a footswitch/select push only if it is not
+    /// a reply to a stored-preset request (`classify_details`); a push
+    /// that lands during a request is handled here too, not taken as the
+    /// reply.
+    pub(crate) fn dispatch(&mut self, payload: &[u8]) {
         let ty = frame_type(payload);
         if ty == Some(TYPE_LIVE_WRITE_ACK) {
-            return false;
+            return;
         }
         if ty == Some(TYPE_BROWSE) {
             if self.own_write {
@@ -473,19 +470,19 @@ impl<F: Fn(Event)> Session<'_, F> {
             } else {
                 self.browse_due = Some(Instant::now() + BROWSE_DEBOUNCE);
             }
-            return false;
+            return;
         }
         if ty == Some(TYPE_GLOBAL_CONFIG) {
             if self.debug {
                 eprintln!("TONEX serial: globals: {}", globals_dump(payload));
             }
             (self.on_event)(Event::Globals(extract_globals(payload)));
-            return false;
+            return;
         }
         if ty == Some(TYPE_STATE) {
             // Pushed state update (e.g. preset changed on the pedal).
             report_state(Some(payload), self.on_event, self.debug);
-            return false;
+            return;
         }
         if ty == Some(TYPE_PARAM_CHANGED) {
             if let Some((index, value)) = extract_param_change(payload) {
@@ -495,35 +492,31 @@ impl<F: Fn(Event)> Session<'_, F> {
             } else if self.debug {
                 eprintln!("TONEX serial: unparsed 0x0207: {}", hex(payload));
             }
-            return false;
+            return;
         }
-        if awaiting && find(payload, &NAME_MARKER).is_some() {
-            return true;
-        }
-        if !awaiting && ty == Some(TYPE_PRESET_DETAILS) {
-            if let Some(idx) = extract_current_preset(payload) {
-                for event in pushed_preset_events(idx, payload) {
-                    (self.on_event)(event);
-                }
-                return false;
+        if let DetailsFrame::Push(idx) = classify_details(payload, None) {
+            for event in pushed_preset_events(idx, payload) {
+                (self.on_event)(event);
             }
+            return;
         }
         if self.debug {
             let shown = &payload[..payload.len().min(48)];
             eprintln!("TONEX serial: unhandled frame type {ty:04X?} ({} B): {}", payload.len(), hex(shown));
         }
-        false
     }
 
-    /// Requests details of preset `idx` and returns the response payload
-    /// (None on timeout), dispatching unrelated frames meanwhile.
+    /// Requests details of preset `idx` and returns the reply (None on
+    /// timeout): only the stored-preset reply for `idx`; everything else,
+    /// pushes included, is dispatched meanwhile.
     pub(crate) fn fetch_details(&mut self, idx: u8, timeout: Duration) -> Result<Option<Vec<u8>>, String> {
         self.link.send(&preset_request(idx))?;
         let until = Instant::now() + timeout;
         while let Some(payload) = self.link.read_frame(until.saturating_duration_since(Instant::now()), until)? {
-            if self.dispatch(&payload, true) {
+            if classify_details(&payload, Some(idx)) == DetailsFrame::Reply {
                 return Ok(Some(payload));
             }
+            self.dispatch(&payload);
         }
         Ok(None)
     }

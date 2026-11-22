@@ -16,7 +16,7 @@ pub(crate) fn status_text(status: &LinkStatus) -> String {
     }
 }
 
-/// The connection indicator's hover text: "TONEX · SN 001234567 · FW
+/// The connection indicator's hover text: "TONEX PEDAL · SN 001234567 · FW
 /// 1.6.24", with only the known parts; "" (no hover text) when neither is
 /// known.
 pub(crate) fn device_text(info: &DeviceInfo) -> String {
@@ -27,7 +27,7 @@ pub(crate) fn device_text(info: &DeviceInfo) -> String {
     if parts.is_empty() {
         return String::new();
     }
-    format!("TONEX · {}", parts.join(" · "))
+    format!("TONEX PEDAL · {}", parts.join(" · "))
 }
 
 /// How often the reconnect poll looks for the pedal while a link is down.
@@ -184,9 +184,9 @@ mod tests {
     #[test]
     fn device_hover_text_shows_known_parts() {
         let info = |serial: Option<&str>, firmware: Option<&str>| DeviceInfo { serial: serial.map(Into::into), firmware: firmware.map(Into::into) };
-        assert_eq!(device_text(&info(Some("001234567"), Some("1.6.24"))), "TONEX · SN 001234567 · FW 1.6.24");
-        assert_eq!(device_text(&info(None, Some("1.6.24"))), "TONEX · FW 1.6.24");
-        assert_eq!(device_text(&info(Some("001234567"), None)), "TONEX · SN 001234567");
+        assert_eq!(device_text(&info(Some("001234567"), Some("1.6.24"))), "TONEX PEDAL · SN 001234567 · FW 1.6.24");
+        assert_eq!(device_text(&info(None, Some("1.6.24"))), "TONEX PEDAL · FW 1.6.24");
+        assert_eq!(device_text(&info(Some("001234567"), None)), "TONEX PEDAL · SN 001234567");
         assert_eq!(device_text(&DeviceInfo::default()), "");
     }
 

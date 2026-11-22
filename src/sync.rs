@@ -601,7 +601,7 @@ mod tests {
         let ctx = SyncCtx::default();
         let info = protocol::DeviceInfo { serial: Some("001234567".into()), firmware: Some("1.6.24".into()) };
         ctx.handle_event(&ui, Event::Device(info));
-        assert_eq!(ui.get_device_text(), "TONEX · SN 001234567 · FW 1.6.24");
+        assert_eq!(ui.get_device_text(), "TONEX PEDAL · SN 001234567 · FW 1.6.24");
         ctx.reset_pedal_state(&ui);
         assert_eq!(ui.get_device_text(), "");
     }

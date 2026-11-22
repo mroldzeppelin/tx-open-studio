@@ -52,6 +52,7 @@ Other details:
 - An **EDITED** indicator shows when the pedal has unsaved edits (also ones made before the app connected) or a value differs from the stored preset. The app always shows what the pedal plays, read from its live edit buffer.
 - **Save edits** to the active preset: hold the floppy button (top right) for 1 s — an amber fill rises as a guard against misclicks. The app writes the preset and verifies it by reading it back.
 - Tuner on/off button (sent as MIDI CC 9 — the only MIDI message the app uses; without a MIDI port the button is disabled).
+- Hover the connection LED in the status bar to see the pedal's serial number and firmware version (read from the pedal's hello reply).
 - Auto-reconnect: unplug the pedal or power-cycle it and the app shows RECONNECTING, polls every 2 seconds, and resyncs everything (current preset, names, parameters, globals) when it comes back.
 
 ## Supported hardware

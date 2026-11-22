@@ -158,7 +158,7 @@ B9 03 02 2B 10 | B9 07  00  80 81  B9 03 0C 02 00  B9 03 01 06 18  BC 14 <20 byt
 | 5 | **Serial number**: `82` + **4 bytes** u32 LE (here `87 D6 12 00` = 1234567, shown as `001234567`, 9 digits zero-padded as the official editor shows it). The value matched the official editor's "SN" and is also contained in the USB iSerial string; the USB bcdDevice (`0100`) does not carry the firmware. |
 | 0, 1, 2, 4, 6 | Unknown (`00`; `80 81` = 129; list `0C 02 00`; a 20-byte blob; `00`). |
 
-Note the `82` tag with 4 bytes after it here, where `82` is followed by 2 bytes everywhere else (§3): only with 4 bytes do the 7 items fill the header's size (`2B` = 43) exactly. The app reads items 0–4 with the value encoding and the serial by this rule (`parse_hello`); it shows "TONEX · SN … · FW …" when hovering the connection indicator.
+Note the `82` tag with 4 bytes after it here, where `82` is followed by 2 bytes everywhere else (§3): only with 4 bytes do the 7 items fill the header's size (`2B` = 43) exactly. The app reads items 0–4 with the value encoding and the serial by this rule (`parse_hello`); it shows "TONEX PEDAL · SN … · FW …" when hovering the connection indicator.
 
 ### 4.2 Request state / state `0x0201`
 

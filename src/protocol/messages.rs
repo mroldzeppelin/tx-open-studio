@@ -167,6 +167,55 @@ pub(crate) fn extract_volume_change(payload: &[u8]) -> Option<f32> {
     float_at(payload, start)
 }
 
+/// The pedal's reply to hello (`B9 03 02 <size> 10 | <body>`).
+pub(crate) const TYPE_HELLO_REPLY: u16 = 0x0002;
+
+/// What the hello reply says about the pedal. Each part is None when it
+/// didn't read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// Serial number, 9 digits zero-padded (as the official editor shows it).
+    pub serial: Option<String>,
+    /// Firmware version, e.g. "1.6.24".
+    pub firmware: Option<String>,
+}
+
+/// Serial number and firmware from the hello reply. Body (FW 1.6.24, from
+/// a capture of the official editor): `B9 07` + 7 items: `00`, `80 81`,
+/// list `[0C 02 00]` (unknown), list `[01 06 18]` = firmware 1.6.24, a
+/// 20-byte blob (unknown), `82` + 4 bytes = the serial number (u32 LE),
+/// `00`. Items 0..4 follow the value encoding; the serial's `82` is
+/// followed by 4 bytes here (not 2 as in size fields), which is what makes
+/// the 7 items fill the header's size exactly.
+pub(crate) fn parse_hello(payload: &[u8]) -> DeviceInfo {
+    let mut info = DeviceInfo::default();
+    if frame_type(payload) != Some(TYPE_HELLO_REPLY) {
+        return info;
+    }
+    let Ok(body) = sized_body(payload, "hello reply") else { return info };
+    if body.get(..2) != Some(&[0xB9, 0x07]) {
+        return info;
+    }
+    let mut pos = 2;
+    let mut items = Vec::new();
+    for _ in 0..5 {
+        match parse_node(body, &mut pos, 1) {
+            Some(node) => items.push(node),
+            None => return info,
+        }
+    }
+    info.firmware = items[3].items().and_then(|parts| {
+        let numbers: Option<Vec<String>> = parts.iter().map(|n| n.int().map(|v| v.to_string())).collect();
+        numbers.filter(|n| n.len() == 3).map(|n| n.join("."))
+    });
+    if body.get(pos) == Some(&0x82) {
+        if let Some(&[a, b, c, d]) = body.get(pos + 1..pos + 5) {
+            info.serial = Some(format!("{:09}", u32::from_le_bytes([a, b, c, d])));
+        }
+    }
+    info
+}
+
 /// Message type from the `B9 03 <type> <size> <unknown>` header.
 pub(crate) fn frame_type(payload: &[u8]) -> Option<u16> {
     if payload.get(..2)? != [0xB9, 0x03] {
@@ -332,6 +381,39 @@ mod tests {
         level.extend(5.0f32.to_le_bytes());
         assert!(!is_select_ack(&level, 0));
         assert!(!is_select_ack(&[0xB9, 0x03, 0x81, 0x04, 0x02, 0xB9, 0x04, 0x10, 0x01, 42], 42));
+    }
+
+    /// Synthetic hello reply: fake serial 1234567, firmware 1.6.24.
+    fn hello_reply(serial: u32) -> Vec<u8> {
+        let mut body = vec![0xB9, 0x07, 0x00, 0x80, 0x81, 0xB9, 0x03, 0x0C, 0x02, 0x00, 0xB9, 0x03, 0x01, 0x06, 0x18, 0xBC, 0x14];
+        body.extend([0xA5; 20]);
+        body.push(0x82);
+        body.extend(serial.to_le_bytes());
+        body.push(0x00);
+        let mut p = vec![0xB9, 0x03, 0x02, body.len() as u8, 0x10];
+        p.extend(body);
+        p
+    }
+
+    #[test]
+    fn hello_reply_serial_and_firmware() {
+        let p = hello_reply(1_234_567);
+        assert_eq!(p.len(), 48, "same length as the pedal's reply");
+        let info = parse_hello(&p);
+        assert_eq!(info.serial.as_deref(), Some("001234567"));
+        assert_eq!(info.firmware.as_deref(), Some("1.6.24"));
+        // Serial cut off: firmware only (size field adjusted).
+        let mut short = p[..p.len() - 3].to_vec();
+        short[3] -= 3;
+        assert_eq!(parse_hello(&short), DeviceInfo { serial: None, firmware: Some("1.6.24".into()) });
+        // Another frame type, a bad size field, or no body: nothing.
+        let mut other = p.clone();
+        other[2] = 0x05;
+        assert_eq!(parse_hello(&other), DeviceInfo::default());
+        let mut sized = p.clone();
+        sized[3] += 1;
+        assert_eq!(parse_hello(&sized), DeviceInfo::default());
+        assert_eq!(parse_hello(&HELLO_CMD), DeviceInfo::default());
     }
 
     #[test]

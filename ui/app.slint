@@ -13,7 +13,7 @@ import { DelayTab } from "tabs/delay.slint";
 import { ReverbTab } from "tabs/reverb.slint";
 import { Stage } from "stage.slint";
 import { TitleRow } from "title-row.slint";
-import { StatusBar } from "status-bar.slint";
+import { StatusBar, DeviceTip } from "status-bar.slint";
 import { MenuTop, MenuMid, MenuLeaf } from "components/cascade-menu.slint";
 
 // Re-exported for Rust (PresetRow, Format, ...).
@@ -241,6 +241,8 @@ export component AppWindow inherits Window {
     callback cab-menu-picked(int);
     in property <bool> slot-busy: false;
     in property <string> library-text;
+    // Connection indicator hover text ("TONEX · SN … · FW …"; "" = none).
+    in property <string> device-text;
     in property <bool> library-scanning: false;
     callback library-rescan();
     callback library-cancel();
@@ -677,7 +679,7 @@ export component AppWindow inherits Window {
         }
 
         // Status bar: LED + status on the left, library + update chip right.
-        StatusBar {
+        status-bar := StatusBar {
             connected: root.connected;
             reconnecting: root.reconnecting;
             no-access: root.no-access;
@@ -687,9 +689,18 @@ export component AppWindow inherits Window {
             update-version: root.update-version;
             library-text: root.library-text;
             library-scanning: root.library-scanning;
+            device-text: root.device-text;
             library-rescan => { root.library-rescan(); }
             library-cancel => { root.library-cancel(); }
             open-releases => { root.open-releases(); }
         }
+    }
+
+    // Hover label of the connection indicator, just above the status bar
+    // (31 px: its top line + strip) at the LED, inside the window.
+    if status-bar.device-hover: DeviceTip {
+        x: root.margin + 1px + 10px;
+        y: root.height - root.margin - 1px - 31px - self.height - 4px;
+        text: root.device-text;
     }
 }

@@ -161,6 +161,7 @@ impl SyncCtx {
     ui.set_eq_mid_q_known(false);
     ui.set_eq_post_known(false);
         ui.set_tuner_active(false);
+        ui.set_device_text("".into());
     }
 
     /// Reconnect step (startup, every `RECONNECT_POLL` while not healthy,
@@ -315,6 +316,7 @@ impl SyncCtx {
         match event {
             // Link changes are handled in `handle_session_event`.
             Event::Connected(_) | Event::Disconnected(_) | Event::NoAccess(_) => {}
+            Event::Device(info) => ui.set_device_text(device_text(&info).into()),
             Event::Names(Ok(names)) => {
                 *self.names.lock() = names;
                 show_list(ui, &self.names);
@@ -589,6 +591,19 @@ mod tests {
         // A clean read after a save on the pedal: not EDITED any more.
         ctx.handle_event(&ui, clean_live(4, &live, params));
         assert!(!ui.get_preset_dirty());
+    }
+
+    /// The hello reply's serial number and firmware reach the status bar's
+    /// hover text; a lost link clears it.
+    #[test]
+    fn device_text_until_disconnect() {
+        let ui = headless_ui();
+        let ctx = SyncCtx::default();
+        let info = protocol::DeviceInfo { serial: Some("001234567".into()), firmware: Some("1.6.24".into()) };
+        ctx.handle_event(&ui, Event::Device(info));
+        assert_eq!(ui.get_device_text(), "TONEX · SN 001234567 · FW 1.6.24");
+        ctx.reset_pedal_state(&ui);
+        assert_eq!(ui.get_device_text(), "");
     }
 
     /// The front-panel VOLUME is the pedal's master volume, persistent

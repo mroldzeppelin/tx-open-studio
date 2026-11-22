@@ -13,6 +13,8 @@ pub(crate) fn debug_enabled() -> bool {
 pub enum Event {
     /// Handshake done; the session is live.
     Connected(String),
+    /// Serial number and firmware from the hello reply (after `Connected`).
+    Device(DeviceInfo),
     /// The session ended (open failed, unplugged, I/O error).
     Disconnected(String),
     /// Opening the port (path) failed with "permission denied"; always
@@ -134,9 +136,14 @@ impl Pedal {
         std::thread::spawn(move || {
             let _guard = port_lock();
             let link = match open_any() {
-                Ok((link, path, state)) => {
+                Ok((link, path, handshake)) => {
                     on_event(Event::Connected(path.display().to_string()));
-                    report_state(state.as_deref(), &on_event, debug_enabled());
+                    let device = parse_hello(&handshake.hello);
+                    if debug_enabled() {
+                        eprintln!("TONEX serial: hello: {device:?}");
+                    }
+                    on_event(Event::Device(device));
+                    report_state(handshake.state.as_deref(), &on_event, debug_enabled());
                     link
                 }
                 Err(failure) => {

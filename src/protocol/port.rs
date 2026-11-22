@@ -183,9 +183,15 @@ pub(crate) fn combine_failures(failures: Vec<OpenFailure>) -> OpenFailure {
     OpenFailure::Other(failures.iter().map(OpenFailure::message).collect::<Vec<_>>().join("; "))
 }
 
-/// Opens the first candidate port that answers the handshake. Also returns
-/// the state reply (if one arrived) for the current preset.
-pub(crate) fn open_any() -> Result<(Link, PathBuf, Option<Vec<u8>>), OpenFailure> {
+/// What the handshake brought: the hello reply (serial number, firmware)
+/// and the state reply (current preset), if one arrived.
+pub(crate) struct Handshake {
+    pub(crate) hello: Vec<u8>,
+    pub(crate) state: Option<Vec<u8>>,
+}
+
+/// Opens the first candidate port that answers the handshake.
+pub(crate) fn open_any() -> Result<(Link, PathBuf, Handshake), OpenFailure> {
     let ports = candidate_ports();
     if ports.is_empty() {
         return Err(OpenFailure::Other("no /dev/ttyACM* port found".into()));
@@ -193,7 +199,7 @@ pub(crate) fn open_any() -> Result<(Link, PathBuf, Option<Vec<u8>>), OpenFailure
     let mut failures = Vec::new();
     for path in ports {
         match open_pedal(&path, Instant::now() + HANDSHAKE_TIMEOUT * 2) {
-            Ok((link, state)) => return Ok((link, path, state)),
+            Ok((link, handshake)) => return Ok((link, path, handshake)),
             Err(OpenFailure::Other(e)) => failures.push(OpenFailure::Other(format!("{}: {e}", path.display()))),
             Err(denied) => failures.push(denied),
         }
@@ -201,16 +207,15 @@ pub(crate) fn open_any() -> Result<(Link, PathBuf, Option<Vec<u8>>), OpenFailure
     Err(combine_failures(failures))
 }
 
-pub(crate) fn open_pedal(path: &Path, deadline: Instant) -> Result<(Link, Option<Vec<u8>>), OpenFailure> {
+pub(crate) fn open_pedal(path: &Path, deadline: Instant) -> Result<(Link, Handshake), OpenFailure> {
     let mut link = Link::open(path)?;
 
     // Handshake. Replies are not strictly required, but the pedal expects
     // hello + state before serving preset details.
     link.send(&HELLO_CMD)?;
-    let hello = link.read_frame(HANDSHAKE_TIMEOUT, deadline)?;
-    if hello.is_none() {
+    let Some(hello) = link.read_frame(HANDSHAKE_TIMEOUT, deadline)? else {
         return Err(OpenFailure::Other("no reply to hello (not a TONEX Pedal?)".into()));
-    }
+    };
     link.send(&REQUEST_STATE_CMD)?;
     // Keep the state reply (type 0x0201): it carries the current preset.
     let until = (Instant::now() + HANDSHAKE_TIMEOUT).min(deadline);
@@ -221,7 +226,7 @@ pub(crate) fn open_pedal(path: &Path, deadline: Instant) -> Result<(Link, Option
             break;
         }
     }
-    Ok((link, state))
+    Ok((link, Handshake { hello, state }))
 }
 
 #[cfg(test)]

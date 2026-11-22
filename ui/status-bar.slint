@@ -1,5 +1,31 @@
 import { Theme } from "theme.slint";
 
+// Hover label for the connection indicator ("TONEX · SN … · FW …"),
+// drawn by the window above the status bar so the bar's clip doesn't cut it.
+export component DeviceTip inherits Rectangle {
+    in property <string> text;
+    height: 22px;
+    width: tip-text.preferred-width + 16px;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.edge;
+    border-radius: 5px;
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: #000000aa;
+    tip-text := Text {
+        text: root.text;
+        color: Theme.secondary-ink;
+        font-size: 9px;
+        font-weight: 500;
+        font-family: Theme.mono-font;
+        letter-spacing: 0.8px;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        wrap: no-wrap;
+    }
+}
+
 // Status bar: LED + status on the left, library + update chip right.
 export component StatusBar inherits Rectangle {
     in property <bool> connected;
@@ -12,6 +38,11 @@ export component StatusBar inherits Rectangle {
     // "LIBRARY 57/192" ("" = hidden); a scan can be cancelled, else rerun.
     in property <string> library-text;
     in property <bool> library-scanning;
+    // Hover text of the connection indicator ("" = none).
+    in property <string> device-text;
+    // The pointer is on the LED / status text while the pedal is connected
+    // and its device text is known (the window shows `DeviceTip`).
+    out property <bool> device-hover: status-ta.has-hover && root.connected && root.device-text != "";
     callback library-rescan;
     callback library-cancel;
     callback open-releases;
@@ -37,36 +68,47 @@ export component StatusBar inherits Rectangle {
                 padding-right: 10px;
                 spacing: 8px;
 
-                VerticalLayout {
-                    alignment: center;
-                    // Green when connected, blinking amber while
-                    // reconnecting, steady red without port access,
-                    // dark gray otherwise.
-                    Rectangle {
-                        property <bool> amber: !root.connected && root.reconnecting;
-                        property <bool> red: root.no-access;
-                        property <color> lit: root.connected ? Theme.ok
-                            : (self.red ? Theme.error : (self.amber ? Theme.accent : Theme.led-off));
-                        width: 6px;
-                        height: 6px;
-                        border-radius: 3px;
-                        background: self.lit;
-                        opacity: self.amber && root.led-dim ? 0.25 : 1;
-                        drop-shadow-blur: root.connected || self.amber || self.red ? 6px : 0px;
-                        drop-shadow-color: root.connected || self.amber || self.red ? self.lit.with-alpha(0.9) : transparent;
-                    }
-                }
-
-                Text {
+                Rectangle {
                     horizontal-stretch: 1;
-                    text: root.status-note != "" ? root.status-note : root.status-text;
-                    color: root.status-note != "" ? Theme.error : Theme.status-ink;
-                    font-size: 10px;
-                    font-weight: 500;
-                    font-family: Theme.mono-font;
-                    letter-spacing: 1px;
-                    vertical-alignment: center;
-                    overflow: elide;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: center;
+                            // Green when connected, blinking amber while
+                            // reconnecting, steady red without port access,
+                            // dark gray otherwise.
+                            Rectangle {
+                                property <bool> amber: !root.connected && root.reconnecting;
+                                property <bool> red: root.no-access;
+                                property <color> lit: root.connected ? Theme.ok
+                                    : (self.red ? Theme.error : (self.amber ? Theme.accent : Theme.led-off));
+                                width: 6px;
+                                height: 6px;
+                                border-radius: 3px;
+                                background: self.lit;
+                                opacity: self.amber && root.led-dim ? 0.25 : 1;
+                                drop-shadow-blur: root.connected || self.amber || self.red ? 6px : 0px;
+                                drop-shadow-color: root.connected || self.amber || self.red ? self.lit.with-alpha(0.9) : transparent;
+                            }
+                        }
+
+                        status-label := Text {
+                            horizontal-stretch: 1;
+                            text: root.status-note != "" ? root.status-note : root.status-text;
+                            color: root.status-note != "" ? Theme.error : Theme.status-ink;
+                            font-size: 10px;
+                            font-weight: 500;
+                            font-family: Theme.mono-font;
+                            letter-spacing: 1px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    // LED + text only, not the empty rest of the strip.
+                    status-ta := TouchArea {
+                        x: 0px;
+                        width: min(parent.width, 14px + status-label.preferred-width);
+                    }
                 }
 
                 if root.library-text != "": HorizontalLayout {

@@ -143,7 +143,22 @@ host:  B9 03 00 82 04 00 80 10 01 | B9 02 02 10
                                     body: 4 bytes, size 0x0004
 ```
 
-The pedal answers with a frame (contents not parsed by the app; its arrival is the "this is a TONEX" check). Then send **request state** (§4.2). Timeout used: 1.5 s each.
+The pedal answers with a hello reply (its arrival is the "this is a TONEX" check). Then send **request state** (§4.2). Timeout used: 1.5 s each.
+
+Hello reply, type `0x0002`, 48 bytes. Hardware-verified 2026-11-22 on FW 1.6.24 (and seen in a capture of the official editor); serial number below is a fake one:
+
+```
+B9 03 02 2B 10 | B9 07  00  80 81  B9 03 0C 02 00  B9 03 01 06 18  BC 14 <20 bytes>  82 87 D6 12 00  00
+                        [0] [1]    [2]             [3]             [4]               [5]             [6]
+```
+
+| Item | Value |
+|---|---|
+| 3 | Firmware version as a list of 3 ints: `01 06 18` = **1.6.24** (matches the pedal's own display and the official editor) |
+| 5 | **Serial number**: `82` + **4 bytes** u32 LE (here `87 D6 12 00` = 1234567, shown as `001234567`, 9 digits zero-padded as the official editor shows it). The value matched the official editor's "SN" and is also contained in the USB iSerial string; the USB bcdDevice (`0100`) does not carry the firmware. |
+| 0, 1, 2, 4, 6 | Unknown (`00`; `80 81` = 129; list `0C 02 00`; a 20-byte blob; `00`). |
+
+Note the `82` tag with 4 bytes after it here, where `82` is followed by 2 bytes everywhere else (§3): only with 4 bytes do the 7 items fill the header's size (`2B` = 43) exactly. The app reads items 0–4 with the value encoding and the serial by this rule (`parse_hello`); it shows "TONEX · SN … · FW …" when hovering the connection indicator.
 
 ### 4.2 Request state / state `0x0201`
 
@@ -690,7 +705,7 @@ Knob scaling is linear: `cc = round(v / 10 * 127)` for a 0..10 value (6.9 → 88
 | Full dump `full = 01` | Reply type `0x0203` (§4.3); the app reads the header, body start and name buffer only. The model blob (~30 KB) is not decoded; offsets inside it vary between presets. |
 | Header third field | Host request headers from Builty end in `80 10 01` / `80 10 03`. Under the HW-verified one-byte `80` rule that decodes as `0x10` plus a stray 4th item in a 3-item `B9 03` header (it only made sense when `80` was read as u16: `0x0110` / `0x0310`). The pedal accepts these requests anyway; pedal-originated frames use a literal (`10`, `02`) and no stray byte. Meaning unknown. |
 | State `0x0201` list[1] | Second item of the `B9 02` list: `00` and `01` seen; meaning unknown. |
-| Hello reply | Content not decoded. |
+| Hello reply | Firmware and serial number decoded (§4.1); items 0, 1, 2, 4, 6 unknown; the 4-byte `82` value there is unexplained by §3. |
 | Global config | 19 of the 22 floats identified on hardware (see the table in §4.5); idx 14 unknown, idx 0/1 (exp. calibration) deduced but unexercised. The `0x0206` body after the 22 floats is opaque. |
 | Amp model / cab names | Readable from the full dump's AMP and CAB slots (§4.3, "Body tree"); the app shows them. The summary's metadata strings are empty; only "character" is populated there. |
 | VIR cab model names | Resolved: 40 models (0..39) on FW 1.6.24, see §5 param 25. |

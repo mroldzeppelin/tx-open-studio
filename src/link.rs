@@ -1,5 +1,6 @@
 //! Link state of both connections (serial, MIDI for the tuner), the status bar text and the reconnect logic's pure parts.
 
+use crate::protocol::DeviceInfo;
 use std::time::Duration;
 
 pub(crate) const STATUS_UP: &str = "TONEX PEDAL CONNECTED";
@@ -13,6 +14,20 @@ pub(crate) fn status_text(status: &LinkStatus) -> String {
         LinkStatus::NoAccess(path) => format!("NO ACCESS TO {path} — INSTALL THE UDEV RULE (SEE README)"),
         LinkStatus::Reconnecting => STATUS_RECONNECTING.into(),
     }
+}
+
+/// The connection indicator's hover text: "TONEX · SN 001234567 · FW
+/// 1.6.24", with only the known parts; "" (no hover text) when neither is
+/// known.
+pub(crate) fn device_text(info: &DeviceInfo) -> String {
+    let parts: Vec<String> = [info.serial.as_ref().map(|s| format!("SN {s}")), info.firmware.as_ref().map(|f| format!("FW {f}"))]
+        .into_iter()
+        .flatten()
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("TONEX · {}", parts.join(" · "))
 }
 
 /// How often the reconnect poll looks for the pedal while a link is down.
@@ -165,6 +180,15 @@ impl LinkState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_hover_text_shows_known_parts() {
+        let info = |serial: Option<&str>, firmware: Option<&str>| DeviceInfo { serial: serial.map(Into::into), firmware: firmware.map(Into::into) };
+        assert_eq!(device_text(&info(Some("001234567"), Some("1.6.24"))), "TONEX · SN 001234567 · FW 1.6.24");
+        assert_eq!(device_text(&info(None, Some("1.6.24"))), "TONEX · FW 1.6.24");
+        assert_eq!(device_text(&info(Some("001234567"), None)), "TONEX · SN 001234567");
+        assert_eq!(device_text(&DeviceInfo::default()), "");
+    }
 
     #[test]
     fn link_state_with_and_without_midi() {
